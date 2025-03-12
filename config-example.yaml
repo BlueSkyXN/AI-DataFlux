@@ -1,0 +1,99 @@
+# 全局配置
+global:
+  log:
+    level: info
+    output: console  # console 或 file
+    format: text     # text 或 json
+    file_path: ./logs/universal_ai.log  # 当output=file时有效
+
+# 数据源配置
+datasource:
+  type: excel  # mysql 或 excel
+  concurrency:  # 也可以放在excel或mysql配置下
+    max_workers: 5
+    batch_size: 300
+    save_interval: 300
+    retry_times: 3
+    backoff_factor: 2
+
+# MySQL数据源配置（仅当type=mysql时有效）
+mysql:
+  host: localhost
+  port: 3306
+  user: root
+  password: password
+  database: ai_tasks
+  table_name: tasks
+
+# Excel数据源配置（仅当type=excel时有效）
+excel:
+  input_path: ./data/input.xlsx
+  output_path: ./data/output.xlsx
+
+# 提取字段配置
+columns_to_extract:
+  - question
+  - context
+  - query_type
+
+# 结果写回字段配置（别名映射到实际字段）
+columns_to_write:
+  answer: ai_answer
+  category: ai_category
+  confidence: ai_confidence
+
+# 模型配置
+models:
+  - id: gpt4
+    name: GPT-4
+    model: gpt-4-0125-preview
+    channel_id: openai
+    api_key: sk-xxxxx
+    weight: 3
+    temperature: 0.7
+  - id: claude3
+    name: Claude-3
+    model: claude-3-sonnet-20240229
+    channel_id: anthropic
+    api_key: sk-ant-xxxxx
+    weight: 2
+    temperature: 0.7
+
+# 通道配置
+channels:
+  openai:
+    name: OpenAI官方
+    base_url: https://api.openai.com
+    api_path: /v1/chat/completions
+    timeout: 300
+  anthropic:
+    name: Anthropic官方
+    base_url: https://api.anthropic.com
+    api_path: /v1/messages
+    timeout: 300
+    proxy: http://127.0.0.1:7890
+
+# 提示词配置
+prompt:
+  template: |
+    请根据以下数据进行分析:
+    {record_json}
+    
+    要求:
+    1. 返回JSON格式的回答，包含以下字段: answer, category, confidence
+    2. answer字段为详细的答案内容
+    3. category字段为问题类别，可选值: technical, business, general
+    4. confidence字段为置信度，取值0-100
+  required_fields:
+    - answer
+    - category
+    - confidence
+
+# 字段值验证配置
+validation:
+  enabled: true
+  field_rules:
+    category:
+      - technical
+      - business
+      - general
