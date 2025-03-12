@@ -9,12 +9,15 @@ global:
 # 数据源配置
 datasource:
   type: excel  # mysql 或 excel
-  concurrency:  # 也可以放在excel或mysql配置下
+  concurrency:
     max_workers: 5
     batch_size: 300
     save_interval: 300
     retry_times: 3
     backoff_factor: 2
+    shard_size: 10000     # 默认分片大小
+    min_shard_size: 1000  # 最小分片大小
+    max_shard_size: 50000 # 最大分片大小
 
 # MySQL数据源配置（仅当type=mysql时有效）
 mysql:
