@@ -481,7 +481,7 @@ class MySQLTaskPool(BaseTaskPool):
     MySQL数据源任务池，支持分片加载
     
     逻辑：
-      1. 只有当“所有输入列都非空” 且 “任意输出列为空” 时，才视为未处理任务。
+      1. 只有当"所有输入列都非空" 且 "任意输出列为空" 时，才视为未处理任务。
       2. 如果输入列缺失或为空，则跳过不处理。
       3. 如果所有输出列也都已填充，则视为已处理。
     """
@@ -526,7 +526,7 @@ class MySQLTaskPool(BaseTaskPool):
 
     def _build_unprocessed_condition(self) -> str:
         """
-        构造“未处理”条件：
+        构造"未处理"条件：
           - 输入列均非空
           - 输出列至少有一个为空
         """
@@ -542,7 +542,7 @@ class MySQLTaskPool(BaseTaskPool):
             # 某个输出列为空的条件
             cond = f"`{out_col}` IS NULL OR `{out_col}` = ''"
             output_conditions.append(cond)
-        # “至少一个”为空，需要把它们用 OR 连起来
+        # "至少一个"为空，需要把它们用 OR 连起来
         output_condition_str = "(" + " OR ".join(output_conditions) + ")"
 
         # 汇总
@@ -581,7 +581,7 @@ class MySQLTaskPool(BaseTaskPool):
 
     def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
         """
-        载入一个分片范围内的所有“未处理”记录
+        载入一个分片范围内的所有"未处理"记录
         """
         def _load_shard(conn):
             with self.lock:
@@ -843,7 +843,7 @@ class ExcelTaskPool(BaseTaskPool):
     Excel数据源任务池，支持分片加载。
 
     逻辑：
-      1. 只有当“所有输入列都非空” 且 “至少有一个输出列为空” 时，视为未处理。
+      1. 只有当"所有输入列都非空" 且 "至少有一个输出列为空" 时，视为未处理。
       2. 若输入列为空或缺失则跳过。
       3. 若全部输出列都已填写，则视为已处理，跳过。
     """
@@ -869,7 +869,7 @@ class ExcelTaskPool(BaseTaskPool):
 
     def _filter_unprocessed_indices(self, min_idx: int, max_idx: int) -> List[int]:
         """
-        返回 [min_idx, max_idx] 范围内的所有“未处理”行索引
+        返回 [min_idx, max_idx] 范围内的所有"未处理"行索引
         """
         sub_df = self.df.iloc[min_idx : max_idx + 1]
 
@@ -1266,10 +1266,11 @@ class UniversalAIProcessor:
         # 构建模型Map
         self.model_map = {m.id: m for m in self.models}
 
-        # 加权随机池
+        # 加权随机池 - 只添加权重大于0的模型
         self.models_pool = []
         for model_config in self.models:
-            self.models_pool.extend([model_config] * model_config.weight)
+            if model_config.weight > 0:  # 只有权重大于0的模型才会被添加到池中
+                self.models_pool.extend([model_config] * model_config.weight)
 
         # 创建数据源任务池
         self.task_pool = self._create_task_pool()
@@ -1282,7 +1283,7 @@ class UniversalAIProcessor:
             max_shard_size=self.max_shard_size
         )
 
-        logging.info(f"共加载 {len(self.models)} 个模型，加权池大小: {len(self.models_pool)}")
+        logging.info(f"共加载 {len(self.models)} 个模型，有效模型池大小: {len(self.models_pool)}，权重为0的模型将被忽略")
         logging.info(f"批处理大小: {self.batch_size}, 保存间隔: {self.save_interval}")
 
     def _create_task_pool(self) -> BaseTaskPool:
@@ -1338,6 +1339,10 @@ class UniversalAIProcessor:
         """动态调整模型的权重"""
         adjusted_models = []
         for model_id, model in self.model_map.items():
+            # 跳过权重为0的模型
+            if model.base_weight <= 0:
+                continue
+                
             success_rate = self.dispatcher.get_model_success_rate(model_id)
             avg_response_time = self.dispatcher.get_model_avg_response_time(model_id)
             is_available = self.dispatcher.is_model_available(model_id)
@@ -1358,24 +1363,46 @@ class UniversalAIProcessor:
                 model.weight = new_weight
             adjusted_models.append(model)
 
+        # 重新构建模型池，只包含权重大于0的模型
         self.models_pool = []
         for model in adjusted_models:
-            self.models_pool.extend([model] * model.weight)
+            if model.weight > 0:  # 只有权重大于0的模型才会被添加到池中
+                self.models_pool.extend([model] * model.weight)
 
     def get_available_model_randomly(self, exclude_model_ids=None) -> Optional[ModelConfig]:
+        """
+        随机获取一个可用模型，排除权重为0的模型
+        
+        Args:
+            exclude_model_ids: 要排除的模型ID集合
+            
+        Returns:
+            随机选择的可用模型，如果没有可用模型则返回None
+        """
         if exclude_model_ids is None:
             exclude_model_ids = set()
+        
+        # 获取所有可用的模型ID
         available_model_ids = self.dispatcher.get_available_models(exclude_model_ids)
-        # 限流检查
-        available_model_ids = [m for m in available_model_ids if self.rate_limiter.can_process(m)]
+        
+        # 过滤掉权重为0的模型和不能处理的模型
+        available_model_ids = [mid for mid in available_model_ids 
+                              if mid in self.model_map 
+                              and self.model_map[mid].weight > 0  # 只选择权重大于0的模型
+                              and self.rate_limiter.can_process(mid)]
+        
         if not available_model_ids:
             return None
+        
+        # 构建权重池
         pool = []
         for mid in available_model_ids:
             model = self.model_map[mid]
             pool.extend([model] * model.weight)
+        
         if not pool:
             return None
+            
         return random.choice(pool)
 
     def create_prompt(self, record_data: Dict[str, Any]) -> str:

@@ -54,6 +54,8 @@ models:
     api_key: sk-xxxxx
     weight: 3
     temperature: 0.7
+    safe_rps: 150  # 显式设置 RPS，覆盖默认值
+    
   - id: claude3
     name: Claude-3
     model: claude-3-sonnet-20240229
