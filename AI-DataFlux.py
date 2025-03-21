@@ -1238,10 +1238,11 @@ class UniversalAIProcessor:
         self.batch_size = concurrency_cfg.get("batch_size", 300)
         self.save_interval = concurrency_cfg.get("save_interval", 300)
         self.global_retry_times = concurrency_cfg.get("retry_times", 3)
+        # 添加实例属性，从配置中读取
+        self.backoff_factor = concurrency_cfg.get("backoff_factor", 2)
         self.shard_size = concurrency_cfg.get("shard_size", 10000)
         self.min_shard_size = concurrency_cfg.get("min_shard_size", 1000)
         self.max_shard_size = concurrency_cfg.get("max_shard_size", 50000)
-        backoff_factor = concurrency_cfg.get("backoff_factor", 2)
 
         # 提示词
         prompt_cfg = self.config.get("prompt", {})
@@ -1258,7 +1259,7 @@ class UniversalAIProcessor:
         self.columns_to_write = self.config.get("columns_to_write", {})
 
         # 初始化调度器
-        self.dispatcher = ModelDispatcher(self.models, backoff_factor=backoff_factor)
+        self.dispatcher = ModelDispatcher(self.models, backoff_factor=self.backoff_factor)
         self.rate_limiter = ModelRateLimiter()
         self.rate_limiter.configure(models_cfg)
 
@@ -1474,7 +1475,7 @@ class UniversalAIProcessor:
         log_label = f"记录[{record_id}]"
         prompt = self.create_prompt(row_data)
         
-        # 全局重试循环 - 使用配置文件中的重试次数
+        # 全局重试循环 - 使用配置文件中的retry_times参数
         for global_attempt in range(self.global_retry_times):
             used_model_ids = set()
             
@@ -1514,7 +1515,7 @@ class UniversalAIProcessor:
             
             # 当前轮次尝试完所有可用模型后，仍未成功
             if global_attempt < self.global_retry_times - 1:
-                # 使用退避因子计算等待时间
+                # 使用退避因子计算等待时间 - 现在使用实例属性
                 wait_time = self.backoff_factor ** (global_attempt + 1)
                 # 限制最大等待时间，防止等待过长
                 wait_time = min(wait_time, 60)
