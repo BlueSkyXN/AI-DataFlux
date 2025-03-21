@@ -1473,34 +1473,60 @@ class UniversalAIProcessor:
     async def process_one_record_async(self, record_id: Any, row_data: Dict[str, Any]) -> Dict[str, Any]:
         log_label = f"记录[{record_id}]"
         prompt = self.create_prompt(row_data)
-        used_model_ids = set()
-
-        for attempt in range(self.global_retry_times):
-            model_cfg = self.get_available_model_randomly(used_model_ids)
-            if not model_cfg:
-                logging.error("无可用模型可供处理 (全部退避或失败)")
-                return {"_error": "no_available_model", "_error_type": ErrorType.SYSTEM_ERROR}
-            used_model_ids.add(model_cfg.id)
-            try:
-                content = await self.call_ai_api_async(model_cfg, prompt)
-                parsed = self.extract_json_from_response(content)
-                if "_error" in parsed and parsed.get("_error_type") == ErrorType.CONTENT_ERROR:
-                    # 内容问题 => 不退避，换下一个模型
-                    continue
-                self.dispatcher.mark_model_success(model_cfg.id)
-                parsed["response_excerpt"] = (content[:100] + "...") if len(content) > 100 else content
-                parsed["used_model_id"] = model_cfg.id
-                parsed["used_model_name"] = model_cfg.name
-                logging.info(f"{log_label}: 模型[{model_cfg.name}] 调用成功")
-                return parsed
-            except aiohttp.ClientError as e:
-                logging.warning(f"{log_label}: 模型[{model_cfg.name}]网络异常(API_ERROR): {e}")
-                self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
-            except Exception as e:
-                logging.warning(f"{log_label}: 模型[{model_cfg.name}]调用异常(API_ERROR): {e}")
-                self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
-
-        logging.error(f"{log_label}: 所有模型均尝试失败!")
+        
+        # 全局重试循环 - 使用配置文件中的重试次数
+        for global_attempt in range(self.global_retry_times):
+            used_model_ids = set()
+            
+            # 在当前轮次中尝试所有可用模型
+            while True:
+                model_cfg = self.get_available_model_randomly(used_model_ids)
+                if not model_cfg:
+                    # 当前轮次已尝试所有可用模型
+                    break
+                
+                used_model_ids.add(model_cfg.id)
+                try:
+                    # 调用模型API
+                    content = await self.call_ai_api_async(model_cfg, prompt)
+                    parsed = self.extract_json_from_response(content)
+                    
+                    # 检查JSON解析结果
+                    if "_error" in parsed and parsed.get("_error_type") == ErrorType.CONTENT_ERROR:
+                        # 内容问题，继续尝试下一个模型
+                        logging.warning(f"{log_label}: 模型[{model_cfg.name}]内容解析错误，尝试下一个模型")
+                        continue
+                    
+                    # 调用成功
+                    self.dispatcher.mark_model_success(model_cfg.id)
+                    parsed["response_excerpt"] = (content[:100] + "...") if len(content) > 100 else content
+                    parsed["used_model_id"] = model_cfg.id
+                    parsed["used_model_name"] = model_cfg.name
+                    logging.info(f"{log_label}: 模型[{model_cfg.name}] 调用成功")
+                    return parsed
+                    
+                except aiohttp.ClientError as e:
+                    logging.warning(f"{log_label}: 模型[{model_cfg.name}]网络异常(API_ERROR): {e}")
+                    self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
+                except Exception as e:
+                    logging.warning(f"{log_label}: 模型[{model_cfg.name}]调用异常(API_ERROR): {e}")
+                    self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
+            
+            # 当前轮次尝试完所有可用模型后，仍未成功
+            if global_attempt < self.global_retry_times - 1:
+                # 使用退避因子计算等待时间
+                wait_time = self.backoff_factor ** (global_attempt + 1)
+                # 限制最大等待时间，防止等待过长
+                wait_time = min(wait_time, 60)
+                
+                logging.warning(
+                    f"{log_label}: 第{global_attempt+1}轮所有可用模型均尝试失败，等待{wait_time}秒后开始下一轮重试"
+                )
+                await asyncio.sleep(wait_time)
+                logging.info(f"{log_label}: 等待结束，开始第{global_attempt+2}轮重试")
+        
+        # 所有重试轮次都失败
+        logging.error(f"{log_label}: 经过{self.global_retry_times}轮重试后所有模型均尝试失败!")
         return {"_error": "all_models_failed", "_error_type": ErrorType.CONTENT_ERROR}
 
     async def process_shard_async(self):
