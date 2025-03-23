@@ -1137,6 +1137,9 @@ class ModelConfig:
         self.max_weight = self.weight * 2
         self.temperature = model_dict.get("temperature", 0.7)
 
+        # 添加支持JSON Schema的标志
+        self.supports_json_schema = model_dict.get("supports_json_schema", False)
+
         self.safe_rps = model_dict.get("safe_rps", max(0.5, min(self.weight / 10, 10)))
 
         if not self.id or not self.model or not self.channel_id:
@@ -1248,6 +1251,10 @@ class UniversalAIProcessor:
         prompt_cfg = self.config.get("prompt", {})
         self.prompt_template = prompt_cfg.get("template", "")
         self.required_fields = prompt_cfg.get("required_fields", [])
+        
+        # 从配置中读取是否使用JSON Schema，默认为False
+        self.use_json_schema = prompt_cfg.get("use_json_schema", False)
+        logging.info(f"JSON Schema功能状态: {'启用' if self.use_json_schema else '禁用'}")
 
         # JSON字段验证
         self.validator = JsonValidator()
@@ -1453,17 +1460,55 @@ class UniversalAIProcessor:
         logging.warning(f"无法解析出包含必需字段{self.required_fields}的有效JSON")
         return {"_error": "invalid_json", "_error_type": ErrorType.CONTENT_ERROR}
 
+    def build_json_schema(self) -> Dict[str, Any]:
+        """构建用于Structured Outputs的JSON Schema"""
+        schema = {
+            "type": "object",
+            "properties": {},
+            "required": self.required_fields,
+            "additionalProperties": False
+        }
+        
+        # 为每个必需字段添加属性定义
+        validation_rules = {}
+        if self.validator.enabled and self.validator.field_rules:
+            validation_rules = self.validator.field_rules
+            
+        for field in self.required_fields:
+            if field in validation_rules:
+                # 使用验证规则中的枚举值
+                schema["properties"][field] = {
+                    "type": "string" if all(isinstance(x, str) for x in validation_rules[field]) else "integer",
+                    "enum": validation_rules[field]
+                }
+            else:
+                # 默认为字符串类型
+                schema["properties"][field] = {"type": "string"}
+                
+        return schema
+
     async def call_ai_api_async(self, model_cfg: ModelConfig, prompt: str) -> str:
         url = model_cfg.base_url.rstrip("/") + model_cfg.api_path
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {model_cfg.api_key}"
         }
+        
+        # 构建基本请求有效载荷
         payload = {
             "model": model_cfg.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": model_cfg.temperature
         }
+        
+        # 如果全局启用JSON Schema且当前模型支持，则添加response_format参数
+        if self.use_json_schema and model_cfg.supports_json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "schema": self.build_json_schema()
+            }
+            logging.debug(f"模型[{model_cfg.id}]启用JSON Schema")
+        
         proxy = model_cfg.channel_proxy or None
         timeout = aiohttp.ClientTimeout(
             connect=model_cfg.connect_timeout,
