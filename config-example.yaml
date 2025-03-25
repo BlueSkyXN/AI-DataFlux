@@ -81,6 +81,7 @@ channels:
 
 # 提示词配置
 prompt:
+  use_json_schema: false  # 新增参数：是否启用JSON Schema，默认不启用
   template: |
     请根据以下数据进行分析:
     {record_json}

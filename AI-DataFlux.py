@@ -1507,6 +1507,91 @@ class UniversalAIProcessor:
                 "type": "json_schema",
                 "schema": self.build_json_schema()
             }
+        
+        proxy = model_cfg.channel_proxy or None
+        timeout = aiohttp.ClientTimeout(
+            connect=model_cfg.connect_timeout,
+            total=model_cfg.read_timeout
+        )
+        
+        start_time = time.time()
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload, proxy=proxy) as resp:
+                    if resp.status >= 400:
+                        error_text = await resp.text()
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message=f"HTTP {resp.status}: {error_text}",
+                            headers=resp.headers
+                        )
+                    
+                    # 获取内容类型
+                    content_type = resp.headers.get('Content-Type', '')
+                    
+                    # 读取响应文本
+                    response_text = await resp.text()
+                    
+                    # 尝试解析为JSON，无论内容类型是什么
+                    try:
+                        # 如果内容类型不是JSON，记录警告但尝试解析
+                        if 'application/json' not in content_type:
+                            logging.warning(
+                                f"模型[{model_cfg.id}]返回了非JSON内容类型: {content_type}, "
+                                f"但将尝试解析内容。内容前100字符: {response_text[:100]}"
+                            )
+                        
+                        data = json.loads(response_text)
+                        if "choices" not in data or not data["choices"]:
+                            raise ValueError("AI返回不含choices字段")
+                        content = data["choices"][0]["message"]["content"]
+                        
+                    except json.JSONDecodeError as e:
+                        # JSON解析失败，检查是否为事件流
+                        if 'text/event-stream' in content_type:
+                            logging.info(f"模型[{model_cfg.id}]返回了事件流格式，尝试提取内容")
+                            content = self._extract_content_from_event_stream(response_text)
+                        else:
+                            # 真正的解析失败，记录详细信息
+                            logging.error(
+                                f"模型[{model_cfg.id}]响应无法解析为JSON: {e}, "
+                                f"内容类型: {content_type}, 内容前100字符: {response_text[:100]}"
+                            )
+                            raise ValueError(f"响应无法解析: {e}")
+                    
+                    response_time = time.time() - start_time
+                    self.dispatcher.update_model_metrics(model_cfg.id, response_time, True)
+                    return content
+        except aiohttp.ClientError as e:
+            response_time = time.time() - start_time
+            self.dispatcher.update_model_metrics(model_cfg.id, response_time, False)
+            raise
+        except Exception as e:
+            response_time = time.time() - start_time
+            self.dispatcher.update_model_metrics(model_cfg.id, response_time, False)
+            raise
+
+        url = model_cfg.base_url.rstrip("/") + model_cfg.api_path
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {model_cfg.api_key}"
+        }
+        
+        # 构建基本请求有效载荷
+        payload = {
+            "model": model_cfg.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": model_cfg.temperature
+        }
+        
+        # 如果全局启用JSON Schema且当前模型支持，则添加response_format参数
+        if self.use_json_schema and model_cfg.supports_json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "schema": self.build_json_schema()
+            }
             logging.debug(f"模型[{model_cfg.id}]启用JSON Schema")
         
         proxy = model_cfg.channel_proxy or None
@@ -1542,6 +1627,25 @@ class UniversalAIProcessor:
             response_time = time.time() - start_time
             self.dispatcher.update_model_metrics(model_cfg.id, response_time, False)
             raise
+
+    def _extract_content_from_event_stream(self, event_stream_text: str) -> str:
+        """从事件流文本中提取内容"""
+        full_content = []
+        for line in event_stream_text.split('\n'):
+            line = line.strip()
+            if line.startswith('data:') and not line.endswith('[DONE]'):
+                try:
+                    data_str = line[5:].strip()  # 移除 "data: "
+                    if data_str:
+                        data = json.loads(data_str)
+                        if 'choices' in data and data['choices'] and 'delta' in data['choices'][0]:
+                            delta = data['choices'][0]['delta']
+                            if 'content' in delta:
+                                full_content.append(delta['content'])
+                except json.JSONDecodeError:
+                    continue
+        
+        return ''.join(full_content)
 
     async def process_one_record_async(self, record_id: Any, row_data: Dict[str, Any]) -> Dict[str, Any]:
         log_label = f"记录[{record_id}]"
