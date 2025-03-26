@@ -788,9 +788,8 @@ class FluxApiService:
 
                     # 根据请求是流式还是非流式进行处理
                     if stream:
-                        # !!关键修复!!: await 调用 _handle_streaming_response
-                        # 它将返回内部 generate() 函数创建的异步生成器对象
-                        return await self._handle_streaming_response(resp, model_cfg, start_time)
+                        # 返回异步生成器对象，不需要 await
+                        return self._handle_streaming_response(resp, model_cfg, start_time)
                     else:
                         # 处理非流式响应
                         content_type = resp.headers.get('Content-Type', '').lower()
@@ -877,147 +876,150 @@ class FluxApiService:
 
     async def _handle_streaming_response(self, response: aiohttp.ClientResponse, model_cfg: ModelConfig, start_time: float) -> AsyncIterable[str]:
         """
-        处理流式响应，返回一个异步生成器对象，该对象产生 SSE 格式的字符串。
+        处理流式响应，返回一个异步生成器，该生成器产生 SSE 格式的字符串。
         包含详细日志和错误处理。
         """
         buffer = "" # 用于存储不完整的行
         has_yielded = False # 是否成功产生过至少一个数据块
         chunk_count = 0 # 接收到的块计数
         last_activity_time = time.time() # 上次接收到活动的时间
+        
+        returned_successfully = False # 标记是否接收到了 [DONE]
+        logging.debug(f"[{model_cfg.id}] 开始流式响应生成循环。")
+        
+        # 立即发送一个保持连接的初始消息
+        try:
+            # 发送一个空的SSE注释，保持连接活跃，不影响实际内容
+            yield ": keeping connection alive\n\n"
+            has_yielded = True  # 标记已经有输出，防止连接关闭时标记为早期失败
+            logging.debug(f"[{model_cfg.id}] 已发送初始连接保持消息")
+        except Exception as e:
+            logging.warning(f"[{model_cfg.id}] 发送初始消息失败: {e}")
+        try:
+            # 异步迭代响应内容块
+            async for chunk in response.content.iter_any():
+                chunk_count += 1
+                now = time.time()
+                time_since_last = now - last_activity_time
+                last_activity_time = now
+                # DEBUG 日志记录每个块的接收情况
+                logging.debug(f"[{model_cfg.id}] 收到流块 {chunk_count} (大小:{len(chunk)}字节, 距离上次:{time_since_last:.2f}秒)")
 
-        # 内部异步生成器函数，实际处理流数据
-        async def generate() -> AsyncIterable[str]:
-            nonlocal buffer, has_yielded, chunk_count, last_activity_time
-            returned_successfully = False # 标记是否接收到了 [DONE]
-            logging.debug(f"[{model_cfg.id}] 开始流式响应生成循环。")
-            try:
-                # 异步迭代响应内容块
-                async for chunk in response.content.iter_any():
-                    chunk_count += 1
-                    now = time.time()
-                    time_since_last = now - last_activity_time
-                    last_activity_time = now
-                    # DEBUG 日志记录每个块的接收情况
-                    logging.debug(f"[{model_cfg.id}] 收到流块 {chunk_count} (大小:{len(chunk)}字节, 距离上次:{time_since_last:.2f}秒)")
+                if not chunk:
+                    logging.debug(f"[{model_cfg.id}] 收到空块 {chunk_count}。")
+                    continue # 跳过空块
 
-                    if not chunk:
-                        logging.debug(f"[{model_cfg.id}] 收到空块 {chunk_count}。")
-                        continue # 跳过空块
+                # 解码并添加到缓冲区，处理可能的解码错误
+                try:
+                    decoded_chunk = chunk.decode('utf-8')
+                    buffer += decoded_chunk
+                except UnicodeDecodeError:
+                    buffer += chunk.decode('utf-8', errors='ignore') # 忽略错误字符继续
+                    logging.warning(f"[{model_cfg.id}] 流包含无效UTF-8数据，已忽略。")
 
-                    # 解码并添加到缓冲区，处理可能的解码错误
-                    try:
-                        decoded_chunk = chunk.decode('utf-8')
-                        buffer += decoded_chunk
-                    except UnicodeDecodeError:
-                        buffer += chunk.decode('utf-8', errors='ignore') # 忽略错误字符继续
-                        logging.warning(f"[{model_cfg.id}] 流包含无效UTF-8数据，已忽略。")
+                # 按行分割处理缓冲区内容
+                lines = buffer.split('\n')
+                buffer = lines.pop() # 最后一部分可能不完整，留在缓冲区下次处理
 
-                    # 按行分割处理缓冲区内容
-                    lines = buffer.split('\n')
-                    buffer = lines.pop() # 最后一部分可能不完整，留在缓冲区下次处理
+                for line in lines:
+                    line = line.strip()
+                    if not line: continue # 跳过空行
 
-                    for line in lines:
-                        line = line.strip()
-                        if not line: continue # 跳过空行
-
-                        # 检查是否是 SSE 数据行
-                        if line.startswith('data:'):
-                            data_content = line[len('data:'):].strip()
-                            # 检查是否是结束标记
-                            if data_content == '[DONE]':
-                                logging.info(f"[{model_cfg.id}] 在流块 {chunk_count} 中收到 [DONE] 标记。")
-                                returned_successfully = True
-                                break # 结束内层行处理循环
-                            elif data_content:
-                                # 检查是否是 JSON 格式
-                                if data_content.startswith("{") and data_content.endswith("}"):
-                                    # 产生符合 SSE 格式的输出
-                                    yield f"data: {data_content}\n\n"
-                                    has_yielded = True # 标记已成功产生数据
-                                else:
-                                    # 记录非 JSON 数据块警告
-                                    logging.warning(f"[{model_cfg.id}] 流包含非JSON数据块: {data_content[:100]}...")
-                        else:
-                            # 记录非 'data:' 开头的行 (可能是注释或其他信息)
-                            logging.debug(f"[{model_cfg.id}] 流包含非'data:'行: {line[:100]}...")
-                    # 如果收到了 [DONE]，则跳出外层块处理循环
-                    if returned_successfully:
-                        break
-
-                # 循环结束后记录日志
-                logging.info(f"[{model_cfg.id}] 流式响应生成循环结束。总块数: {chunk_count}。是否收到[DONE]: {returned_successfully}")
-
-                # 处理循环正常结束但缓冲区仍有数据的情况
-                if not returned_successfully and buffer.strip():
-                    line = buffer.strip()
+                    # 检查是否是 SSE 数据行
                     if line.startswith('data:'):
                         data_content = line[len('data:'):].strip()
+                        # 检查是否是结束标记
                         if data_content == '[DONE]':
-                            returned_successfully = True; logging.info(f"[{model_cfg.id}] 在最终缓冲区中收到 [DONE]。")
-                        elif data_content and data_content.startswith("{") and data_content.endswith("}"):
-                              yield f"data: {data_content}\n\n"; has_yielded = True; returned_successfully = True; logging.info(f"[{model_cfg.id}] 成功处理最终缓冲区内容。")
-                        elif data_content: logging.warning(f"[{model_cfg.id}] 流结束时缓冲区剩余无效数据: {data_content[:100]}...")
-                    elif buffer.strip(): logging.warning(f"[{model_cfg.id}] 流结束时缓冲区剩余非'data:'数据: {buffer[:100]}...")
+                            logging.info(f"[{model_cfg.id}] 在流块 {chunk_count} 中收到 [DONE] 标记。")
+                            returned_successfully = True
+                            break # 结束内层行处理循环
+                        elif data_content:
+                            # 检查是否是 JSON 格式
+                            if data_content.startswith("{") and data_content.endswith("}"):
+                                # 产生符合 SSE 格式的输出
+                                yield f"data: {data_content}\n\n"
+                                has_yielded = True # 标记已成功产生数据
+                            else:
+                                # 记录非 JSON 数据块警告
+                                logging.warning(f"[{model_cfg.id}] 流包含非JSON数据块: {data_content[:100]}...")
+                    else:
+                        # 记录非 'data:' 开头的行 (可能是注释或其他信息)
+                        logging.debug(f"[{model_cfg.id}] 流包含非'data:'行: {line[:100]}...")
+                # 如果收到了 [DONE]，则跳出外层块处理循环
+                if returned_successfully:
+                    break
 
-            # --- 细化的异常处理 ---
-            except aiohttp.ClientPayloadError as e: # 读取响应体时出错
-                 logging.error(f"[{model_cfg.id}] 流处理 ClientPayloadError: {e}")
-                 error_payload = {"error": {"message": f"流响应体错误: {e}", "type": "stream_error"}}
-                 try: yield f"data: {json.dumps(error_payload)}\n\n"
-                 except Exception: pass
-                 returned_successfully = False
-            except aiohttp.ClientConnectionError as e: # 连接错误 (可能包含 "Connection closed")
-                 logging.error(f"[{model_cfg.id}] 流处理 ClientConnectionError: {e}")
-                 error_payload = {"error": {"message": f"流连接错误: {e}", "type": "stream_error"}}
-                 try: yield f"data: {json.dumps(error_payload)}\n\n"
-                 except Exception: pass
-                 returned_successfully = False
-            except asyncio.TimeoutError as e: # 读取超时 (sock_read)
-                 logging.error(f"[{model_cfg.id}] 流处理 TimeoutError: {e}")
-                 error_payload = {"error": {"message": f"流读取超时: {e}", "type": "stream_error"}}
-                 try: yield f"data: {json.dumps(error_payload)}\n\n"
-                 except Exception: pass
-                 returned_successfully = False
-            except aiohttp.ClientError as e: # 其他 aiohttp 客户端错误
-                logging.error(f"[{model_cfg.id}] 流处理 ClientError: {e}")
-                error_payload = {"error": {"message": f"流客户端错误: {e}", "type": "stream_error"}}
-                try: yield f"data: {json.dumps(error_payload)}\n\n"
-                except Exception: pass
-                returned_successfully = False
-            except Exception as e: # 未预料的错误
-                logging.exception(f"[{model_cfg.id}] 处理流时发生未知错误", exc_info=e)
-                error_payload = {"error": {"message": f"未知流处理错误: {e}", "type": "internal_stream_error"}}
-                try: yield f"data: {json.dumps(error_payload)}\n\n"
-                except Exception: pass
-                returned_successfully = False
-            finally:
-                 # --- 根据处理结果更新模型状态和指标 ---
-                 response_time = time.time() - start_time
-                 stream_fully_successful = returned_successfully        # 完全成功 = 收到 [DONE]
-                 stream_partially_successful = has_yielded and not returned_successfully # 部分成功 = 输出了数据但在 [DONE] 前出错
-                 stream_failed_early = not has_yielded                # 早期失败 = 未输出任何数据就出错
+            # 循环结束后记录日志
+            logging.info(f"[{model_cfg.id}] 流式响应生成循环结束。总块数: {chunk_count}。是否收到[DONE]: {returned_successfully}")
 
-                 if stream_fully_successful:
-                     self.dispatcher.mark_model_success(model_cfg.id) # 标记完全成功
-                     logging.info(f"[{model_cfg.id}] 流处理完全成功。耗时:{response_time:.2f}s")
-                 elif stream_partially_successful:
-                     # 部分成功视为内容错误，不严厉惩罚模型
-                     self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.CONTENT_ERROR)
-                     logging.warning(f"[{model_cfg.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s")
-                 else: # stream_failed_early
-                     # 早期失败视为 API 错误，触发退避
-                     self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
-                     logging.error(f"[{model_cfg.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s")
+            # 处理循环正常结束但缓冲区仍有数据的情况
+            if not returned_successfully and buffer.strip():
+                line = buffer.strip()
+                if line.startswith('data:'):
+                    data_content = line[len('data:'):].strip()
+                    if data_content == '[DONE]':
+                        returned_successfully = True; logging.info(f"[{model_cfg.id}] 在最终缓冲区中收到 [DONE]。")
+                    elif data_content and data_content.startswith("{") and data_content.endswith("}"):
+                          yield f"data: {data_content}\n\n"; has_yielded = True; returned_successfully = True; logging.info(f"[{model_cfg.id}] 成功处理最终缓冲区内容。")
+                    elif data_content: logging.warning(f"[{model_cfg.id}] 流结束时缓冲区剩余无效数据: {data_content[:100]}...")
+                elif buffer.strip(): logging.warning(f"[{model_cfg.id}] 流结束时缓冲区剩余非'data:'数据: {buffer[:100]}...")
 
-                 # 更新指标，认为只要产生了数据就算某种程度上的成功 (用于计算成功率和平均响应时间)
-                 self.dispatcher.update_model_metrics(model_cfg.id, response_time, stream_fully_successful or stream_partially_successful)
+        # --- 细化的异常处理 ---
+        except aiohttp.ClientPayloadError as e: # 读取响应体时出错
+             logging.error(f"[{model_cfg.id}] 流处理 ClientPayloadError: {e}")
+             error_payload = {"error": {"message": f"流响应体错误: {e}", "type": "stream_error"}}
+             try: yield f"data: {json.dumps(error_payload)}\n\n"
+             except Exception: pass
+             returned_successfully = False
+        except aiohttp.ClientConnectionError as e: # 连接错误 (可能包含 "Connection closed")
+             logging.error(f"[{model_cfg.id}] 流处理 ClientConnectionError: {e}")
+             error_payload = {"error": {"message": f"流连接错误: {e}", "type": "stream_error"}}
+             try: yield f"data: {json.dumps(error_payload)}\n\n"
+             except Exception: pass
+             returned_successfully = False
+        except asyncio.TimeoutError as e: # 读取超时 (sock_read)
+             logging.error(f"[{model_cfg.id}] 流处理 TimeoutError: {e}")
+             error_payload = {"error": {"message": f"流读取超时: {e}", "type": "stream_error"}}
+             try: yield f"data: {json.dumps(error_payload)}\n\n"
+             except Exception: pass
+             returned_successfully = False
+        except aiohttp.ClientError as e: # 其他 aiohttp 客户端错误
+            logging.error(f"[{model_cfg.id}] 流处理 ClientError: {e}")
+            error_payload = {"error": {"message": f"流客户端错误: {e}", "type": "stream_error"}}
+            try: yield f"data: {json.dumps(error_payload)}\n\n"
+            except Exception: pass
+            returned_successfully = False
+        except Exception as e: # 未预料的错误
+            logging.exception(f"[{model_cfg.id}] 处理流时发生未知错误", exc_info=e)
+            error_payload = {"error": {"message": f"未知流处理错误: {e}", "type": "internal_stream_error"}}
+            try: yield f"data: {json.dumps(error_payload)}\n\n"
+            except Exception: pass
+            returned_successfully = False
+        finally:
+             # --- 根据处理结果更新模型状态和指标 ---
+             response_time = time.time() - start_time
+             stream_fully_successful = returned_successfully        # 完全成功 = 收到 [DONE]
+             stream_partially_successful = has_yielded and not returned_successfully # 部分成功 = 输出了数据但在 [DONE] 前出错
+             stream_failed_early = not has_yielded                # 早期失败 = 未输出任何数据就出错
 
-                 # 确保关闭响应连接
-                 if response and not response.closed:
-                     response.close()
+             if stream_fully_successful:
+                 self.dispatcher.mark_model_success(model_cfg.id) # 标记完全成功
+                 logging.info(f"[{model_cfg.id}] 流处理完全成功。耗时:{response_time:.2f}s")
+             elif stream_partially_successful:
+                 # 部分成功视为内容错误，不严厉惩罚模型
+                 self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.CONTENT_ERROR)
+                 logging.warning(f"[{model_cfg.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s")
+             else: # stream_failed_early
+                 # 早期失败视为 API 错误，触发退避
+                 self.dispatcher.mark_model_failed(model_cfg.id, ErrorType.API_ERROR)
+                 logging.error(f"[{model_cfg.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s")
 
-        # 返回内部定义的异步生成器对象
-        return generate()
+             # 更新指标，认为只要产生了数据就算某种程度上的成功 (用于计算成功率和平均响应时间)
+             self.dispatcher.update_model_metrics(model_cfg.id, response_time, stream_fully_successful or stream_partially_successful)
+
+             # 确保关闭响应连接
+             if response and not response.closed:
+                 response.close()
 
     def _extract_content_from_event_stream(self, event_stream_text: str) -> str:
         """从 (意外收到的) 事件流文本中提取内容"""
@@ -1289,7 +1291,18 @@ async def create_chat_completion_endpoint(request: ChatCompletionRequest) -> Res
         result = await service.create_chat_completion(request)
         # 根据结果类型返回不同响应
         if isinstance(result, AsyncIterable): # 流式响应
-             return StreamingResponse(content=result, media_type="text/event-stream")
+             # 添加额外头部和配置，确保保持连接打开
+             headers = {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Transfer-Encoding": "chunked",
+                "X-Accel-Buffering": "no"  # 禁用Nginx缓冲
+             }
+             return StreamingResponse(
+                content=result, 
+                media_type="text/event-stream",
+                headers=headers
+             )
         elif isinstance(result, ChatCompletionResponse): # 非流式响应
              return result
         else: # 内部错误，类型不符预期
