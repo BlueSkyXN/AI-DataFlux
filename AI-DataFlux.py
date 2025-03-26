@@ -1,4 +1,4 @@
-# AI_DataFlux.py (Main Orchestrator - Modified for New Error Handling)
+# AI_DataFlux.py (Main Orchestrator - Modified for Continuous Task Flow)
 
 # --- Standard Imports ---
 import yaml
@@ -35,9 +35,6 @@ class ErrorType:
     API_ERROR = "api_error"       # Error calling Flux-Api.py OR Flux-Api returned non-200 OR Timeout
     CONTENT_ERROR = "content_error" # AI response content parsing/validation failed (Now triggers retry)
     SYSTEM_ERROR = "system_error"   # Internal errors (e.g., data reload failure, unexpected exceptions)
-
-# --- BaseTaskPool ABC ---
-# --- REMOVED - Definition is now in Flux_Data.py ---
 
 
 # --- JsonValidator Class ---
@@ -98,6 +95,7 @@ class JsonValidator:
         if not is_valid:
             logging.debug(f"JSON 字段值验证失败: {errors}")
         return is_valid, errors
+
 
 # --- ShardedTaskManager Class ---
 class ShardedTaskManager:
@@ -554,8 +552,239 @@ class UniversalAIProcessor:
             return {"_error": f"unexpected_error: {str(e)}", "_error_type": ErrorType.SYSTEM_ERROR}
         # --- END MODIFIED METHOD ---
 
+    # --- 替换为新的连续任务流处理方法 ---
+    async def process_shard_async_continuous(self):
+        """连续任务流模式的异步处理方法，避免批次锁定"""
+        if not self.task_manager.initialize():
+            logging.info("无任务或初始化失败。")
+            return
+
+        try:
+            # 创建 TCPConnector 并配置连接限制
+            connector = aiohttp.TCPConnector(
+                limit=self.max_connections,
+                limit_per_host=self.max_connections_per_host
+            )
+            logging.debug(f"创建 aiohttp TCP连接器: limit={self.max_connections}, limit_per_host={self.max_connections_per_host}")
+            
+            # 使用配置好的连接器创建 ClientSession
+            async with aiohttp.ClientSession(connector=connector) as session:
+                current_shard_num = 0
+                
+                # 任务池跟踪和管理变量
+                active_tasks = set()  # 当前活动任务集合
+                max_concurrent = self.batch_size  # 最大并发数，复用原有的 batch_size 配置
+                task_id_map = {}  # 映射 task -> (record_id, data) 用于结果处理
+                results_buffer = {}  # 暂存处理结果，稍后批量更新
+                
+                # 记录处理统计信息
+                processed_in_shard_successfully = 0
+                last_progress_log_time = time.time()  # 上次进度日志时间
+                progress_log_interval = 5.0  # 进度日志间隔（秒）
+                
+                while True:
+                    # 检查是否需要加载新分片
+                    if not self.task_pool.has_tasks() and len(active_tasks) == 0:
+                        if not self.task_manager.load_next_shard():
+                            logging.info("所有分片加载完毕。")
+                            break
+                        current_shard_num += 1
+                        processed_in_shard_successfully = 0
+                        logging.info(f"--- 开始处理分片 {current_shard_num}/{self.task_manager.total_shards} ---")
+                    
+                    # 填充任务池至最大并发数
+                    space_available = max_concurrent - len(active_tasks)
+                    if space_available > 0 and self.task_pool.has_tasks():
+                        # 获取任务，一次最多获取可用空间数量
+                        fetch_count = min(space_available, self.task_pool.get_remaining_count())
+                        tasks_batch = self.task_pool.get_task_batch(fetch_count)
+                        
+                        if tasks_batch:
+                            for record_id, data in tasks_batch:
+                                # 为每个任务创建异步任务并添加到活动集合
+                                task = asyncio.create_task(
+                                    self.process_one_record_async(session, record_id, data)
+                                )
+                                # 保存任务ID映射关系用于后续处理
+                                task_id_map[task] = (record_id, data)
+                                active_tasks.add(task)
+                            
+                            logging.debug(f"分片 {current_shard_num}: 填充 {len(tasks_batch)} 个新任务到任务池，当前活动任务：{len(active_tasks)}")
+                    
+                    # 如果没有活动任务，则可能是等待加载新分片或已经处理完成
+                    if not active_tasks:
+                        await asyncio.sleep(0.1)  # 短暂等待
+                        continue
+                    
+                    # 等待任一任务完成或短暂超时
+                    done, pending = await asyncio.wait(
+                        active_tasks,
+                        timeout=1.0,  # 短暂超时以便定期检查和日志
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # 更新活动任务集合
+                    active_tasks = pending
+                    
+                    # 处理已完成任务
+                    api_error_in_batch = False  # 跟踪是否有API错误需要暂停
+                    tasks_to_retry = []  # 需要重试的任务
+                    
+                    for completed_task in done:
+                        try:
+                            result = completed_task.result()
+                            record_id, original_data = task_id_map.pop(completed_task)
+                            
+                            # 根据结果类型处理
+                            if isinstance(result, dict):
+                                error_type = result.get("_error_type")
+                                
+                                if error_type == ErrorType.API_ERROR:
+                                    api_error_in_batch = True
+                                    logging.warning(f"记录[{record_id}] API错误: {result.get('_error')}，将重试")
+                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                
+                                elif error_type == ErrorType.CONTENT_ERROR:
+                                    logging.warning(f"记录[{record_id}] 内容错误: {result.get('_error')}，将重试")
+                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                
+                                elif error_type == ErrorType.SYSTEM_ERROR:
+                                    logging.error(f"记录[{record_id}] 系统错误: {result.get('_error')}，将重试")
+                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                
+                                else:
+                                    # 成功处理，将结果添加到更新缓冲区
+                                    results_buffer[record_id] = result
+                                    if "_error" not in result:
+                                        processed_in_shard_successfully += 1
+                                        self.task_manager.total_processed_successfully += 1
+                                        logging.debug(f"记录[{record_id}] 处理成功")
+                            
+                            else:
+                                # 未知结果类型
+                                logging.error(f"记录[{record_id}] 返回未知类型结果: {type(result)}，标记为系统错误")
+                                results_buffer[record_id] = {
+                                    "_error": f"unknown_result_type: {type(result).__name__}",
+                                    "_error_type": ErrorType.SYSTEM_ERROR
+                                }
+                        
+                        except Exception as e:
+                            # 任务执行过程中发生异常
+                            try:
+                                record_id, original_data = task_id_map.pop(completed_task, (None, None))
+                                if record_id is not None:
+                                    logging.error(f"记录[{record_id}] 处理时发生异常: {e}", exc_info=True)
+                                    tasks_to_retry.append((record_id, None))
+                                else:
+                                    logging.error(f"任务执行异常，无法确定记录ID: {e}", exc_info=True)
+                            except Exception as inner_e:
+                                logging.error(f"处理任务异常时又发生异常: {inner_e}", exc_info=True)
+                    
+                    # 处理 API 错误暂停逻辑（如果有API错误）
+                    if api_error_in_batch:
+                        now = time.time()
+                        if now >= self.last_api_pause_end_time:
+                            logging.warning(f"检测到API错误，全局暂停 {self.api_pause_duration} 秒...")
+                            await asyncio.sleep(self.api_pause_duration)
+                            self.last_api_pause_end_time = time.time() + self.api_error_trigger_window
+                            logging.info(f"全局暂停结束，错误触发窗口将持续到 {datetime.fromtimestamp(self.last_api_pause_end_time).strftime('%H:%M:%S')}")
+                        else:
+                            logging.info(f"检测到API错误，但当前仍在错误触发窗口内（直到 {datetime.fromtimestamp(self.last_api_pause_end_time).strftime('%H:%M:%S')}），本次不暂停。")
+                    
+                    # 重新加载需要重试的任务数据（使用线程池以避免阻塞）
+                    if tasks_to_retry:
+                        logging.info(f"重新加载 {len(tasks_to_retry)} 个任务的数据...")
+                        loop = asyncio.get_running_loop()
+                        reload_futures = [
+                            loop.run_in_executor(None, lambda rid=rid: self.task_pool.reload_task_data(rid))
+                            for rid, _ in tasks_to_retry
+                        ]
+                        reloaded_datas = await asyncio.gather(*reload_futures, return_exceptions=True)
+                        
+                        retry_success_count = 0
+                        for i, reloaded_result in enumerate(reloaded_datas):
+                            original_rid, _ = tasks_to_retry[i]
+                            
+                            if isinstance(reloaded_result, Exception):
+                                logging.error(f"记录[{original_rid}] 数据重载失败: {reloaded_result}")
+                                results_buffer[original_rid] = {
+                                    "_error": f"reload_failed: {reloaded_result}",
+                                    "_error_type": ErrorType.SYSTEM_ERROR
+                                }
+                            elif reloaded_result is None:
+                                logging.error(f"记录[{original_rid}] 数据重载返回None")
+                                results_buffer[original_rid] = {
+                                    "_error": "reload_returned_none",
+                                    "_error_type": ErrorType.SYSTEM_ERROR
+                                }
+                            else:
+                                self.task_pool.add_task_to_front(original_rid, reloaded_result)
+                                retry_success_count += 1
+                        
+                        if retry_success_count > 0:
+                            logging.info(f"成功将 {retry_success_count} 个任务放回队列头部重试")
+                    
+                    # 批量更新结果（如果有）
+                    if results_buffer:
+                        results_count = len(results_buffer)
+                        success_count = sum(1 for r in results_buffer.values() if "_error" not in r)
+                        
+                        logging.info(f"更新 {results_count} 条记录结果 ({success_count} 成功, {results_count - success_count} 失败)...")
+                        try:
+                            # 调用任务池的更新方法 (Excel会根据save_interval决定是否写入文件)
+                            self.task_pool.update_task_results(results_buffer)
+                            results_buffer = {}  # 清空缓冲区
+                        except Exception as update_e:
+                            logging.error(f"更新结果时发生错误: {update_e}", exc_info=True)
+                    
+                    # 定期记录进度
+                    now = time.time()
+                    if now - last_progress_log_time >= progress_log_interval:
+                        remaining = self.task_pool.get_remaining_count()
+                        active_count = len(active_tasks)
+                        
+                        logging.info(
+                            f"分片 {current_shard_num} 进度: 已处理={processed_in_shard_successfully}, "
+                            f"活动任务={active_count}, 待处理={remaining}, "
+                            f"总进度={self.task_manager.total_processed_successfully}/{self.task_manager.total_estimated}"
+                        )
+                        
+                        # 更新性能指标和监控内存
+                        if processed_in_shard_successfully > 0:
+                            elapsed = time.time() - self.task_manager.start_time
+                            if elapsed > 0:
+                                rate = processed_in_shard_successfully / elapsed
+                                self.task_manager.processing_metrics['records_per_second'] = rate
+                                logging.debug(f"当前处理速率: {rate:.2f} 记录/秒")
+                        
+                        last_progress_log_time = now
+                    
+                    # 监控内存使用情况
+                    self.task_manager.monitor_memory_usage()
+                
+                # 处理最后的结果缓冲区（如果有）
+                if results_buffer:
+                    try:
+                        logging.info(f"更新最后 {len(results_buffer)} 条记录结果...")
+                        self.task_pool.update_task_results(results_buffer)
+                    except Exception as final_e:
+                        logging.error(f"更新最终结果时发生错误: {final_e}", exc_info=True)
+                
+                # 所有分片处理完成
+                logging.info("所有分片处理循环结束。")
+                
+        except Exception as e:
+            logging.error(f"处理过程中发生未捕获异常: {e}", exc_info=True)
+            raise
+        finally:
+            # 确保最终清理
+            self.task_manager.finalize()
+
+    # --- 更新原始的批处理方法（保留用于兼容）---
     async def process_shard_async(self):
-        """Manages the asynchronous processing of all tasks, shard by shard."""
+        """原始的基于批次的异步处理方法（保留用于兼容）。"""
+        logging.warning("使用旧版基于批次的处理方法 process_shard_async()，建议使用新版的连续流处理方法。")
+        
         if not self.task_manager.initialize():
             logging.info("无任务或初始化失败。")
             return
@@ -725,20 +954,26 @@ class UniversalAIProcessor:
             self.task_manager.finalize()
             raise
             
+    # --- 更新主处理方法，使用新的连续流处理模式 ---
     def process_tasks(self):
-        """Entry point to start the asynchronous processing workflow."""
+        """入口点函数，启动异步处理工作流。"""
         proc_start_time = time.time()
         logging.info("开始执行 AI 数据处理任务...")
-        try: asyncio.run(self.process_shard_async())
+        try:
+            # 使用新的连续流处理方法替代原有的批处理方法
+            asyncio.run(self.process_shard_async_continuous())
         except KeyboardInterrupt:
             logging.warning("检测到用户中断。尝试优雅退出...")
-            if hasattr(self, 'task_manager') and self.task_manager: self.task_manager.finalize()
+            if hasattr(self, 'task_manager') and self.task_manager:
+                self.task_manager.finalize()
             logging.info("程序已中断。")
         except Exception as e:
             logging.critical(f"执行过程中发生未处理异常: {e}", exc_info=True)
-            if hasattr(self, 'task_manager') and self.task_manager: self.task_manager.finalize()
+            if hasattr(self, 'task_manager') and self.task_manager:
+                self.task_manager.finalize()
             raise
-        finally: logging.info(f"任务执行结束。总耗时: {time.time() - proc_start_time:.2f} 秒。")
+        finally:
+            logging.info(f"任务执行结束。总耗时: {time.time() - proc_start_time:.2f} 秒。")
 
 
 # --- Command Line Interface ---
