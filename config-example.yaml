@@ -1,106 +1,154 @@
 # 全局配置
 global:
   log:
-    level: info
-    output: console  # console 或 file
-    format: text     # text 或 json
-    file_path: ./logs/universal_ai.log  # 当output=file时有效
+    level: "info"         # 日志级别: debug, info, warning, error
+    format: "text"        # 日志格式: text 或 json
+    output: "console"     # 日志输出: console 或 file
+    file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
+  flux_api_url: "http://127.0.0.1:8787/v1/chat/completions"  # Flux API端点URL
 
-# 数据源配置
+# 数据源类型配置
 datasource:
-  type: excel  # mysql 或 excel
-  concurrency:
-    max_workers: 5
-    batch_size: 300
-    save_interval: 300
-    retry_times: 3
-    backoff_factor: 2
+  type: excel   # 数据源类型: mysql 或 excel
+  concurrency:  # 并发处理配置
+    max_workers: 5        # 工作线程数上限
+    batch_size: 100       # 批处理大小（每批处理的任务数）
+    save_interval: 300    # Excel文件保存间隔（秒）
     shard_size: 10000     # 默认分片大小
     min_shard_size: 1000  # 最小分片大小
     max_shard_size: 50000 # 最大分片大小
+    api_pause_duration: 2.0         # API错误时全局暂停秒数
+    api_error_trigger_window: 2.0   # 多少秒内的API错误才会触发暂停
+    max_connections: 1000           # aiohttp的最大并发连接数
+    max_connections_per_host: 0     # 对每个主机的最大并发连接数（0表示无限制）
 
 # MySQL数据源配置（仅当type=mysql时有效）
 mysql:
-  host: localhost
+  host: "localhost"
   port: 3306
-  user: root
-  password: password
-  database: ai_tasks
-  table_name: tasks
+  user: "root"
+  password: "your_password"
+  database: "ai_tasks"
+  table_name: "tasks"
 
 # Excel数据源配置（仅当type=excel时有效）
 excel:
-  input_path: ./data/input.xlsx
-  output_path: ./data/output.xlsx
+  input_path: "./data/input.xlsx"
+  output_path: "./data/output.xlsx"
 
-# 提取字段配置
+# 需要从表中提取的字段
 columns_to_extract:
-  - question
-  - context
-  - query_type
+  - "question"
+  - "context"
 
-# 结果写回字段配置（别名映射到实际字段）
+# 需要写回表的字段(别名->真实字段名)
 columns_to_write:
-  answer: ai_answer
-  category: ai_category
-  confidence: ai_confidence
-
-# 模型配置
-models:
-  - id: gpt4
-    name: GPT-4
-    model: gpt-4-0125-preview
-    channel_id: openai
-    api_key: sk-xxxxx
-    weight: 3
-    temperature: 0.7
-    safe_rps: 150  # 显式设置 RPS，覆盖默认值
-    supports_json_schema: true  # 模型支持JSON Schema
-
-  - id: claude3
-    name: Claude-3
-    model: claude-3-sonnet-20240229
-    channel_id: anthropic
-    api_key: sk-ant-xxxxx
-    weight: 2
-    temperature: 0.7
-
-# 通道配置
-channels:
-  openai:
-    name: OpenAI官方
-    base_url: https://api.openai.com
-    api_path: /v1/chat/completions
-    timeout: 300
-  anthropic:
-    name: Anthropic官方
-    base_url: https://api.anthropic.com
-    api_path: /v1/messages
-    timeout: 300
-    proxy: http://127.0.0.1:7890
-
-# 提示词配置
-prompt:
-  use_json_schema: false  # 新增参数：是否启用JSON Schema，默认不启用
-  template: |
-    请根据以下数据进行分析:
-    {record_json}
-    
-    要求:
-    1. 返回JSON格式的回答，包含以下字段: answer, category, confidence
-    2. answer字段为详细的答案内容
-    3. category字段为问题类别，可选值: technical, business, general
-    4. confidence字段为置信度，取值0-100
-  required_fields:
-    - answer
-    - category
-    - confidence
+  answer: "ai_answer"
+  category: "ai_category" 
+  confidence: "ai_confidence"
+  sentiment: "ai_sentiment"
 
 # 字段值验证配置
 validation:
   enabled: true
   field_rules:
     category:
-      - technical
-      - business
-      - general
+      - "technical"
+      - "business"
+      - "general"
+    sentiment:
+      - "positive"
+      - "neutral"
+      - "negative"
+
+# 提示词配置
+prompt:
+  required_fields:
+    - "answer"
+    - "category"
+    - "confidence"
+    - "sentiment"
+  use_json_schema: true  # 是否启用JSON Schema
+  model: "auto"          # 使用的AI模型，auto表示自动选择
+  temperature: 0.3       # 模型温度参数（0-1之间）
+  template: |
+    请分析以下数据并提供专业的回答:
+
+    {record_json}
+    
+    系统要求:
+    1. 请详细分析问题和上下文，提供准确、有深度的回答
+    2. 回答应专业、清晰、有条理，避免冗余内容
+    3. 必须返回JSON格式的结果，包含以下字段:
+       - answer: 详细的回答内容
+       - category: 问题类别，可选值为 "technical"、"business"、"general"
+       - confidence: 置信度评分，范围0-100的整数
+       - sentiment: 情感倾向，可选值为 "positive"、"neutral"、"negative"
+    
+    格式示例:
+    {
+      "answer": "这里是详细的回答内容...",
+      "category": "technical",
+      "confidence": 95,
+      "sentiment": "neutral"
+    }
+    
+    请确保回答是JSON格式，且仅包含JSON内容，不需要额外的解释文字。
+
+# 模型配置
+models:
+  - id: 1
+    name: "model-1"
+    model: "gpt-4-turbo"
+    channel_id: "1"
+    api_key: "your_api_key_1"
+    timeout: 300
+    weight: 10
+    temperature: 0.3
+    safe_rps: 5  # 每秒安全请求数
+    supports_json_schema: true
+
+  - id: 2
+    name: "model-2"
+    model: "claude-3-opus"
+    channel_id: "2"
+    api_key: "your_api_key_2"
+    timeout: 300
+    weight: 5
+    temperature: 0.3
+    safe_rps: 3
+    supports_json_schema: true
+
+  - id: 3
+    name: "model-3"
+    model: "llama-3-70b"
+    channel_id: "3"
+    api_key: "your_api_key_3"
+    timeout: 300
+    weight: 3
+    temperature: 0.3
+    safe_rps: 10
+    supports_json_schema: false
+
+# 通道配置
+channels:
+  "1":
+    name: "openai-api"
+    base_url: "https://api.openai.com"
+    api_path: "/v1/chat/completions"
+    timeout: 300
+    proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
+
+  "2":
+    name: "anthropic-api"
+    base_url: "https://api.anthropic.com"
+    api_path: "/v1/messages"
+    timeout: 300
+    proxy: ""
+
+  "3":
+    name: "local-api"
+    base_url: "http://localhost:8000"
+    api_path: "/v1/chat/completions"
+    timeout: 300
+    proxy: ""
