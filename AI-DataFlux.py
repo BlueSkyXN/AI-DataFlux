@@ -551,6 +551,142 @@ class UniversalAIProcessor:
 
     async def process_shard_async(self):
         """Manages the asynchronous processing of all tasks, shard by shard."""
+        if not self.task_manager.initialize():
+            logging.info("无任务或初始化失败。")
+            return
+
+        async with aiohttp.ClientSession() as session:
+            current_shard_num = 0
+            while True:
+                if not self.task_manager.load_next_shard():
+                    logging.info("所有分片加载完毕。")
+                    break
+                current_shard_num += 1
+                processed_in_shard_successfully = 0
+
+                while self.task_pool.has_tasks():
+                    batch_size = min(self.batch_size, self.task_pool.get_remaining_count())
+                    tasks_batch = self.task_pool.get_task_batch(batch_size)
+                    if not tasks_batch: break
+
+                    logging.info(f"分片 {current_shard_num}: 处理批次 {len(tasks_batch)} 个任务...")
+                    batch_start_time = time.time()
+                    coros = [self.process_one_record_async(session, rid, data) for rid, data in tasks_batch]
+                    results = await asyncio.gather(*coros, return_exceptions=True)
+
+                    batch_results_to_update: Dict[Any, Dict[str, Any]] = {}
+                    tasks_to_retry: List[Tuple[Any, Optional[Dict[str, Any]]]] = [] # Store (id, reloaded_data or None)
+                    api_error_in_batch = False # Flag if any API error occurred in this batch
+
+                    for i, result in enumerate(results):
+                        record_id, _ = tasks_batch[i]
+                        task_result_status = "UNKNOWN" # For logging
+
+                        if isinstance(result, Exception):
+                            logging.error(f"记录[{record_id}] 异常: {result}", exc_info=result)
+                            tasks_to_retry.append((record_id, None)) # Mark for reload later
+                            task_result_status = "SYSTEM_RETRY"
+                        elif isinstance(result, dict):
+                            etype = result.get("_error_type")
+                            if etype == ErrorType.API_ERROR:
+                                api_error_in_batch = True # Signal that a pause might be needed
+                                logging.warning(f"记录[{record_id}] API错误: {result.get('_error')}. 重试并可能暂停。")
+                                tasks_to_retry.append((record_id, None))
+                                task_result_status = "API_RETRY"
+                            elif etype == ErrorType.CONTENT_ERROR:
+                                # *** NEW: Content error also retries ***
+                                logging.warning(f"记录[{record_id}] 内容错误: {result.get('_error')}. 重试。")
+                                tasks_to_retry.append((record_id, None))
+                                task_result_status = "CONTENT_RETRY"
+                            elif etype == ErrorType.SYSTEM_ERROR:
+                                logging.error(f"记录[{record_id}] 系统错误: {result.get('_error')}. 重试。")
+                                tasks_to_retry.append((record_id, None))
+                                task_result_status = "SYSTEM_RETRY"
+                            else: # Success
+                                batch_results_to_update[record_id] = result
+                                task_result_status = "SUCCESS"
+                        else: # Unknown result
+                             batch_results_to_update[record_id] = {"_error": "unknown_result_type", "_error_type": ErrorType.SYSTEM_ERROR}
+                             logging.error(f"记录[{record_id}] 返回未知类型结果: {type(result)}. 标记失败。")
+                             task_result_status = "FAILED_UNKNOWN"
+
+                        logging.debug(f"记录[{record_id}] 状态: {task_result_status}")
+
+                    # --- Handle API Error Pause (if triggered) ---
+                    if api_error_in_batch:
+                        now = time.time()
+                        # --- CORRECTED Pause Logic: Check against trigger window ---
+                        if now >= self.last_api_pause_end_time: # Only pause if not already in a pause triggered recently
+                             logging.warning(f"检测到API错误，全局暂停 {self.api_pause_duration} 秒...")
+                             await asyncio.sleep(self.api_pause_duration)
+                             # Set the end time for the *next* potential trigger window, not the end of the current pause.
+                             self.last_api_pause_end_time = time.time() + self.api_error_trigger_window
+                             logging.info(f"全局暂停结束，错误触发窗口将持续到 {datetime.fromtimestamp(self.last_api_pause_end_time).strftime('%H:%M:%S')}")
+                        else:
+                             logging.info(f"检测到API错误，但当前仍在错误触发窗口内（直到 {datetime.fromtimestamp(self.last_api_pause_end_time).strftime('%H:%M:%S')}），本次不暂停。")
+                        # --- END CORRECTED Pause Logic ---
+
+
+                    # --- Reload data for tasks to retry ---
+                    if tasks_to_retry:
+                        logging.info(f"分片 {current_shard_num}: 重新加载 {len(tasks_to_retry)} 个任务的数据...")
+                        # --- MODIFICATION START: Using run_in_executor ---
+                        loop = asyncio.get_running_loop()
+                        reload_futures = [
+                            loop.run_in_executor(None, functools.partial(self.task_pool.reload_task_data, rid))
+                            for rid, _ in tasks_to_retry
+                        ]
+                        reloaded_datas = await asyncio.gather(*reload_futures, return_exceptions=True)
+                        # --- MODIFICATION END ---
+
+                        final_retry_queue: List[Tuple[Any, Dict[str, Any]]] = []
+                        for i, reloaded_result in enumerate(reloaded_datas):
+                             original_rid, _ = tasks_to_retry[i]
+                             # Check if the result is an exception OR None (reload failed)
+                             if isinstance(reloaded_result, Exception) or reloaded_result is None:
+                                  error_info = str(reloaded_result) if isinstance(reloaded_result, Exception) else "返回None"
+                                  logging.error(f"记录[{original_rid}] 数据重载失败，无法重试。错误: {error_info}")
+                                  batch_results_to_update[original_rid] = {"_error": f"reload_failed: {error_info}", "_error_type": ErrorType.SYSTEM_ERROR}
+                             elif isinstance(reloaded_result, dict): # Check it's a dict
+                                  final_retry_queue.append((original_rid, reloaded_result))
+                             else: # Unexpected return type from reload
+                                  logging.error(f"记录[{original_rid}] 数据重载返回意外类型: {type(reloaded_result)}。无法重试。")
+                                  batch_results_to_update[original_rid] = {"_error": f"reload_returned_unexpected_type: {type(reloaded_result).__name__}", "_error_type": ErrorType.SYSTEM_ERROR}
+
+                        # Add successfully reloaded tasks back to the front
+                        if final_retry_queue:
+                            logging.info(f"分片 {current_shard_num}: 将 {len(final_retry_queue)} 个重载成功的任务放回队列...")
+                            for rid, rdata in reversed(final_retry_queue):
+                                 self.task_pool.add_task_to_front(rid, rdata)
+
+                    # --- Update results for successful / finally failed tasks ---
+                    if batch_results_to_update:
+                        success_count = sum(1 for r in batch_results_to_update.values() if "_error" not in r)
+                        final_fail_count = len(batch_results_to_update) - success_count
+                        logging.info(f"分片 {current_shard_num}: 更新 {len(batch_results_to_update)} 条记录结果 ({success_count} 成功, {final_fail_count} 最终失败)...")
+                        try:
+                            self.task_pool.update_task_results(batch_results_to_update)
+                            processed_in_shard_successfully += success_count
+                            self.task_manager.total_processed_successfully += success_count
+                        except Exception as update_e:
+                             logging.error(f"分片 {current_shard_num}: 更新结果时错误: {update_e}", exc_info=True)
+
+                    # --- Log Batch Progress ---
+                    batch_time = time.time() - batch_start_time
+                    retry_count_this_batch = len(tasks_to_retry) # Total attempts to retry
+                    self.task_manager.update_processing_metrics(success_count, batch_time) # Update metrics based on success
+                    remaining = self.task_pool.get_remaining_count()
+                    logging.info(f"分片 {current_shard_num} 批处理: 成={success_count}, 终败={final_fail_count}, 重试={retry_count_this_batch}. "
+                                 f"耗时={batch_time:.2f}s ({self.task_manager.processing_metrics['records_per_second']:.2f} rec/s). 剩={remaining}. "
+                                 f"总={self.task_manager.total_processed_successfully}/{self.task_manager.total_estimated}.")
+                    self.task_manager.monitor_memory_usage()
+
+                logging.info(f"--- 分片 {current_shard_num} 处理完毕 ---")
+
+        logging.info("所有分片处理循环结束。")
+        self.task_manager.finalize()
+        
+        """Manages the asynchronous processing of all tasks, shard by shard."""
         if not self.task_manager.initialize(): logging.info("无任务或初始化失败。"); return
 
         async with aiohttp.ClientSession() as session:
