@@ -7,7 +7,6 @@ import pandas as pd
 from collections import defaultdict
 from typing import Dict, Any, List, Tuple, Optional, Union
 from abc import ABC, abstractmethod
-import functools
 
 # --- Conditional Import for MySQL ---
 try:
@@ -663,19 +662,14 @@ if EXCEL_ENABLED:
 
         def _save_excel(self):
             """
-            Saves the DataFrame to the output Excel file with backup and temp file strategy.
-            Handles potential errors during saving and attempts recovery/cleanup.
+            简单地将 DataFrame 保存到输出 Excel 文件，直接覆盖。
+            注意：这种方法在保存过程中如果中断，可能导致文件损坏且无备份。
             """
-            backup_path = self.output_excel + ".bak"
-            temp_path = self.output_excel + ".tmp" # Use a temporary file for the initial save
-
-            logging.info(f"正在尝试将 DataFrame 保存到: {self.output_excel} (通过临时文件: {temp_path})")
-
-            # --- Step 1: Save DataFrame to a temporary file ---
+            logging.info(f"正在尝试直接保存 DataFrame 到: {self.output_excel}")
             try:
-                # Acquire lock only during the actual save operation
+                # 获取锁以确保在保存期间 DataFrame 不被修改
                 with self.lock:
-                    # Ensure the output directory exists
+                    # 确保输出目录存在
                     output_dir = os.path.dirname(self.output_excel)
                     if output_dir and not os.path.exists(output_dir):
                         try:
@@ -683,87 +677,20 @@ if EXCEL_ENABLED:
                             logging.info(f"已创建输出目录: {output_dir}")
                         except OSError as e:
                             logging.error(f"创建输出目录 {output_dir} 失败: {e}", exc_info=True)
-                            # Decide if this is fatal or if saving to current dir is acceptable
-                            # For now, raise the error as saving might fail anyway.
+                            # 如果目录创建失败，后续写入很可能也会失败，直接抛出异常
                             raise IOError(f"无法创建输出目录 {output_dir}") from e
 
-                    # --- MODIFICATION: Remove explicit engine='openpyxl' ---
-                    # Let pandas infer the engine based on the FINAL output path extension,
-                    # or use the default engine for the temp file.
-                    # self.df.to_excel(temp_path, index=False, engine='openpyxl')
-                    self.df.to_excel(temp_path, index=False) # Use default engine or auto-detection
-                    # --- END MODIFICATION ---
-                    logging.debug(f"DataFrame 已成功写入临时文件: {temp_path}")
+                    # 直接写入目标文件，覆盖已有文件
+                    self.df.to_excel(self.output_excel, index=False, engine='openpyxl') # 可以保留 engine 或移除
+                    logging.info(f"DataFrame 已成功保存到: {self.output_excel}")
 
             except Exception as e:
-                logging.error(f"写入临时 Excel 文件 {temp_path} 失败: {e}", exc_info=True)
-                # Clean up the potentially corrupted temp file if it exists
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                        logging.debug(f"已清理失败的临时文件: {temp_path}")
-                    except Exception as rm_err:
-                        logging.warning(f"清理失败的临时文件 {temp_path} 时出错: {rm_err}")
-                # Do not proceed with rename/backup, re-raise or return to indicate failure
-                # Re-raising makes the failure more explicit to the caller (update_task_results)
-                raise IOError(f"无法将数据写入临时文件 {temp_path}") from e
-
-            # --- Step 2: If temp save successful, perform atomic rename ---
-            try:
-                # Use lock again for the critical rename operations for consistency
-                with self.lock:
-                    # Rename existing output file to backup file (if it exists)
-                    if os.path.exists(self.output_excel):
-                        try:
-                            os.replace(self.output_excel, backup_path) # Atomic replace if possible
-                            logging.debug(f"已将现有文件重命名为备份: {backup_path}")
-                        except OSError as e:
-                            # Handle potential issues with renaming (e.g., permissions, file in use)
-                            logging.error(f"将现有文件 {self.output_excel} 重命名为备份 {backup_path} 失败: {e}", exc_info=True)
-                            # If backup fails, should we stop? Yes, it's safer not to overwrite without backup.
-                            raise IOError(f"无法创建备份文件 {backup_path}") from e
-
-                    # Rename temporary file to the final output file
-                    try:
-                        os.replace(temp_path, self.output_excel) # Atomic replace if possible
-                        logging.info(f"DataFrame 已成功保存到: {self.output_excel}")
-                    except OSError as e:
-                         # Handle potential issues with the final rename
-                         logging.error(f"将临时文件 {temp_path} 重命名为 {self.output_excel} 失败: {e}", exc_info=True)
-                         # Attempt to restore the backup if the final rename failed
-                         if os.path.exists(backup_path):
-                             logging.warning(f"尝试从备份 {backup_path} 恢复原始文件...")
-                             try:
-                                 os.replace(backup_path, self.output_excel)
-                                 logging.info(f"已成功从备份恢复文件到 {self.output_excel}")
-                             except OSError as restore_err:
-                                 logging.error(f"从备份 {backup_path} 恢复文件失败: {restore_err}. 文件可能已损坏或丢失！")
-                         # Raise error after attempting recovery
-                         raise IOError(f"无法将临时文件重命名为最终输出文件 {self.output_excel}") from e
-
-                    # --- Step 3: Clean up backup file (only if Step 2 renaming was fully successful) ---
-                    if os.path.exists(backup_path):
-                        try:
-                            os.remove(backup_path)
-                            logging.debug(f"已成功删除备份文件: {backup_path}")
-                        except Exception as rm_backup_err:
-                            # Failure to remove backup is usually non-critical
-                            logging.warning(f"删除备份文件 {backup_path} 失败: {rm_backup_err}")
-
-            except Exception as e:
-                 # Catch any unexpected errors during the locked rename/backup section
-                 logging.error(f"保存 Excel 文件期间发生意外错误 (Rename/Backup): {e}", exc_info=True)
-                 # Ensure temp file is cleaned up if it still exists
-                 if os.path.exists(temp_path):
-                     try:
-                         os.remove(temp_path)
-                         logging.debug(f"已清理未重命名的临时文件: {temp_path}")
-                     except Exception as rm_final_tmp_err:
-                         logging.warning(f"清理未重命名的临时文件 {temp_path} 失败: {rm_final_tmp_err}")
-                 # Re-raise the error
-                 raise
-            # --- End of _save_excel ---
-
+                # 记录保存失败的错误
+                logging.error(f"直接保存 Excel 文件到 {self.output_excel} 失败: {e}", exc_info=True)
+                # 可以选择重新抛出异常，让上层知道保存失败
+                raise IOError(f"保存 Excel 文件失败: {e}") from e
+            
+            # --- End of simplified _save_excel ---
 
         def reload_task_data(self, idx: int) -> Optional[Dict[str, Any]]:
             """Reloads the original input data for a specific task index."""

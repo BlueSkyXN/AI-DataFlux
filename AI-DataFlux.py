@@ -685,7 +685,7 @@ class UniversalAIProcessor:
 
         logging.info("所有分片处理循环结束。")
         self.task_manager.finalize()
-        
+
         """Manages the asynchronous processing of all tasks, shard by shard."""
         if not self.task_manager.initialize(): logging.info("无任务或初始化失败。"); return
 
