@@ -384,6 +384,8 @@ class ModelConfig:
         self.base_weight = model_dict.get("weight", 1) # 基础权重 (静态，用于选择)
         self.temperature = model_dict.get("temperature", 0.7) # 默认温度参数
         self.supports_json_schema = model_dict.get("supports_json_schema", False) # 是否支持JSON Schema格式输出
+        # 添加高级参数支持配置，默认为False
+        self.supports_advanced_params = model_dict.get("supports_advanced_params", False) # 是否支持高级参数
         # 基于权重的安全每秒请求数估算，优先使用配置值
         self.safe_rps = model_dict.get("safe_rps", max(0.5, min(self.base_weight / 10, 10)))
 
@@ -743,14 +745,19 @@ class FluxApiService:
         api_messages = [msg.model_dump(exclude_none=True) for msg in messages]
         payload: Dict[str, Any] = {"model": model_cfg.model, "messages": api_messages, "stream": stream}
         payload["temperature"] = temperature if temperature is not None else model_cfg.temperature
-        # 添加其他可选参数
+        
+        # 添加基本参数
         if top_p is not None: payload["top_p"] = top_p
         if max_tokens is not None: payload["max_tokens"] = max_tokens
         if stop: payload["stop"] = stop
-        if presence_penalty is not None: payload["presence_penalty"] = presence_penalty
-        if frequency_penalty is not None: payload["frequency_penalty"] = frequency_penalty
-        if logit_bias: payload["logit_bias"] = logit_bias
         if user: payload["user"] = user
+        
+        # 有条件地添加高级参数
+        if model_cfg.supports_advanced_params:
+            if presence_penalty is not None: payload["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None: payload["frequency_penalty"] = frequency_penalty
+            if logit_bias: payload["logit_bias"] = logit_bias
+        
         if response_format and model_cfg.supports_json_schema: payload["response_format"] = response_format.model_dump()
 
         proxy = model_cfg.channel_proxy or None # 如果配置为空字符串，则使用 None
