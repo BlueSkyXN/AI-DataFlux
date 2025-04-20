@@ -475,9 +475,28 @@ class UniversalAIProcessor:
     async def call_ai_api_async(self, session: aiohttp.ClientSession, prompt: str) -> str:
         """Calls the configured Flux API endpoint."""
         headers = {"Content-Type": "application/json"}
-        payload: Dict[str, Any] = {"model": self.ai_model_override, "messages": [{"role": "user", "content": prompt}],
-                                   "temperature": self.ai_temperature, "stream": False }
-        if self.use_json_schema: payload["response_format"] = {"type": "json_object"} # Simplified
+        
+        # 构建消息数组，包含system提示词和user提示词
+        messages = []
+        
+        # 添加system提示词(如果配置中存在)
+        system_prompt = self.config.get("prompt", {}).get("system_prompt", "")
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        # 添加用户提示词
+        messages.append({"role": "user", "content": prompt})
+        
+        # 使用修改后的messages数组构建payload
+        payload: Dict[str, Any] = {
+            "model": self.ai_model_override, 
+            "messages": messages,
+            "temperature": self.ai_temperature, 
+            "stream": False 
+        }
+        
+        if self.use_json_schema: 
+            payload["response_format"] = {"type": "json_object"}
 
         request_timeout = aiohttp.ClientTimeout(connect=20, total=600)
         logging.debug(f"向 Flux API ({self.flux_api_url}) 发送请求...")
