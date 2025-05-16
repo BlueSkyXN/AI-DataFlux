@@ -266,7 +266,7 @@ class ShardedTaskManager:
             logging.debug(f"内存监控: 当前={current_mem_mb:.1f}MB, 峰值={self.memory_tracker['peak_memory_usage']:.1f}MB")
 
             system_mem = psutil.virtual_memory()
-            if system_mem.percent > 85.0 or current_mem_mb > 1536.0:
+            if system_mem.percent > 85.0 or current_mem_mb > 40000.0:
                 logging.warning(f"高内存使用: Process={current_mem_mb:.1f}MB, System={system_mem.percent}%. 触发 GC...")
                 gc.collect()
                 current_mem_after_gc = self._process_info.memory_info().rss / (1024 * 1024)
