@@ -105,7 +105,12 @@ class ShardedTaskManager:
         task_pool: BaseTaskPool,
         optimal_shard_size=10000,
         min_shard_size=1000,
-        max_shard_size=50000
+        max_shard_size=50000,
+        max_retry_counts={  # 添加不同错误类型的最大重试次数
+            ErrorType.API_ERROR: 3,       # API错误最多重试3次
+            ErrorType.CONTENT_ERROR: 1,   # 内容错误最多重试1次
+            ErrorType.SYSTEM_ERROR: 2     # 系统错误最多重试2次
+        }
     ):
         if not isinstance(task_pool, BaseTaskPool):
              raise TypeError("task_pool 必须是 BaseTaskPool 的实例。")
@@ -113,6 +118,7 @@ class ShardedTaskManager:
         self.optimal_shard_size = optimal_shard_size
         self.min_shard_size = min_shard_size
         self.max_shard_size = max_shard_size
+        self.max_retry_counts = max_retry_counts
 
         self.current_shard_index = 0
         self.total_shards = 0
@@ -125,6 +131,15 @@ class ShardedTaskManager:
             'avg_time_per_record': 0.0,
             'records_per_second': 0.0,
         }
+        
+        # 重试统计
+        self.retried_tasks_count = {
+            ErrorType.API_ERROR: 0,
+            ErrorType.CONTENT_ERROR: 0,
+            ErrorType.SYSTEM_ERROR: 0
+        }
+        self.max_retries_exceeded_count = 0  # 超过最大重试次数的任务计数
+        
         self.memory_tracker = {
             'last_check_time': time.time(),
             'check_interval': 60,
@@ -283,6 +298,14 @@ class ShardedTaskManager:
         logging.info(f"总耗时: {total_duration:.2f} 秒")
         logging.info(f"预估总任务数: {self.total_estimated}")
         logging.info(f"成功处理并更新的任务数: {self.total_processed_successfully}")
+        
+        # 添加重试相关的统计信息
+        logging.info("重试统计信息:")
+        for error_type, count in self.retried_tasks_count.items():
+            max_retries = self.max_retry_counts.get(error_type, 0)
+            logging.info(f"  - {error_type}: {count} 次重试 (最大重试次数: {max_retries})")
+        logging.info(f"  - 重试次数超限任务数: {self.max_retries_exceeded_count}")
+        
         if self.total_processed_successfully > 0 and total_duration > 0:
              logging.info(f"平均处理速率: {self.total_processed_successfully / total_duration:.2f} 条记录/秒")
         if self.memory_tracker['peak_memory_usage'] > 0:
@@ -292,7 +315,6 @@ class ShardedTaskManager:
             logging.info("正在关闭任务池资源..."); self.task_pool.close()
             logging.info("任务池资源已关闭。")
         except Exception as e: logging.error(f"关闭任务池资源时发生错误: {e}", exc_info=True)
-
 
 # --- Utility Functions ---
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -366,6 +388,18 @@ class UniversalAIProcessor:
         self.max_connections_per_host = concurrency_cfg.get("max_connections_per_host", 0)
         logging.info(f"并发设置: 批次大小={self.batch_size}, API错误暂停={self.api_pause_duration}s (触发窗口={self.api_error_trigger_window}s)")
         logging.info(f"aiohttp设置: 最大连接数={self.max_connections}, 每主机最大连接数={self.max_connections_per_host}")
+        
+        # 读取重试限制配置
+        retry_limits_cfg = concurrency_cfg.get("retry_limits", {})
+        self.max_retry_counts = {
+            ErrorType.API_ERROR: retry_limits_cfg.get("api_error", 3),
+            ErrorType.CONTENT_ERROR: retry_limits_cfg.get("content_error", 1),
+            ErrorType.SYSTEM_ERROR: retry_limits_cfg.get("system_error", 2)
+        }
+        logging.info(f"重试限制: API错误={self.max_retry_counts[ErrorType.API_ERROR]}, " 
+                    f"内容错误={self.max_retry_counts[ErrorType.CONTENT_ERROR]}, "
+                    f"系统错误={self.max_retry_counts[ErrorType.SYSTEM_ERROR]}")
+        
         # --- REMOVED retry config ---
         # self.api_retry_times = concurrency_cfg.get("api_retry_times", 3)
         # self.api_retry_delay = concurrency_cfg.get("api_retry_delay", 5)
@@ -391,9 +425,52 @@ class UniversalAIProcessor:
         except (ImportError, ValueError, RuntimeError, FileNotFoundError, IOError) as e:
             raise RuntimeError(f"无法初始化数据源任务池: {e}") from e
         try:
-            self.task_manager = ShardedTaskManager(self.task_pool, shard_size, min_shard_size, max_shard_size)
+            self.task_manager = ShardedTaskManager(
+                self.task_pool, 
+                shard_size, 
+                min_shard_size, 
+                max_shard_size,
+                max_retry_counts=self.max_retry_counts
+            )
         except Exception as e: raise RuntimeError(f"无法初始化分片任务管理器: {e}") from e
+        
+        # 添加任务状态追踪
+        self.tasks_in_progress = set()  # 使用集合存储正在处理中的 record_id
+        self.tasks_progress_lock = threading.Lock()  # 用于保护对任务进度集合的访问
+        
         logging.info("UniversalAIProcessor 初始化完成。")
+
+    def mark_task_in_progress(self, record_id: Any) -> bool:
+        """
+        标记任务为处理中状态
+        
+        :param record_id: 记录ID
+        :return: 如果成功标记返回True，如果任务已经在处理中则返回False
+        """
+        with self.tasks_progress_lock:
+            if record_id in self.tasks_in_progress:
+                return False  # 任务已经在处理中
+            self.tasks_in_progress.add(record_id)
+            return True  # 成功标记为处理中
+
+    def mark_task_completed(self, record_id: Any):
+        """
+        标记任务处理完成
+        
+        :param record_id: 记录ID
+        """
+        with self.tasks_progress_lock:
+            self.tasks_in_progress.discard(record_id)  # 安全移除，即使不存在也不会出错
+
+    def is_task_in_progress(self, record_id: Any) -> bool:
+        """
+        检查任务是否处于处理中状态
+        
+        :param record_id: 记录ID
+        :return: 如果任务正在处理中返回True，否则返回False
+        """
+        with self.tasks_progress_lock:
+            return record_id in self.tasks_in_progress
 
     def create_prompt(self, record_data: Dict[str, Any]) -> str:
         """Creates the full prompt string."""
@@ -571,9 +648,9 @@ class UniversalAIProcessor:
             return {"_error": f"unexpected_error: {str(e)}", "_error_type": ErrorType.SYSTEM_ERROR}
         # --- END MODIFIED METHOD ---
 
-    # --- 替换为新的连续任务流处理方法 ---
+    # --- 修改后的连续任务流处理方法，增加任务状态追踪 ---
     async def process_shard_async_continuous(self):
-        """连续任务流模式的异步处理方法，避免批次锁定"""
+        """连续任务流模式的异步处理方法，避免批次锁定，增加任务状态跟踪"""
         if not self.task_manager.initialize():
             logging.info("无任务或初始化失败。")
             return
@@ -601,6 +678,14 @@ class UniversalAIProcessor:
                 last_progress_log_time = time.time()  # 上次进度日志时间
                 progress_log_interval = 5.0  # 进度日志间隔（秒）
                 
+                # 记录重试统计
+                retry_counts = {
+                    ErrorType.API_ERROR: 0,
+                    ErrorType.CONTENT_ERROR: 0,
+                    ErrorType.SYSTEM_ERROR: 0
+                }
+                max_retries_exceeded = 0
+                
                 while True:
                     # 检查是否需要加载新分片
                     if not self.task_pool.has_tasks() and len(active_tasks) == 0:
@@ -619,16 +704,28 @@ class UniversalAIProcessor:
                         tasks_batch = self.task_pool.get_task_batch(fetch_count)
                         
                         if tasks_batch:
+                            added_tasks = 0
                             for record_id, data in tasks_batch:
-                                # 为每个任务创建异步任务并添加到活动集合
-                                task = asyncio.create_task(
-                                    self.process_one_record_async(session, record_id, data)
-                                )
-                                # 保存任务ID映射关系用于后续处理
-                                task_id_map[task] = (record_id, data)
-                                active_tasks.add(task)
+                                # 检查任务是否已经在处理中
+                                if not self.is_task_in_progress(record_id):
+                                    # 标记为处理中
+                                    self.mark_task_in_progress(record_id)
+                                    
+                                    # 为每个任务创建异步任务并添加到活动集合
+                                    task = asyncio.create_task(
+                                        self.process_one_record_async(session, record_id, data)
+                                    )
+                                    # 保存任务ID映射关系用于后续处理
+                                    task_id_map[task] = (record_id, data)
+                                    active_tasks.add(task)
+                                    added_tasks += 1
+                                else:
+                                    logging.warning(f"记录[{record_id}] 已在处理中，跳过重复处理")
+                                    # 将任务放回队列末尾，稍后再尝试处理
+                                    self.task_pool.add_task_to_back(record_id, data)
                             
-                            logging.debug(f"分片 {current_shard_num}: 填充 {len(tasks_batch)} 个新任务到任务池，当前活动任务：{len(active_tasks)}")
+                            if added_tasks > 0:
+                                logging.debug(f"分片 {current_shard_num}: 填充 {added_tasks} 个新任务到任务池，当前活动任务：{len(active_tasks)}")
                     
                     # 如果没有活动任务，则可能是等待加载新分片或已经处理完成
                     if not active_tasks:
@@ -647,12 +744,18 @@ class UniversalAIProcessor:
                     
                     # 处理已完成任务
                     api_error_in_batch = False  # 跟踪是否有API错误需要暂停
-                    tasks_to_retry = []  # 需要重试的任务
+                    tasks_to_retry = []  # 需要重试的任务 (record_id, original_data, retry_counts)
                     
                     for completed_task in done:
                         try:
                             result = completed_task.result()
                             record_id, original_data = task_id_map.pop(completed_task)
+                            
+                            # 标记任务已完成处理 (无论成功还是失败)
+                            self.mark_task_completed(record_id)
+                            
+                            # 从原始数据中获取重试计数（如果存在）
+                            task_retry_counts = original_data.get('_retry_counts', {}) if original_data else {}
                             
                             # 根据结果类型处理
                             if isinstance(result, dict):
@@ -660,16 +763,79 @@ class UniversalAIProcessor:
                                 
                                 if error_type == ErrorType.API_ERROR:
                                     api_error_in_batch = True
-                                    logging.warning(f"记录[{record_id}] API错误: {result.get('_error')}，将重试")
-                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                    current_retries = task_retry_counts.get(error_type, 0)
+                                    max_retries = self.task_manager.max_retry_counts.get(error_type, 3)
+                                    
+                                    if current_retries < max_retries:
+                                        # 更新重试计数并加入重试队列
+                                        task_retry_counts[error_type] = current_retries + 1
+                                        if original_data is None:
+                                            original_data = {}
+                                        original_data['_retry_counts'] = task_retry_counts
+                                        
+                                        logging.warning(f"记录[{record_id}] API错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
+                                        retry_counts[error_type] += 1
+                                        tasks_to_retry.append((record_id, original_data))
+                                    else:
+                                        # 超过最大重试次数，记录为最终失败
+                                        logging.error(f"记录[{record_id}] API错误，已达最大重试次数({max_retries})，标记为最终失败")
+                                        max_retries_exceeded += 1
+                                        results_buffer[record_id] = {
+                                            "_error": f"max_retries_exceeded: {result.get('_error')}",
+                                            "_error_type": error_type,
+                                            "_max_retries": max_retries,
+                                            "_final_attempt": True
+                                        }
                                 
                                 elif error_type == ErrorType.CONTENT_ERROR:
-                                    logging.warning(f"记录[{record_id}] 内容错误: {result.get('_error')}，将重试")
-                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                    current_retries = task_retry_counts.get(error_type, 0)
+                                    max_retries = self.task_manager.max_retry_counts.get(error_type, 1)  # 内容错误默认最多重试1次
+                                    
+                                    if current_retries < max_retries:
+                                        # 更新重试计数并加入重试队列
+                                        task_retry_counts[error_type] = current_retries + 1
+                                        if original_data is None:
+                                            original_data = {}
+                                        original_data['_retry_counts'] = task_retry_counts
+                                        
+                                        logging.warning(f"记录[{record_id}] 内容错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
+                                        retry_counts[error_type] += 1
+                                        tasks_to_retry.append((record_id, original_data))
+                                    else:
+                                        # 超过最大重试次数，记录为最终失败
+                                        logging.warning(f"记录[{record_id}] 内容错误，已达最大重试次数({max_retries})，标记为最终失败")
+                                        max_retries_exceeded += 1
+                                        results_buffer[record_id] = {
+                                            "_error": f"max_retries_exceeded: {result.get('_error')}",
+                                            "_error_type": error_type,
+                                            "_max_retries": max_retries,
+                                            "_final_attempt": True
+                                        }
                                 
                                 elif error_type == ErrorType.SYSTEM_ERROR:
-                                    logging.error(f"记录[{record_id}] 系统错误: {result.get('_error')}，将重试")
-                                    tasks_to_retry.append((record_id, None))  # 需要重载数据
+                                    current_retries = task_retry_counts.get(error_type, 0)
+                                    max_retries = self.task_manager.max_retry_counts.get(error_type, 2)  # 系统错误默认最多重试2次
+                                    
+                                    if current_retries < max_retries:
+                                        # 更新重试计数并加入重试队列
+                                        task_retry_counts[error_type] = current_retries + 1
+                                        if original_data is None:
+                                            original_data = {}
+                                        original_data['_retry_counts'] = task_retry_counts
+                                        
+                                        logging.error(f"记录[{record_id}] 系统错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
+                                        retry_counts[error_type] += 1
+                                        tasks_to_retry.append((record_id, original_data))
+                                    else:
+                                        # 超过最大重试次数，记录为最终失败
+                                        logging.error(f"记录[{record_id}] 系统错误，已达最大重试次数({max_retries})，标记为最终失败")
+                                        max_retries_exceeded += 1
+                                        results_buffer[record_id] = {
+                                            "_error": f"max_retries_exceeded: {result.get('_error')}",
+                                            "_error_type": error_type,
+                                            "_max_retries": max_retries,
+                                            "_final_attempt": True
+                                        }
                                 
                                 else:
                                     # 成功处理，将结果添加到更新缓冲区
@@ -692,8 +858,36 @@ class UniversalAIProcessor:
                             try:
                                 record_id, original_data = task_id_map.pop(completed_task, (None, None))
                                 if record_id is not None:
+                                    # 确保任务被标记为已完成，即使出错
+                                    self.mark_task_completed(record_id)
+                                    
                                     logging.error(f"记录[{record_id}] 处理时发生异常: {e}", exc_info=True)
-                                    tasks_to_retry.append((record_id, None))
+                                    
+                                    # 获取当前重试计数
+                                    task_retry_counts = original_data.get('_retry_counts', {}) if original_data else {}
+                                    current_retries = task_retry_counts.get(ErrorType.SYSTEM_ERROR, 0)
+                                    max_retries = self.task_manager.max_retry_counts.get(ErrorType.SYSTEM_ERROR, 2)
+                                    
+                                    if current_retries < max_retries:
+                                        # 更新重试计数并加入重试队列
+                                        task_retry_counts[ErrorType.SYSTEM_ERROR] = current_retries + 1
+                                        if original_data is None:
+                                            original_data = {}
+                                        original_data['_retry_counts'] = task_retry_counts
+                                        
+                                        logging.error(f"记录[{record_id}] 处理异常，重试 {current_retries+1}/{max_retries}")
+                                        retry_counts[ErrorType.SYSTEM_ERROR] += 1
+                                        tasks_to_retry.append((record_id, original_data))
+                                    else:
+                                        # 超过最大重试次数，记录为最终失败
+                                        logging.error(f"记录[{record_id}] 处理异常，已达最大重试次数({max_retries})，标记为最终失败")
+                                        max_retries_exceeded += 1
+                                        results_buffer[record_id] = {
+                                            "_error": f"max_retries_exceeded: 处理异常 {e}",
+                                            "_error_type": ErrorType.SYSTEM_ERROR,
+                                            "_max_retries": max_retries,
+                                            "_final_attempt": True
+                                        }
                                 else:
                                     logging.error(f"任务执行异常，无法确定记录ID: {e}", exc_info=True)
                             except Exception as inner_e:
@@ -714,31 +908,52 @@ class UniversalAIProcessor:
                     if tasks_to_retry:
                         logging.info(f"重新加载 {len(tasks_to_retry)} 个任务的数据...")
                         loop = asyncio.get_running_loop()
-                        reload_futures = [
-                            loop.run_in_executor(None, lambda rid=rid: self.task_pool.reload_task_data(rid))
-                            for rid, _ in tasks_to_retry
-                        ]
-                        reloaded_datas = await asyncio.gather(*reload_futures, return_exceptions=True)
+                        reload_futures = []
+                        
+                        for record_id, original_data in tasks_to_retry:
+                            # 保存重试计数信息
+                            retry_counts_data = original_data.get('_retry_counts', {}) if original_data else {}
+                            
+                            # 创建重载任务
+                            reload_future = loop.run_in_executor(None, lambda rid=record_id: self.task_pool.reload_task_data(rid))
+                            reload_futures.append((reload_future, record_id, retry_counts_data))
                         
                         retry_success_count = 0
-                        for i, reloaded_result in enumerate(reloaded_datas):
-                            original_rid, _ = tasks_to_retry[i]
-                            
-                            if isinstance(reloaded_result, Exception):
-                                logging.error(f"记录[{original_rid}] 数据重载失败: {reloaded_result}")
+                        for future, original_rid, saved_retry_counts in reload_futures:
+                            try:
+                                reloaded_data = await future
+                                
+                                if isinstance(reloaded_data, Exception):
+                                    logging.error(f"记录[{original_rid}] 数据重载失败: {reloaded_data}")
+                                    results_buffer[original_rid] = {
+                                        "_error": f"reload_failed: {reloaded_data}",
+                                        "_error_type": ErrorType.SYSTEM_ERROR,
+                                        "_final_attempt": True
+                                    }
+                                elif reloaded_data is None:
+                                    logging.error(f"记录[{original_rid}] 数据重载返回None")
+                                    results_buffer[original_rid] = {
+                                        "_error": "reload_returned_none",
+                                        "_error_type": ErrorType.SYSTEM_ERROR,
+                                        "_final_attempt": True
+                                    }
+                                else:
+                                    # 检查任务是否仍在处理中
+                                    if not self.is_task_in_progress(original_rid):
+                                        # 恢复重试计数到重载的数据中
+                                        reloaded_data['_retry_counts'] = saved_retry_counts
+                                        self.task_pool.add_task_to_front(original_rid, reloaded_data)
+                                        retry_success_count += 1
+                                    else:
+                                        logging.warning(f"记录[{original_rid}] 仍在处理中，推迟重试")
+                                        # 将重试请求加入到延迟队列或稍后处理的集合中
+                            except Exception as reload_e:
+                                logging.error(f"处理重载异步任务 {original_rid} 时发生异常: {reload_e}")
                                 results_buffer[original_rid] = {
-                                    "_error": f"reload_failed: {reloaded_result}",
-                                    "_error_type": ErrorType.SYSTEM_ERROR
+                                    "_error": f"reload_exception: {reload_e}",
+                                    "_error_type": ErrorType.SYSTEM_ERROR,
+                                    "_final_attempt": True
                                 }
-                            elif reloaded_result is None:
-                                logging.error(f"记录[{original_rid}] 数据重载返回None")
-                                results_buffer[original_rid] = {
-                                    "_error": "reload_returned_none",
-                                    "_error_type": ErrorType.SYSTEM_ERROR
-                                }
-                            else:
-                                self.task_pool.add_task_to_front(original_rid, reloaded_result)
-                                retry_success_count += 1
                         
                         if retry_success_count > 0:
                             logging.info(f"成功将 {retry_success_count} 个任务放回队列头部重试")
@@ -747,8 +962,9 @@ class UniversalAIProcessor:
                     if results_buffer:
                         results_count = len(results_buffer)
                         success_count = sum(1 for r in results_buffer.values() if "_error" not in r)
+                        final_fail_count = sum(1 for r in results_buffer.values() if r.get("_final_attempt", False))
                         
-                        logging.info(f"更新 {results_count} 条记录结果 ({success_count} 成功, {results_count - success_count} 失败)...")
+                        logging.info(f"更新 {results_count} 条记录结果 ({success_count} 成功, {final_fail_count} 最终失败)...")
                         try:
                             # 调用任务池的更新方法 (Excel会根据save_interval决定是否写入文件)
                             self.task_pool.update_task_results(results_buffer)
@@ -761,11 +977,23 @@ class UniversalAIProcessor:
                     if now - last_progress_log_time >= progress_log_interval:
                         remaining = self.task_pool.get_remaining_count()
                         active_count = len(active_tasks)
+                        in_progress_count = len(self.tasks_in_progress)
+                        
+                        # 计算并记录重试统计信息
+                        total_retries = sum(retry_counts.values())
                         
                         logging.info(
                             f"分片 {current_shard_num} 进度: 已处理={processed_in_shard_successfully}, "
-                            f"活动任务={active_count}, 待处理={remaining}, "
+                            f"活动任务={active_count}, 处理中={in_progress_count}, 待处理={remaining}, 重试={total_retries}, "
+                            f"重试次数超限={max_retries_exceeded}, "
                             f"总进度={self.task_manager.total_processed_successfully}/{self.task_manager.total_estimated}"
+                        )
+                        
+                        # 记录详细的重试统计
+                        logging.debug(
+                            f"重试详细统计: API错误={retry_counts[ErrorType.API_ERROR]}, "
+                            f"内容错误={retry_counts[ErrorType.CONTENT_ERROR]}, "
+                            f"系统错误={retry_counts[ErrorType.SYSTEM_ERROR]}"
                         )
                         
                         # 更新性能指标和监控内存
@@ -781,6 +1009,15 @@ class UniversalAIProcessor:
                     # 监控内存使用情况
                     self.task_manager.monitor_memory_usage()
                 
+                # 记录最后的任务统计信息
+                # 检查是否有仍在进行中的任务
+                with self.tasks_progress_lock:
+                    in_progress_tasks = list(self.tasks_in_progress)
+                    if in_progress_tasks:
+                        logging.warning(f"仍有 {len(in_progress_tasks)} 个任务处于处理中状态，可能存在问题")
+                        for rid in in_progress_tasks[:10]:  # 只打印前10个
+                            logging.warning(f"仍在处理中的任务ID: {rid}")
+                
                 # 处理最后的结果缓冲区（如果有）
                 if results_buffer:
                     try:
@@ -788,6 +1025,14 @@ class UniversalAIProcessor:
                         self.task_pool.update_task_results(results_buffer)
                     except Exception as final_e:
                         logging.error(f"更新最终结果时发生错误: {final_e}", exc_info=True)
+                
+                # 记录最终重试统计
+                logging.info(
+                    f"处理完成。重试统计: API错误={retry_counts[ErrorType.API_ERROR]}, "
+                    f"内容错误={retry_counts[ErrorType.CONTENT_ERROR]}, "
+                    f"系统错误={retry_counts[ErrorType.SYSTEM_ERROR]}, "
+                    f"重试次数超限={max_retries_exceeded}"
+                )
                 
                 # 所有分片处理完成
                 logging.info("所有分片处理循环结束。")
@@ -799,7 +1044,7 @@ class UniversalAIProcessor:
             # 确保最终清理
             self.task_manager.finalize()
 
-    # --- 更新原始的批处理方法（保留用于兼容）---
+    # --- 原始批处理方法保留用于兼容 ---
     async def process_shard_async(self):
         """原始的基于批次的异步处理方法（保留用于兼容）。"""
         logging.warning("使用旧版基于批次的处理方法 process_shard_async()，建议使用新版的连续流处理方法。")
@@ -993,7 +1238,6 @@ class UniversalAIProcessor:
             raise
         finally:
             logging.info(f"任务执行结束。总耗时: {time.time() - proc_start_time:.2f} 秒。")
-
 
 # --- Command Line Interface ---
 def validate_config_file(config_path: str) -> bool:

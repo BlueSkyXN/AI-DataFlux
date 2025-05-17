@@ -90,6 +90,15 @@ class BaseTaskPool(ABC):
             self.tasks.insert(0, (task_id, record_dict))
             logging.debug(f"任务 {task_id} 已放回队列头部。")
 
+    def add_task_to_back(self, task_id: Any, record_dict: Optional[Dict[str, Any]]):
+        """Add a task to the back of the in-memory queue (for deferred processing)."""
+        if record_dict is None:
+             logging.warning(f"尝试将任务 {task_id} 放回队列失败，因为数据为 None。")
+             return
+        with self.lock:
+            self.tasks.append((task_id, record_dict))
+            logging.debug(f"任务 {task_id} 已放回队列尾部，稍后处理。")
+
     def has_tasks(self) -> bool:
         """Check if there are any tasks remaining in the current in-memory shard."""
         with self.lock:
@@ -99,7 +108,6 @@ class BaseTaskPool(ABC):
         """Get the number of tasks remaining in the current in-memory shard."""
         with self.lock:
             return len(self.tasks)
-
 
 # --- MySQL Specific Components ---
 if MYSQL_AVAILABLE:
