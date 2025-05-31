@@ -410,7 +410,7 @@ class ModelConfig:
 
         # 计算最终使用的超时时间 (取模型和通道中的较小值)
         self.final_timeout = min(self.timeout, self.channel_timeout)
-        self.connect_timeout = 10 # 固定的连接超时时间
+        self.connect_timeout = 30 # 固定的连接超时时间
         self.read_timeout = self.final_timeout # 总读取/处理超时时间
 
 ###############################################################################
@@ -765,7 +765,7 @@ class FluxApiService:
         timeout = aiohttp.ClientTimeout(
             connect=model_cfg.connect_timeout,    # 连接超时
             total=model_cfg.read_timeout,         # 总操作超时
-            sock_read=60                           # 两次成功读取之间的最大间隔（秒）
+            sock_read=300                           # 两次成功读取之间的最大间隔（秒）
         )
 
         logging.debug(f"发送请求至 [{model_cfg.id}]: URL={url}, 超时={timeout}, 代理={proxy}")
