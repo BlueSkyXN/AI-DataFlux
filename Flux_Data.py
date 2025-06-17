@@ -670,35 +670,71 @@ if EXCEL_ENABLED:
 
         def _save_excel(self):
             """
-            简单地将 DataFrame 保存到输出 Excel 文件，直接覆盖。
-            注意：这种方法在保存过程中如果中断，可能导致文件损坏且无备份。
+            保存Excel文件 - 清空问题单元格的简洁版本
             """
-            logging.info(f"正在尝试直接保存 DataFrame 到: {self.output_excel}")
+            logging.info(f"正在尝试保存 DataFrame 到: {self.output_excel}")
+            
             try:
-                # 获取锁以确保在保存期间 DataFrame 不被修改
                 with self.lock:
                     # 确保输出目录存在
                     output_dir = os.path.dirname(self.output_excel)
                     if output_dir and not os.path.exists(output_dir):
-                        try:
-                            os.makedirs(output_dir, exist_ok=True)
-                            logging.info(f"已创建输出目录: {output_dir}")
-                        except OSError as e:
-                            logging.error(f"创建输出目录 {output_dir} 失败: {e}", exc_info=True)
-                            # 如果目录创建失败，后续写入很可能也会失败，直接抛出异常
-                            raise IOError(f"无法创建输出目录 {output_dir}") from e
+                        os.makedirs(output_dir, exist_ok=True)
 
-                    # 直接写入目标文件，覆盖已有文件
-                    self.df.to_excel(self.output_excel, index=False, engine='openpyxl') # 可以保留 engine 或移除
-                    logging.info(f"DataFrame 已成功保存到: {self.output_excel}")
+                    # 🎯 策略1: 直接保存（正常情况，零性能影响）
+                    try:
+                        self.df.to_excel(self.output_excel, index=False, engine='openpyxl')
+                        logging.info(f"✅ DataFrame 已成功保存到: {self.output_excel}")
+                        return
+                        
+                    except UnicodeEncodeError as e:
+                        logging.error(f"❌ Unicode编码问题: {e}")
+                        logging.info("🧹 开始清空AI输出列中的问题单元格...")
+                        
+                        # 🧹 策略2: 清空AI输出列中的问题单元格
+                        fixed_df = self.df.copy()
+                        cleared_count = 0
+                        ai_columns = list(self.columns_to_write.values())  # 只检查AI输出列
+                        
+                        for col_name in ai_columns:
+                            if col_name not in fixed_df.columns:
+                                continue
+                                
+                            for row_idx in fixed_df.index:
+                                value = fixed_df.loc[row_idx, col_name]
+                                
+                                if isinstance(value, str) and value:
+                                    try:
+                                        value.encode('utf-8')
+                                    except UnicodeEncodeError:
+                                        # 发现问题，清空此单元格
+                                        logging.warning(f"❌ 清空问题单元格: 第 {row_idx} 行, '{col_name}' 列")
+                                        fixed_df.loc[row_idx, col_name] = ""
+                                        cleared_count += 1
+                        
+                        if cleared_count > 0:
+                            logging.info(f"🧹 已清空 {cleared_count} 个问题单元格，重新尝试保存...")
+                            
+                            # 尝试保存清理后的数据
+                            try:
+                                fixed_df.to_excel(self.output_excel, index=False, engine='openpyxl')
+                                logging.info(f"✅ DataFrame 已成功保存到: {self.output_excel} (已清空 {cleared_count} 个问题单元格)")
+                                self.df = fixed_df  # 更新内存中的数据
+                                return
+                            except UnicodeEncodeError:
+                                logging.warning("⚠️  清空AI输出列后仍有问题，可能来自原始数据")
+                        
+                        # 📊 策略3: CSV备选方案
+                        csv_path = self.output_excel.replace('.xlsx', '.csv')
+                        logging.warning(f"⚠️  Excel保存失败，尝试保存为CSV: {csv_path}")
+                        
+                        df_to_save = fixed_df if cleared_count > 0 else self.df
+                        df_to_save.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                        logging.warning(f"✅ 已保存为CSV: {csv_path}")
 
             except Exception as e:
-                # 记录保存失败的错误
-                logging.error(f"直接保存 Excel 文件到 {self.output_excel} 失败: {e}", exc_info=True)
-                # 可以选择重新抛出异常，让上层知道保存失败
-                raise IOError(f"保存 Excel 文件失败: {e}") from e
-            
-            # --- End of simplified _save_excel ---
+                logging.error(f"❌ 保存文件失败: {e}", exc_info=True)
+                raise IOError(f"保存文件失败: {e}") from e
 
         def reload_task_data(self, idx: int) -> Optional[Dict[str, Any]]:
             """Reloads the original input data for a specific task index."""
