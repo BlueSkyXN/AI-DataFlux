@@ -194,10 +194,10 @@ models:
     channel_id: "1"              # 所属通道ID
     api_key: "your_api_key_1"    # API密钥
     timeout: 600                 # 超时时间（秒）
-    weight: 10                   # 调度权重
-    temperature: 0.3             # 模型温度
-    safe_rps: 5                  # 每秒安全请求数
-    supports_json_schema: true   # 是否支持JSON Schema
+    weight: 10                   # 调度权重（默认: 1）
+    temperature: 0.3             # 模型温度（默认: 0.7）
+    safe_rps: 5                  # 每秒安全请求数（默认: 基于权重计算）
+    supports_json_schema: true   # 是否支持JSON Schema（默认: false）
 
 # 通道配置
 channels:
