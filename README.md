@@ -22,7 +22,7 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 
 ```bash
 # 基础依赖
-pip install pyyaml aiohttp pandas openpyxl psutil
+pip install pyyaml aiohttp pandas openpyxl psutil fastapi uvicorn pydantic
 
 # 如果使用MySQL数据源，需要安装
 pip install mysql-connector-python
@@ -56,7 +56,13 @@ nohup python Flux-Api.py --config config.yaml --port 8787 > flux-api.log 2>&1 &
 
 ```bash
 python AI-DataFlux.py --config config.yaml
+
+# 或使用简写形式：
+python AI-DataFlux.py -c config.yaml
 ```
+
+支持的命令行参数：
+- `--config, -c`: 配置文件路径（默认: ./config.yaml）
 
 您也可以使用`screen`或`tmux`等工具在后台运行这两个组件。
 
@@ -73,7 +79,7 @@ global:
     format: "text"       # 日志格式: text, json
     output: "console"    # 输出目标: console, file
     file_path: "./logs/ai_dataflux.log"  # 日志文件路径
-  flux_api_url: "http://127.0.0.1:8787/v1/chat/completions"  # Flux API端点URL
+  flux_api_url: "http://127.0.0.1:8787"  # Flux API端点URL（程序会自动添加/v1/chat/completions路径）
 ```
 
 ### 数据源配置
@@ -92,6 +98,10 @@ datasource:
     api_error_trigger_window: 2.0   # 多少秒内的API错误才会触发暂停
     max_connections: 1000           # aiohttp的最大并发连接数
     max_connections_per_host: 0     # 对每个主机的最大并发连接数（0表示无限制）
+    retry_limits:                   # 重试限制配置
+      api_error: 3                  # API错误最多重试次数
+      content_error: 1              # 内容错误最多重试次数
+      system_error: 2               # 系统错误最多重试次数
 ```
 
 ### 数据源特定配置
@@ -140,7 +150,7 @@ prompt:
     - "sentiment"
   use_json_schema: true  # 是否启用JSON Schema输出约束
   model: "auto"          # 使用的AI模型，auto表示自动选择
-  temperature: 0.3       # 模型温度参数（0-1之间）
+  temperature: 0.7       # 模型温度参数（0-1之间）
   template: |            # 提示词模板，{record_json}为数据占位符
     请分析以下数据并提供专业的回答:
 
@@ -183,7 +193,7 @@ models:
     model: "gpt-4-turbo"         # 实际模型名称
     channel_id: "1"              # 所属通道ID
     api_key: "your_api_key_1"    # API密钥
-    timeout: 300                 # 超时时间（秒）
+    timeout: 600                 # 超时时间（秒）
     weight: 10                   # 调度权重
     temperature: 0.3             # 模型温度
     safe_rps: 5                  # 每秒安全请求数
@@ -195,7 +205,7 @@ channels:
     name: "openai-api"
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
-    timeout: 300
+    timeout: 600
     proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
 ```
 
@@ -218,13 +228,27 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 启动方式：
 ```bash
 python Flux-Api.py --config config.yaml
+
+# 常用命令行选项：
+python Flux-Api.py --config config.yaml --port 8787 --host 0.0.0.0
+python Flux-Api.py --config config.yaml --workers 1 --log-level info
+python Flux-Api.py --config config.yaml --reload  # 开发模式，启用自动重载
 ```
 
+支持的命令行参数：
+- `--config, -c`: 配置文件路径（默认: ./config.yaml）
+- `--host`: 监听的主机地址（默认: 0.0.0.0）
+- `--port, -p`: 监听的端口号（默认: 8787）
+- `--workers, -w`: 工作进程数（默认: 1，建议保持为1以确保状态一致性）
+- `--log-level`: Uvicorn的日志级别（默认: info）
+- `--reload`: 启用开发模式下的自动重载
+
 默认监听 `http://127.0.0.1:8787`，提供以下API端点：
-- `/v1/chat/completions` - OpenAI兼容的聊天补全接口
-- `/v1/models` - 可用模型列表
-- `/admin/models` - 模型详细状态和指标
-- `/admin/health` - 系统健康状态
+- `/v1/chat/completions` (POST) - OpenAI兼容的聊天补全接口
+- `/v1/models` (GET) - 可用模型列表
+- `/admin/models` (GET) - 模型详细状态和指标
+- `/admin/health` (GET) - 系统健康状态
+- `/` (GET) - 根端点，显示API信息
 
 ### 2. AI-DataFlux 引擎
 
@@ -333,7 +357,7 @@ models:
 ### 常见问题
 
 1. **找不到依赖模块**
-   - 安装所需依赖: `pip install pyyaml aiohttp pandas openpyxl psutil`
+   - 安装基础依赖: `pip install pyyaml aiohttp pandas openpyxl psutil fastapi uvicorn pydantic`
    - MySQL支持: `pip install mysql-connector-python`
 
 2. **无法连接到Flux-Api**
@@ -352,6 +376,7 @@ models:
    - 调整分片大小参数适应数据量
    - 使用更多权重分配给响应更快的模型
    - 增加Flux-Api服务的工作进程数: `--workers 4`（多核服务器）
+   - **注意**: 使用多个worker进程时，模型状态（退避、限流等）将在各进程间独立，建议保持 `--workers 1` 以确保状态一致性
 
 5. **内存使用过高**
    - 减小`max_shard_size`和`batch_size`
