@@ -39,9 +39,10 @@ except (ImportError, AttributeError):
 # --- Base Task Pool Abstract Base Class (Defined internally) ---
 class BaseTaskPool(ABC):
     """Abstract base class defining the interface for data source task pools."""
-    def __init__(self, columns_to_extract: List[str], columns_to_write: Dict[str, str]):
+    def __init__(self, columns_to_extract: List[str], columns_to_write: Dict[str, str], require_all_input_fields: bool = True):
         self.columns_to_extract = columns_to_extract
         self.columns_to_write = columns_to_write
+        self.require_all_input_fields = require_all_input_fields  # 是否要求所有输入字段都非空
         self.tasks: List[Tuple[Any, Dict[str, Any]]] = [] # In-memory list of tasks for the current shard: (task_id, data_dict)
         self.lock = threading.Lock() # Protects access to self.tasks list and potentially df in Excel pool
 
@@ -173,12 +174,13 @@ if MYSQL_AVAILABLE:
             columns_to_extract: List[str],
             columns_to_write: Dict[str, str],
             table_name: str,
-            pool_size: int = 5
+            pool_size: int = 5,
+            require_all_input_fields: bool = True
         ):
             if not MYSQL_AVAILABLE:
                 raise ImportError("MySQL Connector库未安装或不可用，无法实例化 MySQLTaskPool。")
 
-            super().__init__(columns_to_extract, columns_to_write) # Call super first
+            super().__init__(columns_to_extract, columns_to_write, require_all_input_fields) # Call super first
 
             self.table_name = table_name
             self.select_columns = list(set(['id'] + self.columns_to_extract))
@@ -259,7 +261,14 @@ if MYSQL_AVAILABLE:
             for col in self.columns_to_extract:
                 safe_col = f"`{col.replace('`', '``')}`"
                 input_conditions.append(f"({safe_col} IS NOT NULL AND {safe_col} <> '')")
-            input_clause = " AND ".join(input_conditions) if input_conditions else "1=1" # True if no input cols
+
+            # 根据 require_all_input_fields 决定是使用 AND 还是 OR
+            if self.require_all_input_fields:
+                # 所有输入字段都必须非空
+                input_clause = " AND ".join(input_conditions) if input_conditions else "1=1"
+            else:
+                # 至少一个输入字段非空即可
+                input_clause = " OR ".join(input_conditions) if input_conditions else "1=1"
 
             output_conditions = []
             for col in self.write_colnames:
@@ -268,7 +277,7 @@ if MYSQL_AVAILABLE:
             # True if AT LEAST ONE output is empty
             output_clause = " OR ".join(output_conditions) if output_conditions else "1=0" # False if no output cols
 
-            # Final condition: all inputs valid AND at least one output empty
+            # Final condition: inputs valid AND at least one output empty
             return f"({input_clause}) AND ({output_clause})"
 
 
@@ -471,12 +480,13 @@ if EXCEL_ENABLED:
             output_excel: str,
             columns_to_extract: List[str],
             columns_to_write: Dict[str, str],
-            save_interval: int = 300
+            save_interval: int = 300,
+            require_all_input_fields: bool = True
         ):
             if not os.path.exists(input_excel):
                 raise FileNotFoundError(f"Excel输入文件不存在: {input_excel}")
 
-            super().__init__(columns_to_extract, columns_to_write) # Call super first
+            super().__init__(columns_to_extract, columns_to_write, require_all_input_fields) # Call super first
 
             logging.info(f"正在读取Excel文件: {input_excel}")
             try:
@@ -525,15 +535,24 @@ if EXCEL_ENABLED:
             try:
                 sub_df = self.df.iloc[start_idx:end_idx]
 
-                # Input condition: All extract columns must be non-empty
+                # Input condition: 根据 require_all_input_fields 决定检查逻辑
                 if self.columns_to_extract:
-                    input_valid_mask = pd.Series(True, index=sub_df.index)
-                    for col in self.columns_to_extract:
-                        if col in sub_df.columns:
-                             # Using internal _is_value_empty for consistency
-                             input_valid_mask &= ~sub_df[col].apply(self._is_value_empty) # Invert empty check
-                        else:
-                            input_valid_mask &= False # Column missing = invalid input
+                    if self.require_all_input_fields:
+                        # 所有输入字段都必须非空 (使用 AND 逻辑)
+                        input_valid_mask = pd.Series(True, index=sub_df.index)
+                        for col in self.columns_to_extract:
+                            if col in sub_df.columns:
+                                # Using internal _is_value_empty for consistency
+                                input_valid_mask &= ~sub_df[col].apply(self._is_value_empty) # Invert empty check
+                            else:
+                                input_valid_mask &= False # Column missing = invalid input
+                    else:
+                        # 至少一个输入字段非空即可 (使用 OR 逻辑)
+                        input_valid_mask = pd.Series(False, index=sub_df.index)
+                        for col in self.columns_to_extract:
+                            if col in sub_df.columns:
+                                input_valid_mask |= ~sub_df[col].apply(self._is_value_empty) # At least one non-empty
+                            # Column missing doesn't affect OR logic
                 else:
                     input_valid_mask = pd.Series(True, index=sub_df.index) # No input cols = always valid
 
@@ -773,6 +792,10 @@ def create_task_pool(config: Dict[str, Any], columns_to_extract: List[str], colu
     ds_type = datasource_config.get("type", "excel").lower()
     concurrency_config = datasource_config.get("concurrency", {})
 
+    # 读取输入字段检查配置，默认为 True（需要所有字段非空）
+    require_all_input_fields = datasource_config.get("require_all_input_fields", True)
+    logging.info(f"输入字段检查模式: {'要求所有字段非空' if require_all_input_fields else '至少一个字段非空即可'}")
+
     logging.info(f"根据配置类型 '{ds_type}' 创建任务池...")
 
     if ds_type == "mysql":
@@ -790,7 +813,7 @@ def create_task_pool(config: Dict[str, Any], columns_to_extract: List[str], colu
         pool_size = concurrency_config.get("db_pool_size", 5)
 
         logging.info(f"准备创建 MySQLTaskPool: 表={table_name}, 池大小={pool_size}")
-        return MySQLTaskPool(connection_config, columns_to_extract, columns_to_write, table_name, pool_size)
+        return MySQLTaskPool(connection_config, columns_to_extract, columns_to_write, table_name, pool_size, require_all_input_fields)
 
     elif ds_type == "excel":
         if not EXCEL_ENABLED:
@@ -808,7 +831,7 @@ def create_task_pool(config: Dict[str, Any], columns_to_extract: List[str], colu
 
         save_interval = concurrency_config.get("save_interval", 300)
         logging.info(f"准备创建 ExcelTaskPool: 输入={input_excel}, 输出={output_excel}, 保存间隔={save_interval}s")
-        return ExcelTaskPool(input_excel, output_excel, columns_to_extract, columns_to_write, save_interval)
+        return ExcelTaskPool(input_excel, output_excel, columns_to_extract, columns_to_write, save_interval, require_all_input_fields)
 
     else:
         raise ValueError(f"不支持的数据源类型配置: '{ds_type}'")

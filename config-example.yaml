@@ -10,6 +10,7 @@ global:
 # 数据源类型配置
 datasource:
   type: excel   # 明确指定使用Excel数据源
+  require_all_input_fields: true  # 是否要求所有输入字段都非空才处理该行 (true=全部非空, false=至少一个非空)
   concurrency:  # 将并发配置移至此处，便于程序统一处理
     max_workers: 1000
     batch_size: 1000
