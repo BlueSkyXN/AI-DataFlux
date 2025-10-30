@@ -197,6 +197,7 @@ channels:
     api_path: "/v1/chat/completions"
     timeout: 300
     proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
+    ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
 ```
 
 ## 系统架构
@@ -357,6 +358,26 @@ models:
    - 减小`max_shard_size`和`batch_size`
    - 降低`max_connections`值减少连接池内存占用
    - 分离运行Flux-Api和AI-DataFlux至不同服务器
+
+6. **Mac上SSL证书验证失败**
+   - 错误信息: `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed`
+   - 解决方案: 在通道配置中设置 `ssl_verify: false`
+   - 示例:
+     ```yaml
+     channels:
+       "1":
+         name: "api-provider"
+         base_url: "https://api.example.com"
+         ssl_verify: false  # 临时禁用SSL验证
+     ```
+   - ⚠️ 注意: 这会降低安全性，仅建议在测试环境或Mac证书问题时使用
+   - 永久解决方案:
+     ```bash
+     # 更新Python证书
+     pip install --upgrade certifi
+     # 或运行macOS自带的证书安装脚本
+     /Applications/Python\ 3.*/Install\ Certificates.command
+     ```
 
 ### 开启调试日志
 

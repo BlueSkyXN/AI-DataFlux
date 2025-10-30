@@ -19,6 +19,7 @@ import threading # 保留用于锁
 import os
 import sys
 import uuid
+import ssl
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple, Union, Literal, AsyncIterable
 from contextlib import asynccontextmanager # 用于 lifespan
@@ -405,6 +406,8 @@ class ModelConfig:
         # 处理代理配置，确保是有效字符串或None
         proxy_setting = channel_cfg.get("proxy", "")
         self.channel_proxy = proxy_setting if isinstance(proxy_setting, str) and proxy_setting.strip() else None
+        # SSL证书验证开关，默认True（安全），Mac上可能需要设为False
+        self.ssl_verify = channel_cfg.get("ssl_verify", True)
         if not self.base_url:
              raise ValueError(f"通道 '{self.channel_id}' 缺少 base_url 配置")
 
@@ -774,9 +777,19 @@ class FluxApiService:
         response_text_preview = ""
 
         try:
+            # 创建SSL上下文
+            ssl_context = None
+            if not model_cfg.ssl_verify:
+                # 禁用SSL证书验证（仅用于测试或Mac证书问题）
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                logging.warning(f"模型 [{model_cfg.id}] 已禁用SSL证书验证 (ssl_verify=false)")
+
             # 创建会话并发送 POST 请求
             # 注意: trust_env=False 可以禁用环境变量代理（如果需要精确控制）
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.post(url, headers=headers, json=payload, proxy=proxy) as resp:
                     response_status = resp.status
                     # 检查 HTTP 错误状态码 (4xx 或 5xx)

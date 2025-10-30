@@ -110,6 +110,7 @@ channels:
     api_path: "/v1/chat/completions"
     timeout: 300
     proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
+    ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
 
 
 # 提示词配置
