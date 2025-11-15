@@ -40,7 +40,7 @@ class ErrorType:
 # --- TaskMetadata Class for Internal State Management ---
 class TaskMetadata:
     """Manages internal state and retry information for tasks, completely separated from business data."""
-    
+
     def __init__(self, record_id: Any):
         self.record_id = record_id
         self.retry_counts: Dict[str, int] = {
@@ -51,7 +51,7 @@ class TaskMetadata:
         self.created_at = time.time()
         self.last_retry_at: Optional[float] = None
         self.error_history: List[Dict[str, Any]] = []
-        self.original_data: Optional[Dict[str, Any]] = None  # 缓存原始数据
+        # ✅ 移除 original_data 缓存，使用 reload_task_data 从数据源重新加载
     
     def increment_retry(self, error_type: str) -> int:
         """Increment retry count for specific error type and return new count."""
@@ -78,16 +78,7 @@ class TaskMetadata:
     def get_total_retries(self) -> int:
         """Get total retry count across all error types."""
         return sum(self.retry_counts.values())
-    
-    def cache_original_data(self, data: Dict[str, Any]):
-        """Cache the original clean data for retries."""
-        # 只缓存业务数据，确保不包含内部字段
-        self.original_data = {k: v for k, v in data.items() if not k.startswith('_')}
-    
-    def get_original_data(self) -> Optional[Dict[str, Any]]:
-        """Get cached original data."""
-        return self.original_data.copy() if self.original_data else None
-    
+
     def __repr__(self) -> str:
         return f"TaskMetadata(id={self.record_id}, retries={self.retry_counts}, total={self.get_total_retries()})"
 
@@ -794,11 +785,11 @@ class UniversalAIProcessor:
                                 if not self.is_task_in_progress(record_id):
                                     # 标记为处理中
                                     self.mark_task_in_progress(record_id)
-                                    
-                                    # 获取或创建任务元数据，并缓存原始数据
+
+                                    # 获取或创建任务元数据（仅用于跟踪重试计数）
                                     metadata = self.get_task_metadata(record_id)
-                                    metadata.cache_original_data(data)
-                                    
+                                    # ✅ 不再缓存数据，重试时使用 reload_task_data 从数据源加载
+
                                     # 为每个任务创建异步任务并添加到活动集合
                                     task = asyncio.create_task(
                                         self.process_one_record_async(session, record_id, data)
@@ -859,14 +850,21 @@ class UniversalAIProcessor:
                                         metadata.increment_retry(error_type)
                                         metadata.add_error_record(error_type, result.get('_error', ''))
                                         self.task_manager.retried_tasks_count[error_type] += 1
-                                        
+
                                         logging.warning(f"记录[{record_id}] API错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
-                                        # 使用元数据中缓存的原始数据
-                                        clean_data = metadata.get_original_data()
+                                        # ✅ 从数据源重新加载原始数据（不使用内存缓存）
+                                        clean_data = self.task_pool.reload_task_data(record_id)
                                         if clean_data:
                                             tasks_to_retry.append((record_id, clean_data))
                                         else:
-                                            logging.error(f"记录[{record_id}] 无法获取缓存的原始数据，无法重试")
+                                            logging.error(f"记录[{record_id}] 从数据源重新加载数据失败，标记为最终失败")
+                                            self.task_manager.max_retries_exceeded_count += 1
+                                            results_buffer[record_id] = {
+                                                "_error": "reload_failed: 无法从数据源重新加载数据",
+                                                "_error_type": ErrorType.SYSTEM_ERROR,
+                                                "_final_attempt": True
+                                            }
+                                            self.remove_task_metadata(record_id)
                                     else:
                                         # 超过最大重试次数，记录为最终失败
                                         logging.error(f"记录[{record_id}] API错误，已达最大重试次数({max_retries})，标记为最终失败")
@@ -882,20 +880,27 @@ class UniversalAIProcessor:
                                 elif error_type == ErrorType.CONTENT_ERROR:
                                     current_retries = metadata.get_retry_count(error_type)
                                     max_retries = self.task_manager.max_retry_counts.get(error_type, 1)
-                                    
+
                                     if current_retries < max_retries:
                                         # 更新重试计数到分离的元数据中
                                         metadata.increment_retry(error_type)
                                         metadata.add_error_record(error_type, result.get('_error', ''))
                                         self.task_manager.retried_tasks_count[error_type] += 1
-                                        
+
                                         logging.warning(f"记录[{record_id}] 内容错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
-                                        # 使用元数据中缓存的原始数据
-                                        clean_data = metadata.get_original_data()
+                                        # ✅ 从数据源重新加载原始数据（不使用内存缓存）
+                                        clean_data = self.task_pool.reload_task_data(record_id)
                                         if clean_data:
                                             tasks_to_retry.append((record_id, clean_data))
                                         else:
-                                            logging.error(f"记录[{record_id}] 无法获取缓存的原始数据，无法重试")
+                                            logging.error(f"记录[{record_id}] 从数据源重新加载数据失败，标记为最终失败")
+                                            self.task_manager.max_retries_exceeded_count += 1
+                                            results_buffer[record_id] = {
+                                                "_error": "reload_failed: 无法从数据源重新加载数据",
+                                                "_error_type": ErrorType.SYSTEM_ERROR,
+                                                "_final_attempt": True
+                                            }
+                                            self.remove_task_metadata(record_id)
                                     else:
                                         # 超过最大重试次数，记录为最终失败
                                         logging.warning(f"记录[{record_id}] 内容错误，已达最大重试次数({max_retries})，标记为最终失败")
@@ -911,20 +916,27 @@ class UniversalAIProcessor:
                                 elif error_type == ErrorType.SYSTEM_ERROR:
                                     current_retries = metadata.get_retry_count(error_type)
                                     max_retries = self.task_manager.max_retry_counts.get(error_type, 2)
-                                    
+
                                     if current_retries < max_retries:
                                         # 更新重试计数到分离的元数据中
                                         metadata.increment_retry(error_type)
                                         metadata.add_error_record(error_type, result.get('_error', ''))
                                         self.task_manager.retried_tasks_count[error_type] += 1
-                                        
+
                                         logging.error(f"记录[{record_id}] 系统错误: {result.get('_error')}，重试 {current_retries+1}/{max_retries}")
-                                        # 使用元数据中缓存的原始数据
-                                        clean_data = metadata.get_original_data()
+                                        # ✅ 从数据源重新加载原始数据（不使用内存缓存）
+                                        clean_data = self.task_pool.reload_task_data(record_id)
                                         if clean_data:
                                             tasks_to_retry.append((record_id, clean_data))
                                         else:
-                                            logging.error(f"记录[{record_id}] 无法获取缓存的原始数据，无法重试")
+                                            logging.error(f"记录[{record_id}] 从数据源重新加载数据失败，标记为最终失败")
+                                            self.task_manager.max_retries_exceeded_count += 1
+                                            results_buffer[record_id] = {
+                                                "_error": "reload_failed: 无法从数据源重新加载数据",
+                                                "_error_type": ErrorType.SYSTEM_ERROR,
+                                                "_final_attempt": True
+                                            }
+                                            self.remove_task_metadata(record_id)
                                     else:
                                         # 超过最大重试次数，记录为最终失败
                                         logging.error(f"记录[{record_id}] 系统错误，已达最大重试次数({max_retries})，标记为最终失败")
@@ -975,14 +987,21 @@ class UniversalAIProcessor:
                                         metadata.increment_retry(ErrorType.SYSTEM_ERROR)
                                         metadata.add_error_record(ErrorType.SYSTEM_ERROR, str(e))
                                         self.task_manager.retried_tasks_count[ErrorType.SYSTEM_ERROR] += 1
-                                        
+
                                         logging.error(f"记录[{record_id}] 处理异常，重试 {current_retries+1}/{max_retries}")
-                                        # 使用元数据中缓存的原始数据
-                                        clean_data = metadata.get_original_data()
+                                        # ✅ 从数据源重新加载原始数据（不使用内存缓存）
+                                        clean_data = self.task_pool.reload_task_data(record_id)
                                         if clean_data:
                                             tasks_to_retry.append((record_id, clean_data))
                                         else:
-                                            logging.error(f"记录[{record_id}] 无法获取缓存的原始数据，无法重试")
+                                            logging.error(f"记录[{record_id}] 从数据源重新加载数据失败，标记为最终失败")
+                                            self.task_manager.max_retries_exceeded_count += 1
+                                            results_buffer[record_id] = {
+                                                "_error": "reload_failed: 无法从数据源重新加载数据",
+                                                "_error_type": ErrorType.SYSTEM_ERROR,
+                                                "_final_attempt": True
+                                            }
+                                            self.remove_task_metadata(record_id)
                                     else:
                                         # 超过最大重试次数，记录为最终失败
                                         logging.error(f"记录[{record_id}] 处理异常，已达最大重试次数({max_retries})，标记为最终失败")

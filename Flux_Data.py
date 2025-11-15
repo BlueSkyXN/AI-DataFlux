@@ -758,17 +758,18 @@ if EXCEL_ENABLED:
         def reload_task_data(self, idx: int) -> Optional[Dict[str, Any]]:
             """Reloads the original input data for a specific task index."""
             try:
-                # Read access might be okay without lock if updates are careful
-                if idx in self.df.index:
-                    row_data = self.df.loc[idx]
-                    record_dict = {
-                        c: str(row_data.get(c)) if pd.notna(row_data.get(c)) else ""
-                        for c in self.columns_to_extract
-                    }
-                    return record_dict
-                else:
-                    logging.warning(f"尝试重载数据失败：索引 {idx} 在 DataFrame 中不存在。")
-                    return None
+                # ✅ 添加锁保护，防止与 update_task_results 的写操作竞争
+                with self.lock:
+                    if idx in self.df.index:
+                        row_data = self.df.loc[idx]
+                        record_dict = {
+                            c: str(row_data.get(c)) if pd.notna(row_data.get(c)) else ""
+                            for c in self.columns_to_extract
+                        }
+                        return record_dict
+                    else:
+                        logging.warning(f"尝试重载数据失败：索引 {idx} 在 DataFrame 中不存在。")
+                        return None
             except Exception as e:
                 logging.error(f"重载索引 {idx} 数据时发生错误: {e}", exc_info=True)
                 return None
