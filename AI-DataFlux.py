@@ -828,8 +828,8 @@ class UniversalAIProcessor:
                     for completed_task in done:
                         try:
                             result = completed_task.result()
-                            record_id, original_data = task_id_map.pop(completed_task)
-                            
+                            record_id, _ = task_id_map.pop(completed_task)  # data不再使用，改用reload
+
                             # 标记任务已完成处理 (无论成功还是失败)
                             self.mark_task_completed(record_id)
                             
@@ -971,7 +971,7 @@ class UniversalAIProcessor:
                         except Exception as e:
                             # 任务执行过程中发生异常
                             try:
-                                record_id, original_data = task_id_map.pop(completed_task, (None, None))
+                                record_id, _ = task_id_map.pop(completed_task, (None, None))  # data不再使用，改用reload
                                 if record_id is not None:
                                     # 确保任务被标记为已完成，即使出错
                                     self.mark_task_completed(record_id)
