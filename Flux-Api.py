@@ -638,13 +638,10 @@ class FluxApiService:
                       logging.debug(f"模型名称 '{m.name}' 被多个模型使用。") # DEBUG级别
                  self.model_name_to_id[m.name] = m.id
 
-        # 构建静态权重池 (基于 base_weight)
-        self.models_pool = []
-        for model in self.models:
-             if model.base_weight > 0: # 只包含权重大于0的模型
-                 self.models_pool.extend([model] * model.base_weight)
-        if not self.models_pool: logging.warning("模型池为空！所有模型的权重可能为0。")
-        logging.debug(f"初始化静态模型池完成，大小: {len(self.models_pool)}")
+        # 验证至少有一个模型具有有效权重
+        if not any(model.base_weight > 0 for model in self.models):
+            logging.warning("所有模型的权重都为0或负数，随机选择将无法工作。")
+        logging.debug(f"模型管理器初始化完成，共 {len(self.models)} 个模型")
 
     async def _get_or_create_session(self, ssl_verify: bool, proxy: Optional[str]) -> aiohttp.ClientSession:
         """
@@ -803,28 +800,25 @@ class FluxApiService:
                  logging.warning(f"请求的模型 [{target_model_id}] 在排除列表中。尝试随机选择。")
                  use_random_selection = True
 
-        # 3. 执行随机选择 (如果需要)
+        # 3. 执行加权随机选择 (如果需要)
         if use_random_selection:
-            current_pool = self.models_pool # 使用初始化时构建的静态池
-            if not current_pool:
-                logging.error("模型池为空，无法随机选择模型。")
-                return None
-
-            # 从池中过滤出当前可用且未被排除且能通过限流的模型
-            eligible_models_in_pool = [
-                 model for model in current_pool
-                 if model.id not in exclude_set                     # 未被排除
-                 and self.dispatcher.is_model_available(model.id) # 调度器可用
-                 and self.rate_limiter.can_process(model.id)      # 限流器允许
+            # 从所有模型中过滤出符合条件的唯一模型（避免重复引用）
+            eligible_models = [
+                 model for model in self.models
+                 if model.base_weight > 0                           # 权重必须大于0
+                 and model.id not in exclude_set                    # 未被排除
+                 and self.dispatcher.is_model_available(model.id)  # 调度器可用
+                 and self.rate_limiter.can_process(model.id)       # 限流器允许
             ]
 
-            if not eligible_models_in_pool:
+            if not eligible_models:
                 logging.warning(f"没有符合条件的可用模型进行随机选择 (已排除: {exclude_set})。")
                 return None
 
-            # 从符合条件的模型池中随机选择一个 (已包含权重)
-            chosen_model = random.choice(eligible_models_in_pool)
-            logging.debug(f"随机选择了可用模型: {chosen_model.name or chosen_model.id} (基础权重: {chosen_model.base_weight})")
+            # 使用加权随机算法选择模型（基于 base_weight）
+            weights = [model.base_weight for model in eligible_models]
+            chosen_model = random.choices(eligible_models, weights=weights, k=1)[0]
+            logging.debug(f"加权随机选择了可用模型: {chosen_model.name or chosen_model.id} (权重: {chosen_model.base_weight}/{sum(weights)})")
             return chosen_model
 
         return None # 理论上不应到达这里
