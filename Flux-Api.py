@@ -654,21 +654,14 @@ class FluxApiService:
         # 生成Session池的key (基于SSL和代理配置)
         session_key = (ssl_verify, proxy or "")
 
-        # 快速路径：如果session已存在，直接返回
-        if session_key in self._session_pool:
-            # 更新使用统计
-            self._session_stats[session_key]["request_count"] += 1
-            self._session_stats[session_key]["last_used"] = time.time()
-            logging.debug(f"复用现有Session (ssl_verify={ssl_verify}, proxy={proxy or 'None'}), "
-                         f"总请求数: {self._session_stats[session_key]['request_count']}")
-            return self._session_pool[session_key]
-
-        # Session不存在，需要创建 (使用锁保证并发安全)
+        # 使用锁保护Session池的访问和统计更新，防止竞态条件
         async with self._session_lock:
-            # 双重检查：可能在等待锁期间已被其他协程创建
+            # 如果session已存在，更新统计并返回
             if session_key in self._session_pool:
                 self._session_stats[session_key]["request_count"] += 1
                 self._session_stats[session_key]["last_used"] = time.time()
+                logging.debug(f"复用现有Session (ssl_verify={ssl_verify}, proxy={proxy or 'None'}), "
+                             f"总请求数: {self._session_stats[session_key]['request_count']}")
                 return self._session_pool[session_key]
 
             # 创建SSL上下文
