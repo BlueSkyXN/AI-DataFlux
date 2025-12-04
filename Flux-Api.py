@@ -510,6 +510,10 @@ class FluxApiService:
         self.load_config(config_path) # 加载配置
         self.setup_logging() # 设置日志
         self.initialize_models() # 初始化模型相关组件
+        # 初始化HTTP客户端Session池 (用于连接复用)
+        self._session_pool: Dict[Tuple[bool, str], aiohttp.ClientSession] = {}
+        self._session_lock = asyncio.Lock() # 用于保护session池的并发访问
+        self._session_stats: Dict[Tuple[bool, str], Dict[str, Any]] = {} # Session使用统计
         # 注意：后台任务（如动态权重调整）已移除
         logging.info(f"FluxApiService 初始化完成，加载了 {len(self.models)} 个模型")
 
@@ -634,13 +638,109 @@ class FluxApiService:
                       logging.debug(f"模型名称 '{m.name}' 被多个模型使用。") # DEBUG级别
                  self.model_name_to_id[m.name] = m.id
 
-        # 构建静态权重池 (基于 base_weight)
-        self.models_pool = []
-        for model in self.models:
-             if model.base_weight > 0: # 只包含权重大于0的模型
-                 self.models_pool.extend([model] * model.base_weight)
-        if not self.models_pool: logging.warning("模型池为空！所有模型的权重可能为0。")
-        logging.debug(f"初始化静态模型池完成，大小: {len(self.models_pool)}")
+        # 验证至少有一个模型具有有效权重
+        if not any(model.base_weight > 0 for model in self.models):
+            logging.warning("所有模型的权重都为0或负数，随机选择将无法工作。")
+        logging.debug(f"模型管理器初始化完成，共 {len(self.models)} 个模型")
+
+    async def _get_or_create_session(self, ssl_verify: bool, proxy: Optional[str]) -> aiohttp.ClientSession:
+        """
+        获取或创建HTTP客户端Session (支持连接池复用)
+
+        :param ssl_verify: 是否验证SSL证书
+        :param proxy: 代理配置 (可选)
+        :return: 复用的或新创建的ClientSession
+        """
+        # 生成Session池的key (基于SSL和代理配置)
+        session_key = (ssl_verify, proxy or "")
+
+        # 快速路径：如果session已存在，直接返回
+        if session_key in self._session_pool:
+            # 更新使用统计
+            self._session_stats[session_key]["request_count"] += 1
+            self._session_stats[session_key]["last_used"] = time.time()
+            logging.debug(f"复用现有Session (ssl_verify={ssl_verify}, proxy={proxy or 'None'}), "
+                         f"总请求数: {self._session_stats[session_key]['request_count']}")
+            return self._session_pool[session_key]
+
+        # Session不存在，需要创建 (使用锁保证并发安全)
+        async with self._session_lock:
+            # 双重检查：可能在等待锁期间已被其他协程创建
+            if session_key in self._session_pool:
+                self._session_stats[session_key]["request_count"] += 1
+                self._session_stats[session_key]["last_used"] = time.time()
+                return self._session_pool[session_key]
+
+            # 创建SSL上下文
+            ssl_context = None
+            if not ssl_verify:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                logging.info(f"为Session池创建禁用SSL验证的上下文 (ssl_verify=False)")
+
+            # 创建优化的TCPConnector (连接池配置)
+            connector = aiohttp.TCPConnector(
+                limit=100,                    # 总连接数限制
+                limit_per_host=30,            # 每个主机的连接数限制
+                ttl_dns_cache=300,            # DNS缓存TTL (5分钟)
+                ssl=ssl_context,              # SSL上下文
+                enable_cleanup_closed=True,   # 启用关闭连接的清理
+                force_close=False             # 保持连接复用 (不强制关闭)
+            )
+
+            # 创建ClientSession (不设置默认timeout，在请求时设置)
+            session = aiohttp.ClientSession(
+                connector=connector,
+                # trust_env=True 允许使用环境变量代理 (如果未明确指定)
+                trust_env=(proxy is None)
+            )
+
+            # 存储到池中
+            self._session_pool[session_key] = session
+
+            # 初始化统计信息
+            self._session_stats[session_key] = {
+                "created_at": time.time(),
+                "request_count": 1,
+                "last_used": time.time(),
+                "ssl_verify": ssl_verify,
+                "proxy": proxy or "None"
+            }
+
+            logging.info(f"创建新Session并加入池 (ssl_verify={ssl_verify}, proxy={proxy or 'None'}), "
+                        f"当前池大小: {len(self._session_pool)}")
+
+            return session
+
+    async def close(self):
+        """
+        关闭所有HTTP客户端Session，释放连接池资源
+        在应用关闭时调用
+        """
+        logging.info(f"开始关闭Session池，当前池大小: {len(self._session_pool)}")
+
+        # 记录Session使用统计
+        for session_key, stats in self._session_stats.items():
+            ssl_verify, proxy = session_key
+            lifetime = time.time() - stats["created_at"]
+            logging.info(f"Session统计 (ssl_verify={ssl_verify}, proxy={proxy}): "
+                        f"请求数={stats['request_count']}, "
+                        f"生命周期={lifetime:.2f}秒")
+
+        # 关闭所有session
+        close_tasks = []
+        for session_key, session in self._session_pool.items():
+            close_tasks.append(session.close())
+
+        if close_tasks:
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+            logging.info(f"已关闭 {len(close_tasks)} 个Session")
+
+        # 清空池和统计
+        self._session_pool.clear()
+        self._session_stats.clear()
+        logging.info("Session池清理完成")
 
     def resolve_model_id(self, model_name_or_id: str) -> Optional[str]:
         """将用户请求的模型名称/ID解析为内部配置的模型ID"""
@@ -700,28 +800,25 @@ class FluxApiService:
                  logging.warning(f"请求的模型 [{target_model_id}] 在排除列表中。尝试随机选择。")
                  use_random_selection = True
 
-        # 3. 执行随机选择 (如果需要)
+        # 3. 执行加权随机选择 (如果需要)
         if use_random_selection:
-            current_pool = self.models_pool # 使用初始化时构建的静态池
-            if not current_pool:
-                logging.error("模型池为空，无法随机选择模型。")
-                return None
-
-            # 从池中过滤出当前可用且未被排除且能通过限流的模型
-            eligible_models_in_pool = [
-                 model for model in current_pool
-                 if model.id not in exclude_set                     # 未被排除
-                 and self.dispatcher.is_model_available(model.id) # 调度器可用
-                 and self.rate_limiter.can_process(model.id)      # 限流器允许
+            # 从所有模型中过滤出符合条件的唯一模型（避免重复引用）
+            eligible_models = [
+                 model for model in self.models
+                 if model.base_weight > 0                           # 权重必须大于0
+                 and model.id not in exclude_set                    # 未被排除
+                 and self.dispatcher.is_model_available(model.id)  # 调度器可用
+                 and self.rate_limiter.can_process(model.id)       # 限流器允许
             ]
 
-            if not eligible_models_in_pool:
+            if not eligible_models:
                 logging.warning(f"没有符合条件的可用模型进行随机选择 (已排除: {exclude_set})。")
                 return None
 
-            # 从符合条件的模型池中随机选择一个 (已包含权重)
-            chosen_model = random.choice(eligible_models_in_pool)
-            logging.debug(f"随机选择了可用模型: {chosen_model.name or chosen_model.id} (基础权重: {chosen_model.base_weight})")
+            # 使用加权随机算法选择模型（基于 base_weight）
+            weights = [model.base_weight for model in eligible_models]
+            chosen_model = random.choices(eligible_models, weights=weights, k=1)[0]
+            logging.debug(f"加权随机选择了可用模型: {chosen_model.name or chosen_model.id} (权重: {chosen_model.base_weight}/{sum(weights)})")
             return chosen_model
 
         return None # 理论上不应到达这里
@@ -777,82 +874,74 @@ class FluxApiService:
         response_text_preview = ""
 
         try:
-            # 创建SSL上下文
-            ssl_context = None
-            if not model_cfg.ssl_verify:
-                # 禁用SSL证书验证（仅用于测试或Mac证书问题）
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                logging.warning(f"模型 [{model_cfg.id}] 已禁用SSL证书验证 (ssl_verify=false)")
+            # 从Session池获取复用的Session (基于SSL验证和代理配置)
+            # Session池自动处理SSL上下文和连接器配置
+            session = await self._get_or_create_session(model_cfg.ssl_verify, proxy)
 
-            # 创建会话并发送 POST 请求
-            # 注意: trust_env=False 可以禁用环境变量代理（如果需要精确控制）
-            connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                async with session.post(url, headers=headers, json=payload, proxy=proxy) as resp:
-                    response_status = resp.status
-                    # 检查 HTTP 错误状态码 (4xx 或 5xx)
-                    if response_status >= 400:
-                        try: # 尝试读取错误响应体
-                            error_text = await resp.text(); response_text_preview = error_text[:500]
-                        except Exception as read_err: # 读取失败
-                            error_text = f"(无法读取响应体: {read_err})"; response_text_preview = error_text
-                        logging.error(f"模型 [{model_cfg.id}] API失败: HTTP {response_status}. URL: {url}. 预览: {response_text_preview}")
-                        # 使用 aiohttp 的 raise_for_status() 抛出 ClientResponseError
-                        resp.raise_for_status()
+            # 发送 POST 请求 (使用复用的session，在请求级别设置timeout)
+            async with session.post(url, headers=headers, json=payload, proxy=proxy, timeout=timeout) as resp:
+                response_status = resp.status
+                # 检查 HTTP 错误状态码 (4xx 或 5xx)
+                if response_status >= 400:
+                    try: # 尝试读取错误响应体
+                        error_text = await resp.text(); response_text_preview = error_text[:500]
+                    except Exception as read_err: # 读取失败
+                        error_text = f"(无法读取响应体: {read_err})"; response_text_preview = error_text
+                    logging.error(f"模型 [{model_cfg.id}] API失败: HTTP {response_status}. URL: {url}. 预览: {response_text_preview}")
+                    # 使用 aiohttp 的 raise_for_status() 抛出 ClientResponseError
+                    resp.raise_for_status()
 
-                    # 请求成功 (2xx)
-                    response_time = time.time() - start_time
-                    logging.info(f"模型 [{model_cfg.id}] API成功 (HTTP {response_status})，耗时: {response_time:.2f}s")
+                # 请求成功 (2xx)
+                response_time = time.time() - start_time
+                logging.info(f"模型 [{model_cfg.id}] API成功 (HTTP {response_status})，耗时: {response_time:.2f}s")
 
-                    # 根据请求是流式还是非流式进行处理
-                    if stream:
-                        # 返回异步生成器对象，不需要 await
-                        return self._handle_streaming_response(resp, model_cfg, start_time)
-                    else:
-                        # 处理非流式响应
-                        content_type = resp.headers.get('Content-Type', '').lower()
-                        response_text = await resp.text()
-                        response_text_preview = response_text[:500] # 用于日志
-                        try:
-                            # 尝试解析 JSON
-                            data = json.loads(response_text)
-                            # 验证基本结构
-                            if not isinstance(data, dict) or "choices" not in data or not data.get("choices"):
-                                raise ValueError("响应缺少 'choices' 字段或为空")
-                            choice = data["choices"][0]
-                            if not choice.get("message") or "content" not in choice["message"]:
-                                raise ValueError("响应 choice[0] 缺少 'message.content'")
-                            content = choice["message"]["content"]
-                            # 获取 token 使用情况 (如果存在)
-                            usage = data.get("usage", {})
-                            prompt_tokens = usage.get("prompt_tokens")
-                            completion_tokens = usage.get("completion_tokens")
-                            # 标记成功并更新指标
-                            self.dispatcher.mark_model_success(model_cfg.id)
-                            self.dispatcher.update_model_metrics(model_cfg.id, response_time, True)
-                            # 返回包含内容和 token 数的元组
-                            return content, prompt_tokens, completion_tokens
-                        except json.JSONDecodeError as e:
-                            # 如果 JSON 解析失败，检查是否是意外收到的事件流
-                            if 'text/event-stream' in content_type or (response_text.strip().startswith("data:") and "[DONE]" in response_text):
-                                logging.warning(f"模型 [{model_cfg.id}] 在非流请求中返回事件流，尝试提取内容。")
-                                content = self._extract_content_from_event_stream(response_text)
-                                if content:
-                                     # 如果成功提取，也视为成功
-                                     self.dispatcher.mark_model_success(model_cfg.id)
-                                     self.dispatcher.update_model_metrics(model_cfg.id, response_time, True)
-                                     return content, None, None # Token 数未知
-                                else:
-                                     # 提取失败
-                                     raise ValueError("无法从意外的事件流中提取内容") from e
+                # 根据请求是流式还是非流式进行处理
+                if stream:
+                    # 返回异步生成器对象，不需要 await
+                    return self._handle_streaming_response(resp, model_cfg, start_time)
+                else:
+                    # 处理非流式响应
+                    content_type = resp.headers.get('Content-Type', '').lower()
+                    response_text = await resp.text()
+                    response_text_preview = response_text[:500] # 用于日志
+                    try:
+                        # 尝试解析 JSON
+                        data = json.loads(response_text)
+                        # 验证基本结构
+                        if not isinstance(data, dict) or "choices" not in data or not data.get("choices"):
+                            raise ValueError("响应缺少 'choices' 字段或为空")
+                        choice = data["choices"][0]
+                        if not choice.get("message") or "content" not in choice["message"]:
+                            raise ValueError("响应 choice[0] 缺少 'message.content'")
+                        content = choice["message"]["content"]
+                        # 获取 token 使用情况 (如果存在)
+                        usage = data.get("usage", {})
+                        prompt_tokens = usage.get("prompt_tokens")
+                        completion_tokens = usage.get("completion_tokens")
+                        # 标记成功并更新指标
+                        self.dispatcher.mark_model_success(model_cfg.id)
+                        self.dispatcher.update_model_metrics(model_cfg.id, response_time, True)
+                        # 返回包含内容和 token 数的元组
+                        return content, prompt_tokens, completion_tokens
+                    except json.JSONDecodeError as e:
+                        # 如果 JSON 解析失败，检查是否是意外收到的事件流
+                        if 'text/event-stream' in content_type or (response_text.strip().startswith("data:") and "[DONE]" in response_text):
+                            logging.warning(f"模型 [{model_cfg.id}] 在非流请求中返回事件流，尝试提取内容。")
+                            content = self._extract_content_from_event_stream(response_text)
+                            if content:
+                                 # 如果成功提取，也视为成功
+                                 self.dispatcher.mark_model_success(model_cfg.id)
+                                 self.dispatcher.update_model_metrics(model_cfg.id, response_time, True)
+                                 return content, None, None # Token 数未知
                             else:
-                                # 真正的 JSON 解析错误
-                                raise ValueError(f"响应无法解析为有效JSON") from e
-                        except ValueError as e:
-                            # 捕获上面抛出的结构验证错误
-                            raise e
+                                 # 提取失败
+                                 raise ValueError("无法从意外的事件流中提取内容") from e
+                        else:
+                            # 真正的 JSON 解析错误
+                            raise ValueError(f"响应无法解析为有效JSON") from e
+                    except ValueError as e:
+                        # 捕获上面抛出的结构验证错误
+                        raise e
 
         # --- 异常处理 ---
         except aiohttp.ClientResponseError as e: # HTTP 4xx/5xx 错误
@@ -1252,8 +1341,13 @@ async def lifespan(app_instance: FastAPI): # 使用 lifespan 替代 on_event
     pid = os.getpid()
     print(f"--> 正在关闭 Flux API Worker (PID: {pid})...")
     if service:
-        logging.info(f"Worker (PID: {pid}) 正在关闭。")
-        # 此处可以添加服务关闭时需要执行的清理代码 (如果需要)
+        logging.info(f"Worker (PID: {pid}) 正在关闭，清理资源...")
+        try:
+            # 关闭HTTP客户端Session池，释放连接资源
+            await service.close()
+            logging.info(f"Worker (PID: {pid}) 资源清理完成。")
+        except Exception as e:
+            logging.error(f"Worker (PID: {pid}) 关闭时发生错误: {e}", exc_info=True)
     else:
         logging.info(f"Worker (PID: {pid}) 关闭 (未完全初始化或已关闭)。")
     print(f"--> Flux API Worker (PID: {pid}) 关闭完成。")
