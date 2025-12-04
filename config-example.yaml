@@ -9,25 +9,22 @@ global:
 
 # 数据源类型配置
 datasource:
-  type: excel   # 明确指定使用Excel数据源
-  require_all_input_fields: true  # 是否要求所有输入字段都非空才处理该行 (true=全部非空, false=至少一个非空)
-  concurrency:  # 将并发配置移至此处，便于程序统一处理
-    max_workers: 1000
-    batch_size: 1000
-    save_interval: 1800    # Excel文件保存间隔
-    retry_times: 1
-    backoff_factor: 3
-    shard_size: 100000     # 默认分片大小
-    min_shard_size: 1000  # 最小分片大小
-    max_shard_size: 200000 # 最大分片大小
-    api_pause_duration: 1.0       # API错误时全局暂停秒数 (可选, 默认 2.0)
-    api_error_trigger_window: 1.0     # 多少秒内的API错误才会触发暂停 (可选, 默认 2.0)
-    max_connections: 2500            # aiohttp的最大并发连接数 (可选, 默认 1000)
-    max_connections_per_host: 0      # 对每个主机的最大并发连接数 (可选, 0表示无限制)
-    retry_limits:
-      api_error: 10      # API错误最多重试10次
-      content_error: 10    # 内容错误最多重试10次
-      system_error: 10    # 系统错误最多重试10次
+  type: excel   # 数据源类型: mysql 或 excel
+  require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
+  concurrency:
+    batch_size: 100        # 批处理大小（也用作最大并发任务数）
+    save_interval: 300     # Excel文件保存间隔（秒）
+    shard_size: 10000      # 默认分片大小
+    min_shard_size: 1000   # 最小分片大小
+    max_shard_size: 50000  # 最大分片大小
+    api_pause_duration: 2.0        # API错误时全局暂停秒数
+    api_error_trigger_window: 2.0  # 多少秒内的API错误才会触发暂停
+    max_connections: 1000          # aiohttp的最大并发连接数
+    max_connections_per_host: 0    # 对每个主机的最大并发连接数（0表示无限制）
+    retry_limits:                  # 按错误类型配置重试次数
+      api_error: 3                 # API错误（超时、HTTP错误）最多重试次数
+      content_error: 1             # 内容错误（JSON解析失败）最多重试次数
+      system_error: 2              # 系统错误（内部异常）最多重试次数
 
 # MySQL数据源配置（仅当type=mysql时有效）
 mysql:
@@ -71,15 +68,16 @@ validation:
 # 模型配置
 models:
   - id: 1
-    name: "model-1"
-    model: "gpt-4-turbo"
-    channel_id: "1"
-    api_key: "your_api_key_1"
-    timeout: 300
-    weight: 10
-    temperature: 0.3
-    safe_rps: 5  # 每秒安全请求数
-    supports_json_schema: true
+    name: "model-1"               # 模型显示名称
+    model: "gpt-4-turbo"          # 实际模型标识符
+    channel_id: "1"               # 所属通道ID
+    api_key: "your_api_key_1"     # API密钥
+    timeout: 300                  # 超时时间（秒）
+    weight: 10                    # 调度权重（使用加权随机算法）
+    temperature: 0.3              # 模型温度
+    safe_rps: 5                   # 每秒安全请求数（令牌桶限流）
+    supports_json_schema: true    # 是否支持JSON Schema输出格式
+    supports_advanced_params: true  # 是否支持高级参数（presence_penalty等）
 
   - id: 2
     name: "model-2"
@@ -91,6 +89,7 @@ models:
     temperature: 0.3
     safe_rps: 3
     supports_json_schema: true
+    supports_advanced_params: false
 
   - id: 3
     name: "model-3"
@@ -102,6 +101,7 @@ models:
     temperature: 0.3
     safe_rps: 10
     supports_json_schema: false
+    supports_advanced_params: false
 
 # 通道配置
 channels:
@@ -110,7 +110,7 @@ channels:
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     timeout: 300
-    proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
+    proxy: ""         # 可选代理设置，例如 "http://127.0.0.1:7890"
     ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
 
 

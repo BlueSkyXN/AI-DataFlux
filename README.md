@@ -9,10 +9,13 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 - **高并发处理**：优化的异步架构实现高吞吐量任务处理
 - **连续任务流**：采用连续任务流模式，比传统批处理模式更高效
 - **API错误自适应**：全局暂停机制替代传统重试，更优雅地处理API限流
+- **分类重试机制**：按错误类型（API/内容/系统）独立配置重试次数
 - **灵活的配置系统**：通过YAML文件实现全方位配置
 - **字段值验证**：支持对返回结果的字段值进行枚举验证
 - **JSON Schema支持**：通过Schema约束AI输出格式，提高结果一致性
 - **读写锁优化**：使用读写锁分离，提高多线程下的并发性能
+- **Session连接池**：HTTP连接复用，减少连接建立开销
+- **向量化数据过滤**：DataFrame操作使用向量化方法，大数据集性能提升50-100x
 - **内存使用监控**：自动监控内存使用，在高内存使用时触发垃圾回收
 - **可视化进度**：实时显示处理进度和统计信息
 
@@ -81,8 +84,8 @@ global:
 ```yaml
 datasource:
   type: excel    # 数据源类型: mysql, excel
+  require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:   # 并发配置
-    max_workers: 5          # 最大工作线程数
     batch_size: 100         # 批处理大小（也用作最大并发任务数）
     save_interval: 300      # Excel保存间隔（秒）
     shard_size: 10000       # 默认分片大小
@@ -92,6 +95,10 @@ datasource:
     api_error_trigger_window: 2.0   # 多少秒内的API错误才会触发暂停
     max_connections: 1000           # aiohttp的最大并发连接数
     max_connections_per_host: 0     # 对每个主机的最大并发连接数（0表示无限制）
+    retry_limits:                   # 按错误类型配置重试次数
+      api_error: 3                  # API错误最多重试3次
+      content_error: 1              # 内容错误最多重试1次
+      system_error: 2               # 系统错误最多重试2次
 ```
 
 ### 数据源特定配置
@@ -141,6 +148,8 @@ prompt:
   use_json_schema: true  # 是否启用JSON Schema输出约束
   model: "auto"          # 使用的AI模型，auto表示自动选择
   temperature: 0.3       # 模型温度参数（0-1之间）
+  system_prompt: |       # 系统提示词（可选）
+    你是一个专业的数据分析师...
   template: |            # 提示词模板，{record_json}为数据占位符
     请分析以下数据并提供专业的回答:
 
@@ -184,10 +193,11 @@ models:
     channel_id: "1"              # 所属通道ID
     api_key: "your_api_key_1"    # API密钥
     timeout: 300                 # 超时时间（秒）
-    weight: 10                   # 调度权重
+    weight: 10                   # 调度权重（使用加权随机算法）
     temperature: 0.3             # 模型温度
-    safe_rps: 5                  # 每秒安全请求数
+    safe_rps: 5                  # 每秒安全请求数（令牌桶限流）
     supports_json_schema: true   # 是否支持JSON Schema
+    supports_advanced_params: false  # 是否支持高级参数（presence_penalty等）
 
 # 通道配置
 channels:
@@ -210,9 +220,10 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 
 - **多模型管理**：管理多个AI模型和厂商API
 - **自动故障切换**：当某个模型暂时不可用或出错时自动切换到其他可用模型
-- **智能负载均衡**：根据配置的权重分配请求至不同模型
-- **连接池优化**：高效管理HTTP连接，提高并发性能
+- **智能负载均衡**：使用加权随机算法（`random.choices`）根据配置的权重分配请求
+- **Session连接池**：按(ssl_verify, proxy)组合复用HTTP连接，避免重复创建ClientSession
 - **令牌桶限流**：为每个模型单独实现基于令牌桶的限流策略
+- **指数退避**：API错误时自动退避（2s→4s→6s→指数增长，最长60s）
 - **流式响应支持**：完整支持流式和非流式响应模式
 - **管理API**：提供模型状态和健康监控接口
 
@@ -234,23 +245,30 @@ python Flux-Api.py --config config.yaml
 #### 主要组件
 
 1. **任务池管理**：`BaseTaskPool`抽象基类及其具体实现
-   - `MySQLTaskPool`: MySQL数据源实现
-   - `ExcelTaskPool`: Excel数据源实现
+   - `MySQLTaskPool`: MySQL数据源实现，支持连接池和事务
+   - `ExcelTaskPool`: Excel数据源实现，支持向量化过滤和定时保存
 
 2. **分片任务管理**：`ShardedTaskManager`类
    - 动态分片大小计算
    - 分片加载和进度跟踪
    - 内存使用监控
+   - 按错误类型统计重试次数
 
-3. **错误处理机制**：`ErrorType`类
+3. **任务元数据管理**：`TaskMetadata`类
+   - 完全分离内部状态与业务数据
+   - 按错误类型独立跟踪重试计数
+   - 重试时从数据源重新加载原始数据（避免内存泄漏）
+
+4. **错误处理机制**：`ErrorType`类
    - 区分API错误、内容错误和系统错误
-   - 全局暂停替代传统重试
+   - 各类型独立配置最大重试次数
+   - API错误触发全局暂停
 
-4. **字段验证系统**：`JsonValidator`类
+5. **字段验证系统**：`JsonValidator`类
    - 灵活配置字段值验证规则
    - 支持JSON Schema格式约束
 
-5. **主处理流程**：`UniversalAIProcessor`类
+6. **主处理流程**：`UniversalAIProcessor`类
    - 连续任务流处理
    - 智能错误处理和重试
    - 实时进度报告
@@ -315,19 +333,38 @@ prompt:
 ```yaml
 models:
   - id: model1
-    weight: 10     # 相对调用频率权重
-    safe_rps: 5    # 每秒安全请求数限制
+    weight: 10     # 相对调用频率权重（使用加权随机算法）
+    safe_rps: 5    # 每秒安全请求数限制（令牌桶容量为safe_rps*2）
 ```
 
-较大的weight表示该模型被选中的概率更高，而safe_rps限制了对单个模型的请求频率。
+较大的weight表示该模型被选中的概率更高（权重10的模型被选中概率是权重5的2倍），而safe_rps限制了对单个模型的请求频率。
+
+### 分类重试机制
+
+系统按错误类型独立管理重试：
+
+```yaml
+datasource:
+  concurrency:
+    retry_limits:
+      api_error: 3      # API错误（超时、HTTP错误）最多重试3次
+      content_error: 1  # 内容错误（JSON解析失败）最多重试1次
+      system_error: 2   # 系统错误（内部异常）最多重试2次
+```
+
+- **API错误**：触发全局暂停后重试，从数据源重新加载原始数据
+- **内容错误**：直接重试，不暂停
+- **系统错误**：直接重试，不暂停
 
 ### 内存管理
 
 系统会自动监控内存使用情况：
 
 - 在处理大量数据时自动监控内存使用
-- 当内存使用率高于85%或进程内存超过1.5GB时触发垃圾回收
+- 当内存使用率高于85%或进程内存超过40GB时触发垃圾回收
 - 动态调整分片大小以适应可用内存
+- 任务元数据与业务数据完全分离，重试时从数据源重新加载，避免内存泄漏
+- 定期清理超过24小时的过期任务元数据
 
 ## 调试与故障排除
 
@@ -397,6 +434,8 @@ global:
 - 当前内存使用情况（MB）
 - 分片加载和处理状态
 - API错误统计和暂停触发情况
+- 按错误类型的重试统计
+- 重试超限任务计数
 
 ---
 
