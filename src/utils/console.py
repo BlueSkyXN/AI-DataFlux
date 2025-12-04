@@ -8,6 +8,41 @@ output functions that work on Windows, Linux, and macOS.
 import sys
 import os
 import locale
+import io
+
+
+def _safe_print(text: str):
+    """
+    Safe print that handles encoding errors gracefully.
+    
+    On Windows with cp1252, Unicode characters will be replaced with ASCII alternatives.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # Fallback: replace problematic characters
+        ascii_text = text.encode('ascii', errors='replace').decode('ascii')
+        print(ascii_text)
+
+
+def _configure_windows_console():
+    """Configure Windows console for better Unicode support."""
+    if sys.platform != 'win32':
+        return
+    
+    try:
+        # Try to set UTF-8 mode
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+    
+    try:
+        # Try to set console code page to UTF-8
+        import subprocess
+        subprocess.run(['chcp', '65001'], shell=True, capture_output=True)
+    except Exception:
+        pass
 
 
 def supports_unicode() -> bool:
@@ -23,12 +58,13 @@ def supports_unicode() -> bool:
     if os.environ.get('FORCE_UNICODE', '').lower() in ('1', 'true', 'yes'):
         return True
     
-    # Check if running in CI environment (usually supports Unicode)
-    if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
-        return True
-    
     # Check platform
     if sys.platform == 'win32':
+        # Check if running in CI environment - GitHub Actions Windows uses cp1252
+        if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+            # GitHub Actions Windows runner doesn't support Unicode well
+            return False
+        
         # Windows: check if using Windows Terminal or compatible console
         # Windows Terminal sets WT_SESSION
         if os.environ.get('WT_SESSION'):
@@ -50,6 +86,10 @@ def supports_unicode() -> bool:
             pass
         # Default: Windows cmd.exe doesn't support Unicode well
         return False
+    
+    # Unix-like systems: check if running in CI
+    if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+        return True
     
     # Unix-like systems: check encoding
     try:
@@ -78,10 +118,8 @@ class Console:
     Usage:
         from src.utils.console import console
         
-        console.ok("Operation successful")    # ✓ or [OK]
-        console.error("Something failed")     # ✗ or [ERROR]
-        console.info("Information")           # ℹ or [INFO]
-        console.tip("Helpful tip")            # 💡 or [TIP]
+        console.print_ok("Operation successful")    # ✓ or [OK]
+        console.print_error("Something failed")     # ✗ or [ERROR]
     """
     
     # Unicode symbols
@@ -90,6 +128,8 @@ class Console:
     UNICODE_INFO = "ℹ"
     UNICODE_TIP = "💡"
     UNICODE_WARN = "⚠"
+    UNICODE_CHECK = "✅"
+    UNICODE_CROSS = "❌"
     
     # ASCII fallbacks
     ASCII_OK = "[OK]"
@@ -97,6 +137,8 @@ class Console:
     ASCII_INFO = "[INFO]"
     ASCII_TIP = "[TIP]"
     ASCII_WARN = "[WARN]"
+    ASCII_CHECK = "[OK]"
+    ASCII_CROSS = "[--]"
     
     def __init__(self):
         self._unicode = None  # Lazy evaluation
@@ -132,40 +174,44 @@ class Console:
     def warn(self) -> str:
         return self.UNICODE_WARN if self.unicode else self.ASCII_WARN
     
+    @property
+    def check(self) -> str:
+        return self.UNICODE_CHECK if self.unicode else self.ASCII_CHECK
+    
+    @property
+    def cross(self) -> str:
+        return self.UNICODE_CROSS if self.unicode else self.ASCII_CROSS
+    
     def print_ok(self, message: str):
         """Print success message."""
-        print(f"{self.ok} {message}")
+        _safe_print(f"{self.ok} {message}")
     
     def print_error(self, message: str):
         """Print error message."""
-        print(f"{self.error} {message}")
+        _safe_print(f"{self.error} {message}")
     
     def print_info(self, message: str):
         """Print info message."""
-        print(f"{self.info} {message}")
+        _safe_print(f"{self.info} {message}")
     
     def print_tip(self, message: str):
         """Print tip message."""
-        print(f"{self.tip} {message}")
+        _safe_print(f"{self.tip} {message}")
     
     def print_warn(self, message: str):
         """Print warning message."""
-        print(f"{self.warn} {message}")
+        _safe_print(f"{self.warn} {message}")
 
 
 # Global console instance
 console = Console()
 
 
-# Convenience functions
 def print_status(available: bool, name: str, state_true: str = "installed", state_false: str = "not installed"):
     """Print status line with check mark or X."""
-    if console.unicode:
-        status = "✅" if available else "❌"
-    else:
-        status = "[OK]" if available else "[--]"
+    status = console.check if available else console.cross
     state = state_true if available else state_false
-    print(f"{status} {name}: {state}")
+    _safe_print(f"{status} {name}: {state}")
 
 
 def print_error(message: str):

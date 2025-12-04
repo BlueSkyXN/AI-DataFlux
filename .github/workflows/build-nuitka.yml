@@ -9,11 +9,15 @@ on:
       - master
       - dev
     paths:
-      - '**.py'
+      - 'src/**'
+      - 'cli.py'
+      - 'main.py'
+      - 'gateway.py'
       - 'requirements.txt'
   pull_request:
     paths:
-      - '**.py'
+      - 'src/**'
+      - '*.py'
   workflow_dispatch:
     inputs:
       version:
@@ -36,7 +40,13 @@ jobs:
           - os: ubuntu-latest
             artifact_name: AI-DataFlux-nuitka-linux-amd64
             asset_name: AI-DataFlux-nuitka-linux-amd64
+          - os: ubuntu-24.04-arm
+            artifact_name: AI-DataFlux-nuitka-linux-arm64
+            asset_name: AI-DataFlux-nuitka-linux-arm64
           - os: macos-latest
+            artifact_name: AI-DataFlux-nuitka-macos-arm64
+            asset_name: AI-DataFlux-nuitka-macos-arm64
+          - os: macos-13
             artifact_name: AI-DataFlux-nuitka-macos-amd64
             asset_name: AI-DataFlux-nuitka-macos-amd64
           - os: windows-latest
@@ -131,9 +141,11 @@ jobs:
             ## ${{ env.APP_NAME }} ${{ github.ref_name }} (Nuitka Build)
             
             ### Downloads
-            - **Linux**: `AI-DataFlux-nuitka-linux-amd64`
-            - **macOS**: `AI-DataFlux-nuitka-macos-amd64`
-            - **Windows**: `AI-DataFlux-nuitka-windows-amd64.exe`
+            - **Linux (x64)**: `AI-DataFlux-nuitka-linux-amd64`
+            - **Linux (ARM64)**: `AI-DataFlux-nuitka-linux-arm64`
+            - **macOS (Apple Silicon)**: `AI-DataFlux-nuitka-macos-arm64`
+            - **macOS (Intel)**: `AI-DataFlux-nuitka-macos-amd64`
+            - **Windows (x64)**: `AI-DataFlux-nuitka-windows-amd64.exe`
             
             ### Build Info
             - Builder: Nuitka (compiled to native code)
