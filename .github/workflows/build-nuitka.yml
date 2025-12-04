@@ -37,19 +37,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact_name: AI-DataFlux-nuitka-linux-amd64
             asset_name: AI-DataFlux-nuitka-linux-amd64
           - os: ubuntu-24.04-arm
             artifact_name: AI-DataFlux-nuitka-linux-arm64
             asset_name: AI-DataFlux-nuitka-linux-arm64
-          - os: macos-latest
+          - os: macos-15
             artifact_name: AI-DataFlux-nuitka-macos-arm64
             asset_name: AI-DataFlux-nuitka-macos-arm64
-          - os: macos-13
+          - os: macos-15-large
             artifact_name: AI-DataFlux-nuitka-macos-amd64
             asset_name: AI-DataFlux-nuitka-macos-amd64
-          - os: windows-latest
+          - os: windows-2025
             artifact_name: AI-DataFlux-nuitka-windows-amd64.exe
             asset_name: AI-DataFlux-nuitka-windows-amd64.exe
 
