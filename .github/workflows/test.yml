@@ -1,0 +1,153 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '**.py'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # 代码质量检查
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install linters
+        run: pip install ruff
+
+      - name: Run Ruff linter
+        run: ruff check . --output-format=github || true
+
+      - name: Check syntax errors
+        run: |
+          python -m py_compile cli.py main.py gateway.py
+          find src -name "*.py" -exec python -m py_compile {} \;
+
+  # 单元测试 + 集成测试
+  test:
+    name: Tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.10', '3.11', '3.12']
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # CLI 功能测试
+  cli-test:
+    name: CLI Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Test CLI version
+        run: python cli.py version
+
+      - name: Test CLI check
+        run: python cli.py check
+
+      - name: Test CLI help
+        run: |
+          python cli.py --help
+          python cli.py process --help
+          python cli.py gateway --help
+
+      - name: Test config validation
+        run: python cli.py process --config config-example.yaml --validate
+
+  # 高性能库测试
+  perf-libs:
+    name: Performance Libraries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install all dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check library availability
+        run: python cli.py check
+
+      - name: Test engine factory
+        run: |
+          python -c "
+          from src.data.engines import get_engine, get_available_libraries, POLARS_AVAILABLE
+          
+          libs = get_available_libraries()
+          print('Available libraries:', {k: v for k, v in libs.items() if v})
+          
+          # Test pandas engine
+          engine = get_engine('pandas', 'auto', 'auto')
+          print(f'PandasEngine: reader={engine.excel_reader}, writer={engine.excel_writer}')
+          
+          # Test auto engine
+          engine = get_engine('auto', 'auto', 'auto')
+          print(f'Auto selected: {engine.name}')
+          
+          # Test polars if available
+          if POLARS_AVAILABLE:
+              engine = get_engine('polars')
+              print(f'PolarsEngine: {engine.name}')
+          "
+
+

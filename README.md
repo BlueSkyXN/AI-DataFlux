@@ -56,16 +56,41 @@ cp config-example.yaml config.yaml
 
 然后编辑`config.yaml`，设置您的API密钥、数据源信息等配置。
 
+### 使用统一命令行 (推荐)
+
+```bash
+# 查看帮助
+python cli.py --help
+
+# 检查依赖库状态
+python cli.py check
+
+# 查看版本
+python cli.py version
+
+# 启动 API 网关
+python cli.py gateway --port 8787
+
+# 运行数据处理
+python cli.py process --config config.yaml
+
+# 仅验证配置
+python cli.py process --config config.yaml --validate
+```
+
 ### 启动 API 网关
 
 首先启动API网关（确保始终在后台运行）：
 
 ```bash
-# 启动API网关
+# 使用统一入口
+python cli.py gateway --port 8787
+
+# 或使用独立入口
 python gateway.py --config config.yaml --port 8787
 
-# 或者使用nohup在后台运行
-nohup python gateway.py --config config.yaml --port 8787 > gateway.log 2>&1 &
+# 后台运行
+nohup python cli.py gateway --port 8787 > gateway.log 2>&1 &
 ```
 
 ### 运行数据处理引擎
@@ -73,11 +98,14 @@ nohup python gateway.py --config config.yaml --port 8787 > gateway.log 2>&1 &
 确保API网关已启动，然后运行数据处理引擎：
 
 ```bash
-# 运行数据处理
+# 使用统一入口
+python cli.py process --config config.yaml
+
+# 或使用独立入口
 python main.py --config config.yaml
 
 # 仅验证配置文件
-python main.py --config config.yaml --validate
+python cli.py process --validate
 ```
 
 您也可以使用`screen`或`tmux`等工具在后台运行这两个组件。
