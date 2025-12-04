@@ -4,13 +4,19 @@ on:
   push:
     branches: [main, master, dev]
     paths:
-      - '**.py'
+      - 'src/**'
+      - 'tests/**'
+      - 'cli.py'
+      - 'main.py'
+      - 'gateway.py'
       - 'requirements.txt'
       - '.github/workflows/test.yml'
   pull_request:
     branches: [main, master, dev]
     paths:
-      - '**.py'
+      - 'src/**'
+      - 'tests/**'
+      - '*.py'
   workflow_dispatch:
 
 env:
@@ -33,7 +39,7 @@ jobs:
         run: pip install ruff
 
       - name: Run Ruff linter
-        run: ruff check . --output-format=github || true
+        run: ruff check src/ tests/ cli.py main.py gateway.py --output-format=github || true
 
       - name: Check syntax errors
         run: |

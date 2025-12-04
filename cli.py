@@ -12,25 +12,17 @@ Usage:
 
 import argparse
 import sys
-import os
-
-# Fix Windows console encoding
-if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except Exception:
-        pass
 
 
 def cmd_process(args):
     """Run data processing"""
+    from src.utils.console import console
     from src.core import UniversalAIProcessor
     
     if args.validate:
         from src.config import load_config
         config = load_config(args.config)
-        print(f"[OK] Config valid: {args.config}")
+        print(f"{console.ok} Config valid: {args.config}")
         print(f"  - Datasource: {config.get('datasource', {}).get('type', 'excel')}")
         print(f"  - Engine: {config.get('datasource', {}).get('engine', 'auto')}")
         print(f"  - Input columns: {config.get('columns_to_extract', [])}")
@@ -66,25 +58,24 @@ def cmd_version(args):
 def cmd_check(args):
     """Check library status"""
     from src.data.engines import get_available_libraries
+    from src.utils.console import console, print_status
     
     print("AI-DataFlux Library Status\n")
     print("=" * 40)
     
     libs = get_available_libraries()
     for name, available in libs.items():
-        status = "[OK]" if available else "[--]"
-        state = "installed" if available else "not installed"
-        print(f"{status} {name}: {state}")
+        print_status(available, name)
     
     print("=" * 40)
     
     # Recommend installation
     missing = [name for name, avail in libs.items() if not avail]
     if missing:
-        print(f"\nTip: Install high-performance libraries:")
+        print(f"\n{console.tip} Install high-performance libraries:")
         print(f"   pip install {' '.join(missing)}")
     else:
-        print(f"\n[OK] All high-performance libraries installed!")
+        print(f"\n{console.ok} All high-performance libraries installed!")
     
     return 0
 
@@ -133,7 +124,8 @@ def main():
         print("\nInterrupted by user")
         return 1
     except Exception as e:
-        print(f"\n[ERROR] {e}")
+        from src.utils.console import console
+        print(f"\n{console.error} {e}")
         import traceback
         traceback.print_exc()
         return 1
