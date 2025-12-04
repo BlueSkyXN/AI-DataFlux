@@ -2,13 +2,13 @@ name: Test
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev]
     paths:
       - '**.py'
       - 'requirements.txt'
       - '.github/workflows/test.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main, master, dev]
     paths:
       - '**.py'
   workflow_dispatch:
