@@ -10,40 +10,76 @@
 """
 
 import logging
+import subprocess
+import sys
 from typing import Literal, Any
 
 from .base import BaseEngine
 from .pandas_engine import PandasEngine
 
-# 库可用性检测
-POLARS_AVAILABLE = False
-FASTEXCEL_AVAILABLE = False
-XLSXWRITER_AVAILABLE = False
-NUMPY_AVAILABLE = False
 
-try:
-    import polars  # noqa: F401
-    POLARS_AVAILABLE = True
-except ImportError:
-    pass
+def _safe_check_library(import_code: str, lib_name: str, timeout: int = 30) -> bool:
+    """
+    在子进程中安全检测库是否可用
+    
+    某些库 (如 polars, fastexcel) 在特定平台上导入时可能导致进程崩溃
+    (如 Windows ARM + Python 3.13 上的 "Fatal Python error: Illegal instruction")
+    因此必须在子进程中测试，避免崩溃主进程。
+    
+    Args:
+        import_code: 要执行的导入代码
+        lib_name: 库名称 (用于日志)
+        timeout: 超时时间 (秒)
+        
+    Returns:
+        库是否可用
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", import_code],
+            capture_output=True,
+            timeout=timeout,
+        )
+        if result.returncode == 0:
+            logging.debug(f"{lib_name} 库可用")
+            return True
+        else:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            if stderr:
+                logging.debug(f"{lib_name} 检测失败: {stderr[:200]}")
+            return False
+    except subprocess.TimeoutExpired:
+        logging.warning(f"{lib_name} 可用性检测超时")
+        return False
+    except Exception as e:
+        logging.debug(f"{lib_name} 检测异常: {e}")
+        return False
 
-try:
-    import fastexcel  # noqa: F401
-    FASTEXCEL_AVAILABLE = True
-except ImportError:
-    pass
 
-try:
-    import xlsxwriter  # noqa: F401
-    XLSXWRITER_AVAILABLE = True
-except ImportError:
-    pass
+# 库可用性检测 (全部使用子进程安全检测)
+POLARS_AVAILABLE = _safe_check_library(
+    "import polars; polars.DataFrame({'x': [1]})",
+    "Polars"
+)
 
-try:
-    import numpy  # noqa: F401
-    NUMPY_AVAILABLE = True
-except ImportError:
-    pass
+FASTEXCEL_AVAILABLE = _safe_check_library(
+    "import fastexcel",
+    "fastexcel"
+)
+
+XLSXWRITER_AVAILABLE = _safe_check_library(
+    "import xlsxwriter",
+    "xlsxwriter"
+)
+
+NUMPY_AVAILABLE = _safe_check_library(
+    "import numpy",
+    "numpy"
+)
+
+# 记录引擎选择
+if not POLARS_AVAILABLE:
+    logging.debug("Polars 库不可用，将使用 Pandas 作为默认引擎")
 
 
 EngineType = Literal["pandas", "polars", "auto"]

@@ -198,6 +198,13 @@ class TestPandasEngine:
 class TestPolarsEngine:
     """PolarsEngine 测试"""
     
+    @pytest.fixture(autouse=True)
+    def skip_if_polars_unavailable(self):
+        """如果 Polars 不可用则跳过整个测试类"""
+        from src.data.engines import POLARS_AVAILABLE
+        if not POLARS_AVAILABLE:
+            pytest.skip("Polars not available on this platform")
+    
     def test_read_excel(self, polars_engine, sample_excel_file):
         """测试读取 Excel"""
         import polars as pl
