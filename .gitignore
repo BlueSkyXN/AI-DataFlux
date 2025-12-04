@@ -175,3 +175,4 @@ cython_debug/
 config.yaml
 .DS_Store
 CLAUDE.md
+COPILOT.md

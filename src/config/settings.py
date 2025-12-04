@@ -1,0 +1,213 @@
+"""
+配置管理模块
+
+提供配置文件加载、日志初始化和默认配置定义。
+"""
+
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from ..models.errors import ConfigError
+
+
+# 默认配置值
+DEFAULT_CONFIG: dict[str, Any] = {
+    "global": {
+        "log": {
+            "level": "info",
+            "format": "text",
+            "output": "console",
+            "file_path": "./logs/ai_dataflux.log",
+            "date_format": "%Y-%m-%d %H:%M:%S",
+        },
+        "flux_api_url": "http://127.0.0.1:8787",
+    },
+    "datasource": {
+        "type": "excel",
+        "engine": "pandas",  # 数据引擎: pandas | polars
+        "require_all_input_fields": True,
+        "concurrency": {
+            "batch_size": 100,
+            "save_interval": 300,
+            "shard_size": 10000,
+            "min_shard_size": 1000,
+            "max_shard_size": 50000,
+            "api_pause_duration": 2.0,
+            "api_error_trigger_window": 2.0,
+            "max_connections": 1000,
+            "max_connections_per_host": 0,
+            "retry_limits": {
+                "api_error": 3,
+                "content_error": 1,
+                "system_error": 2,
+            },
+        },
+    },
+}
+
+
+def load_config(config_path: str | Path) -> dict[str, Any]:
+    """
+    加载 YAML 配置文件
+    
+    Args:
+        config_path: 配置文件路径
+        
+    Returns:
+        配置字典
+        
+    Raises:
+        ConfigError: 配置文件不存在或格式错误
+    """
+    config_path = Path(config_path)
+    
+    if not config_path.exists():
+        raise ConfigError(f"配置文件不存在: {config_path}")
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        
+        if not isinstance(config, dict):
+            raise ConfigError("配置文件格式错误: 根节点必须是字典")
+        
+        logging.info(f"配置文件 '{config_path}' 加载成功")
+        return config
+        
+    except yaml.YAMLError as e:
+        raise ConfigError(f"YAML 解析错误: {e}") from e
+    except Exception as e:
+        raise ConfigError(f"加载配置文件失败: {e}") from e
+
+
+def init_logging(log_config: dict[str, Any] | None = None) -> None:
+    """
+    初始化日志系统
+    
+    支持控制台和文件输出，支持 text 和 json 两种格式。
+    
+    Args:
+        log_config: 日志配置字典，包含以下可选键:
+            - level: 日志级别 (debug/info/warning/error)
+            - format: 日志格式 (text/json)
+            - output: 输出目标 (console/file)
+            - file_path: 日志文件路径 (当 output=file 时)
+            - date_format: 日期格式
+    """
+    if log_config is None:
+        log_config = {}
+    
+    # 解析配置
+    level_str = log_config.get("level", "info").upper()
+    level = getattr(logging, level_str, logging.INFO)
+    
+    log_format_type = log_config.get("format", "text")
+    if log_format_type == "json":
+        log_format = (
+            '{"time": "%(asctime)s", "level": "%(levelname)s", '
+            '"name": "%(name)s", "message": "%(message)s"}'
+        )
+    else:
+        log_format = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+    
+    date_format = log_config.get("date_format", "%Y-%m-%d %H:%M:%S")
+    output_type = log_config.get("output", "console")
+    
+    # 创建处理器
+    handlers: list[logging.Handler] = []
+    
+    if output_type == "file":
+        file_path = log_config.get("file_path", "./logs/ai_dataflux.log")
+        try:
+            log_dir = os.path.dirname(file_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.FileHandler(file_path, encoding="utf-8")
+            handlers.append(file_handler)
+            print(f"日志将输出到文件: {file_path}")
+        except Exception as e:
+            print(f"创建日志文件失败: {e}，回退到控制台", file=sys.stderr)
+            output_type = "console"
+    
+    if output_type == "console" or not handlers:
+        console_handler = logging.StreamHandler(sys.stdout)
+        handlers.append(console_handler)
+    
+    # 配置根日志器
+    logging.basicConfig(
+        level=level,
+        format=log_format,
+        datefmt=date_format,
+        handlers=handlers,
+        force=True,
+    )
+    
+    # 降低第三方库的日志级别
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    
+    # 尝试降低 MySQL 日志级别 (如果可用)
+    try:
+        logging.getLogger("mysql.connector").setLevel(logging.WARNING)
+    except Exception:
+        pass
+    
+    logging.info(f"日志系统初始化完成 | 级别: {level_str}, 输出: {output_type}")
+
+
+def get_nested(config: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """
+    安全获取嵌套配置值
+    
+    Args:
+        config: 配置字典
+        *keys: 键路径
+        default: 默认值
+        
+    Returns:
+        配置值或默认值
+        
+    Example:
+        >>> config = {"a": {"b": {"c": 1}}}
+        >>> get_nested(config, "a", "b", "c")
+        1
+        >>> get_nested(config, "a", "x", default=0)
+        0
+    """
+    result = config
+    for key in keys:
+        if isinstance(result, dict):
+            result = result.get(key)
+        else:
+            return default
+        if result is None:
+            return default
+    return result
+
+
+def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """
+    深度合并配置字典
+    
+    Args:
+        base: 基础配置
+        override: 覆盖配置
+        
+    Returns:
+        合并后的配置 (新字典，不修改原始配置)
+    """
+    result = base.copy()
+    
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_config(result[key], value)
+        else:
+            result[key] = value
+    
+    return result

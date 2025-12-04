@@ -10,6 +10,7 @@ global:
 # 数据源类型配置
 datasource:
   type: excel   # 数据源类型: mysql 或 excel
+  engine: pandas  # 数据引擎: pandas (默认) 或 polars (实验性，需安装polars)
   require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:
     batch_size: 100        # 批处理大小（也用作最大并发任务数）
