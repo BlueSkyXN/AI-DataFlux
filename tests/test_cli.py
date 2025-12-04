@@ -81,7 +81,7 @@ class TestCLI:
             text=True,
         )
         assert result.returncode == 0
-        assert "配置文件有效" in result.stdout or "valid" in result.stdout.lower()
+        assert "Config valid" in result.stdout or "[OK]" in result.stdout
     
     def test_process_invalid_config(self, tmp_path):
         """测试无效配置文件"""

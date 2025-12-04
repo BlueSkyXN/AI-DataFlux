@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI-DataFlux 统一命令行入口
+AI-DataFlux Unified CLI Entry Point
 
-用法:
-    python cli.py process --config config.yaml     # 运行数据处理
-    python cli.py gateway --port 8787              # 启动 API 网关
-    python cli.py version                          # 显示版本信息
-    python cli.py check                            # 检查依赖库状态
+Usage:
+    python cli.py process --config config.yaml     # Run data processing
+    python cli.py gateway --port 8787              # Start API gateway
+    python cli.py version                          # Show version info
+    python cli.py check                            # Check library status
 """
 
 import argparse
 import sys
+import os
+
+# Fix Windows console encoding
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 
 def cmd_process(args):
-    """运行数据处理"""
+    """Run data processing"""
     from src.core import UniversalAIProcessor
     
     if args.validate:
         from src.config import load_config
         config = load_config(args.config)
-        print(f"✓ 配置文件有效: {args.config}")
-        print(f"  - 数据源类型: {config.get('datasource', {}).get('type', 'excel')}")
-        print(f"  - 引擎: {config.get('datasource', {}).get('engine', 'auto')}")
-        print(f"  - 输入列: {config.get('columns_to_extract', [])}")
-        print(f"  - 输出列: {list(config.get('columns_to_write', {}).values())}")
+        print(f"[OK] Config valid: {args.config}")
+        print(f"  - Datasource: {config.get('datasource', {}).get('type', 'excel')}")
+        print(f"  - Engine: {config.get('datasource', {}).get('engine', 'auto')}")
+        print(f"  - Input columns: {config.get('columns_to_extract', [])}")
+        print(f"  - Output columns: {list(config.get('columns_to_write', {}).values())}")
         return 0
     
     processor = UniversalAIProcessor(args.config)
@@ -34,7 +43,7 @@ def cmd_process(args):
 
 
 def cmd_gateway(args):
-    """启动 API 网关"""
+    """Start API gateway"""
     from src.gateway.app import run_server
     
     run_server(
@@ -48,33 +57,34 @@ def cmd_gateway(args):
 
 
 def cmd_version(args):
-    """显示版本信息"""
+    """Show version info"""
     from src import __version__
     print(f"AI-DataFlux v{__version__}")
     return 0
 
 
 def cmd_check(args):
-    """检查依赖库状态"""
+    """Check library status"""
     from src.data.engines import get_available_libraries
     
-    print("AI-DataFlux 依赖库状态\n")
+    print("AI-DataFlux Library Status\n")
     print("=" * 40)
     
     libs = get_available_libraries()
     for name, available in libs.items():
-        status = "✅" if available else "❌"
-        print(f"{status} {name}: {'可用' if available else '未安装'}")
+        status = "[OK]" if available else "[--]"
+        state = "installed" if available else "not installed"
+        print(f"{status} {name}: {state}")
     
     print("=" * 40)
     
-    # 推荐安装
+    # Recommend installation
     missing = [name for name, avail in libs.items() if not avail]
     if missing:
-        print(f"\n💡 推荐安装高性能库:")
+        print(f"\nTip: Install high-performance libraries:")
         print(f"   pip install {' '.join(missing)}")
     else:
-        print(f"\n✅ 所有高性能库已安装，性能最优！")
+        print(f"\n[OK] All high-performance libraries installed!")
     
     return 0
 
@@ -82,33 +92,33 @@ def cmd_check(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="ai-dataflux",
-        description="AI-DataFlux: 高性能批量 AI 数据处理引擎",
+        description="AI-DataFlux: High-performance batch AI data processing engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
-    subparsers = parser.add_subparsers(dest="command", help="可用命令")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    # process 子命令
-    p_process = subparsers.add_parser("process", help="运行数据处理")
-    p_process.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
-    p_process.add_argument("--validate", action="store_true", help="仅验证配置")
+    # process subcommand
+    p_process = subparsers.add_parser("process", help="Run data processing")
+    p_process.add_argument("-c", "--config", default="config.yaml", help="Config file path")
+    p_process.add_argument("--validate", action="store_true", help="Only validate config")
     p_process.set_defaults(func=cmd_process)
     
-    # gateway 子命令
-    p_gateway = subparsers.add_parser("gateway", help="启动 API 网关")
-    p_gateway.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
-    p_gateway.add_argument("--host", default="0.0.0.0", help="监听地址")
-    p_gateway.add_argument("-p", "--port", type=int, default=8787, help="监听端口")
-    p_gateway.add_argument("-w", "--workers", type=int, default=1, help="工作进程数")
-    p_gateway.add_argument("--reload", action="store_true", help="自动重载")
+    # gateway subcommand
+    p_gateway = subparsers.add_parser("gateway", help="Start API gateway")
+    p_gateway.add_argument("-c", "--config", default="config.yaml", help="Config file path")
+    p_gateway.add_argument("--host", default="0.0.0.0", help="Listen address")
+    p_gateway.add_argument("-p", "--port", type=int, default=8787, help="Listen port")
+    p_gateway.add_argument("-w", "--workers", type=int, default=1, help="Worker processes")
+    p_gateway.add_argument("--reload", action="store_true", help="Auto reload")
     p_gateway.set_defaults(func=cmd_gateway)
     
-    # version 子命令
-    p_version = subparsers.add_parser("version", help="显示版本信息")
+    # version subcommand
+    p_version = subparsers.add_parser("version", help="Show version info")
     p_version.set_defaults(func=cmd_version)
     
-    # check 子命令
-    p_check = subparsers.add_parser("check", help="检查依赖库状态")
+    # check subcommand
+    p_check = subparsers.add_parser("check", help="Check library status")
     p_check.set_defaults(func=cmd_check)
     
     args = parser.parse_args()
@@ -120,10 +130,10 @@ def main():
     try:
         return args.func(args)
     except KeyboardInterrupt:
-        print("\n程序被用户中断")
+        print("\nInterrupted by user")
         return 1
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n[ERROR] {e}")
         import traceback
         traceback.print_exc()
         return 1
