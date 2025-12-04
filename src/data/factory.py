@@ -54,7 +54,11 @@ def create_task_pool(
     # 获取公共配置
     require_all_input_fields = datasource_config.get("require_all_input_fields", True)
     concurrency_config = datasource_config.get("concurrency", {})
-    engine_type = datasource_config.get("engine", "pandas")
+    
+    # 高性能引擎配置
+    engine_type = datasource_config.get("engine", "auto")
+    excel_reader = datasource_config.get("excel_reader", "auto")
+    excel_writer = datasource_config.get("excel_writer", "auto")
     
     logging.info(f"正在创建数据源任务池，类型: {datasource_type}")
     
@@ -74,7 +78,9 @@ def create_task_pool(
             columns_to_write,
             require_all_input_fields,
             concurrency_config,
-            engine_type
+            engine_type,
+            excel_reader,
+            excel_writer,
         )
     
     else:
@@ -126,7 +132,9 @@ def _create_excel_pool(
     columns_to_write: dict[str, str],
     require_all_input_fields: bool,
     concurrency_config: dict[str, Any],
-    engine_type: str
+    engine_type: str,
+    excel_reader: str = "auto",
+    excel_writer: str = "auto",
 ) -> BaseTaskPool:
     """创建 Excel 任务池"""
     if not EXCEL_ENABLED:
@@ -157,7 +165,9 @@ def _create_excel_pool(
         columns_to_write=columns_to_write,
         save_interval=concurrency_config.get("save_interval", 300),
         require_all_input_fields=require_all_input_fields,
-        engine_type=engine_type
+        engine_type=engine_type,
+        excel_reader=excel_reader,
+        excel_writer=excel_writer,
     )
 
 

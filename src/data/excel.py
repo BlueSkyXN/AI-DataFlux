@@ -2,6 +2,7 @@
 Excel 数据源任务池实现
 
 基于 DataFrame 引擎抽象，支持 pandas 和 polars 等多种实现。
+支持高性能读写器: calamine (fastexcel) 和 xlsxwriter。
 """
 
 import logging
@@ -37,7 +38,9 @@ class ExcelTaskPool(BaseTaskPool):
         columns_to_write: dict[str, str],
         save_interval: int = 300,
         require_all_input_fields: bool = True,
-        engine_type: str = "pandas"
+        engine_type: str = "pandas",
+        excel_reader: str = "auto",
+        excel_writer: str = "auto",
     ):
         """
         初始化 Excel 任务池
@@ -49,7 +52,9 @@ class ExcelTaskPool(BaseTaskPool):
             columns_to_write: 写回映射 {别名: 实际列名}
             save_interval: 自动保存间隔 (秒)
             require_all_input_fields: 是否要求所有输入字段都非空
-            engine_type: DataFrame 引擎类型 ("pandas" | "polars")
+            engine_type: DataFrame 引擎类型 ("pandas" | "polars" | "auto")
+            excel_reader: Excel 读取器 ("openpyxl" | "calamine" | "auto")
+            excel_writer: Excel 写入器 ("openpyxl" | "xlsxwriter" | "auto")
         
         Raises:
             FileNotFoundError: 输入文件不存在
@@ -65,9 +70,19 @@ class ExcelTaskPool(BaseTaskPool):
         # 初始化基类
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
         
-        # 获取 DataFrame 引擎
-        self.engine: BaseEngine = get_engine(engine_type)
+        # 获取 DataFrame 引擎 (支持高性能读写器配置)
+        self.engine: BaseEngine = get_engine(
+            engine_type=engine_type,
+            excel_reader=excel_reader,
+            excel_writer=excel_writer,
+        )
         logging.info(f"使用 DataFrame 引擎: {self.engine.name}")
+        
+        # 显示读写器信息
+        if hasattr(self.engine, 'excel_reader'):
+            logging.info(f"  - Excel 读取器: {self.engine.excel_reader}")
+        if hasattr(self.engine, 'excel_writer'):
+            logging.info(f"  - Excel 写入器: {self.engine.excel_writer}")
         
         # 读取 Excel 文件
         logging.info(f"正在读取 Excel 文件: {self.input_path}")
