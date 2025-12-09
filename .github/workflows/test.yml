@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHONIOENCODING: 'utf-8'
 
 jobs:
   # 代码质量检查
@@ -33,92 +33,113 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install linters
-        run: pip install ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff black mypy
 
-      - name: Run Ruff linter
-        run: ruff check src/ tests/ cli.py main.py gateway.py --output-format=github || true
+      - name: Run Ruff
+        run: ruff check src/ tests/ cli.py main.py gateway.py
 
-      - name: Check syntax errors
+      - name: Run Black (check)
+        run: black --check src/ tests/ cli.py main.py gateway.py
+
+      - name: Type check (allow missing types)
+        run: mypy src/ --ignore-missing-imports || true
+
+      - name: Syntax check
         run: |
           python -m py_compile cli.py main.py gateway.py
           find src -name "*.py" -exec python -m py_compile {} \;
 
-  # 单元测试 (每个系统一个 Job，内部串行测试多个 Python 版本)
-  test:
-    name: Test on ${{ matrix.os }}
+  # 单元测试
+  unit-tests:
+    name: Py ${{ matrix.python }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-22.04, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: ubuntu-24.04, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: ubuntu-24.04-arm, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: windows-2022, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: windows-2025, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: windows-11-arm, versions: "3.12\n3.13" }
-          - { os: macos-15-intel, versions: "3.10\n3.11\n3.12\n3.13\n3.14" }
-          - { os: macos-15, versions: "3.11\n3.12\n3.13\n3.14" }
-          - { os: macos-26, versions: "3.11\n3.12\n3.13\n3.14" }
-    
+          # Ubuntu 22.04
+          - { os: ubuntu-22.04, python: '3.10' }
+          - { os: ubuntu-22.04, python: '3.11' }
+          - { os: ubuntu-22.04, python: '3.12' }
+          - { os: ubuntu-22.04, python: '3.13' }
+          - { os: ubuntu-22.04, python: '3.14' }
+          # Ubuntu 24.04
+          - { os: ubuntu-24.04, python: '3.10' }
+          - { os: ubuntu-24.04, python: '3.11' }
+          - { os: ubuntu-24.04, python: '3.12' }
+          - { os: ubuntu-24.04, python: '3.13' }
+          - { os: ubuntu-24.04, python: '3.14' }
+          # Ubuntu 24.04 ARM
+          - { os: ubuntu-24.04-arm, python: '3.10', arch: 'arm64' }
+          - { os: ubuntu-24.04-arm, python: '3.11', arch: 'arm64' }
+          - { os: ubuntu-24.04-arm, python: '3.12', arch: 'arm64' }
+          - { os: ubuntu-24.04-arm, python: '3.13', arch: 'arm64' }
+          - { os: ubuntu-24.04-arm, python: '3.14', arch: 'arm64' }
+          # Windows Server 2022
+          - { os: windows-2022, python: '3.10' }
+          - { os: windows-2022, python: '3.11' }
+          - { os: windows-2022, python: '3.12' }
+          - { os: windows-2022, python: '3.13' }
+          - { os: windows-2022, python: '3.14' }
+          # Windows Server 2025
+          - { os: windows-2025, python: '3.10' }
+          - { os: windows-2025, python: '3.11' }
+          - { os: windows-2025, python: '3.12' }
+          - { os: windows-2025, python: '3.13' }
+          - { os: windows-2025, python: '3.14' }
+          # Windows 11 ARM
+          - { os: windows-11-arm, python: '3.12', arch: 'arm64' }
+          - { os: windows-11-arm, python: '3.13', arch: 'arm64' }
+          # macOS 15 Intel
+          - { os: macos-15-intel, python: '3.10', arch: 'x64' }
+          - { os: macos-15-intel, python: '3.11', arch: 'x64' }
+          - { os: macos-15-intel, python: '3.12', arch: 'x64' }
+          - { os: macos-15-intel, python: '3.13', arch: 'x64' }
+          - { os: macos-15-intel, python: '3.14', arch: 'x64' }
+          # macOS 15 ARM
+          - { os: macos-15, python: '3.11', arch: 'arm64' }
+          - { os: macos-15, python: '3.12', arch: 'arm64' }
+          - { os: macos-15, python: '3.13', arch: 'arm64' }
+          - { os: macos-15, python: '3.14', arch: 'arm64' }
+          # macOS 26
+          - { os: macos-26, python: '3.11' }
+          - { os: macos-26, python: '3.12' }
+          - { os: macos-26, python: '3.13' }
+          - { os: macos-26, python: '3.14' }
+
     steps:
       - uses: actions/checkout@v4
-      
-      # 一次性安装所有需要的 Python 版本
-      - name: Set up Python versions
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.versions }}
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch || 'x64' }}
           allow-prereleases: true
+          cache: 'pip'
 
-      - name: Run tests on all Python versions (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Install dependencies
         run: |
-          VERSIONS="${{ matrix.versions }}"
-          for version in $VERSIONS; do
-            echo ""
-            echo "::group::Testing Python $version"
-            echo "=========================================="
-            
-            PYTHON_CMD="python${version}"
-            if ! command -v $PYTHON_CMD &> /dev/null; then
-              PYTHON_CMD="python"
-            fi
-            
-            $PYTHON_CMD --version
-            $PYTHON_CMD -m pip install --upgrade pip -q
-            $PYTHON_CMD -m pip install -r requirements.txt -q
-            $PYTHON_CMD -m pip install pytest pytest-asyncio -q
-            $PYTHON_CMD -m pytest tests/ -v --tb=short
-            
-            echo "::endgroup::"
-          done
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov pytest-mock
 
-      - name: Run tests on all Python versions (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $versions = @("${{ matrix.versions }}" -split "`n")
-          foreach ($version in $versions) {
-            $version = $version.Trim()
-            if ([string]::IsNullOrEmpty($version)) { continue }
-            
-            Write-Host ""
-            Write-Host "::group::Testing Python $version"
-            Write-Host "=========================================="
-            
-            py -$version --version
-            py -$version -m pip install --upgrade pip -q
-            py -$version -m pip install -r requirements.txt -q
-            py -$version -m pip install pytest pytest-asyncio -q
-            py -$version -m pytest tests/ -v --tb=short
-            
-            Write-Host "::endgroup::"
-          }
+      - name: Run unit tests
+        run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-22.04' && matrix.python == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
 
   # CLI 功能测试
   cli-test:
@@ -130,7 +151,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
@@ -155,7 +176,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
           cache: 'pip'
 
       - name: Install all dependencies
@@ -168,22 +189,42 @@ jobs:
         run: |
           python -c "
           from src.data.engines import get_engine, get_available_libraries, POLARS_AVAILABLE
-          
+
           libs = get_available_libraries()
           print('Available libraries:', {k: v for k, v in libs.items() if v})
-          
+
           # Test pandas engine
           engine = get_engine('pandas', 'auto', 'auto')
           print(f'PandasEngine: reader={engine.excel_reader}, writer={engine.excel_writer}')
-          
+
           # Test auto engine
           engine = get_engine('auto', 'auto', 'auto')
           print(f'Auto selected: {engine.name}')
-          
+
           # Test polars if available
           if POLARS_AVAILABLE:
               engine = get_engine('polars')
               print(f'PolarsEngine: {engine.name}')
           "
 
+  # 集成测试 (可选)
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run integration tests
+        run: pytest tests/ -v -m "integration" --tb=short

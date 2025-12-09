@@ -1,0 +1,85 @@
+# Coverage.py 配置文件
+# 用于控制代码覆盖率分析的行为
+
+[run]
+# 指定要分析覆盖率的源代码目录
+source = src
+
+# 启用分支覆盖率分析
+branch = True
+
+# 排除不需要分析的文件和目录
+omit =
+    tests/*
+    */__pycache__/*
+    */site-packages/*
+    # Gateway 模块暂时不包含在覆盖率中
+    src/gateway/*
+    # Utils 工具模块
+    src/utils/console.py
+
+# 并行运行支持
+parallel = False
+
+# 上下文支持 (用于区分不同测试场景)
+dynamic_context = test_function
+
+[report]
+# 报告中排除的代码行
+exclude_lines =
+    # 标准排除
+    pragma: no cover
+
+    # 防御性编程
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+
+    # 条件导入和类型检查
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+    @typing.overload
+    @overload
+
+    # 主程序入口
+    if __name__ == .__main__.:
+
+    # 抽象方法
+    @abstractmethod
+    @abc.abstractmethod
+
+    # 仅用于调试的代码
+    def __str__
+    logger.debug
+
+    # 异常处理的通用捕获
+    except Exception:
+    except BaseException:
+
+# 显示缺失的行号
+show_missing = True
+
+# 跳过空文件
+skip_empty = True
+
+# 覆盖率精度 (小数点后位数)
+precision = 2
+
+# 按文件名排序
+sort = Name
+
+[html]
+# HTML 报告输出目录
+directory = htmlcov
+
+# HTML 报告标题
+title = AI-DataFlux 测试覆盖率报告
+
+[xml]
+# XML 报告输出文件 (用于 CI/CD)
+output = coverage.xml
+
+[json]
+# JSON 报告输出文件
+output = coverage.json
+show_contexts = True
