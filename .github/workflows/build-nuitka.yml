@@ -46,9 +46,6 @@ jobs:
           - os: macos-15
             artifact_name: AI-DataFlux-nuitka-macos-arm64
             asset_name: AI-DataFlux-nuitka-macos-arm64
-          - os: macos-15-large
-            artifact_name: AI-DataFlux-nuitka-macos-amd64
-            asset_name: AI-DataFlux-nuitka-macos-amd64
           - os: windows-2025
             artifact_name: AI-DataFlux-nuitka-windows-amd64.exe
             asset_name: AI-DataFlux-nuitka-windows-amd64.exe
@@ -144,7 +141,6 @@ jobs:
             - **Linux (x64)**: `AI-DataFlux-nuitka-linux-amd64`
             - **Linux (ARM64)**: `AI-DataFlux-nuitka-linux-arm64`
             - **macOS (Apple Silicon)**: `AI-DataFlux-nuitka-macos-arm64`
-            - **macOS (Intel)**: `AI-DataFlux-nuitka-macos-amd64`
             - **Windows (x64)**: `AI-DataFlux-nuitka-windows-amd64.exe`
             
             ### Build Info

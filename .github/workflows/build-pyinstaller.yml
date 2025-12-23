@@ -46,9 +46,6 @@ jobs:
           - os: macos-15
             artifact_name: AI-DataFlux-macos-arm64
             asset_name: AI-DataFlux-macos-arm64
-          - os: macos-15-large
-            artifact_name: AI-DataFlux-macos-amd64
-            asset_name: AI-DataFlux-macos-amd64
           - os: windows-2025
             artifact_name: AI-DataFlux-windows-amd64.exe
             asset_name: AI-DataFlux-windows-amd64.exe
@@ -121,7 +118,6 @@ jobs:
             - **Linux (x64)**: `AI-DataFlux-linux-amd64`
             - **Linux (ARM64)**: `AI-DataFlux-linux-arm64`
             - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64`
-            - **macOS (Intel)**: `AI-DataFlux-macos-amd64`
             - **Windows (x64)**: `AI-DataFlux-windows-amd64.exe`
             
             ### Build Info
@@ -134,4 +130,3 @@ jobs:
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
