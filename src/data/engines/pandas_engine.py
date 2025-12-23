@@ -271,18 +271,20 @@ class PandasEngine(BaseEngine):
         idx: int, 
         column: str, 
         value: Any
-    ) -> None:
+    ) -> pd.DataFrame:
         """设置单元格值"""
         df.at[idx, column] = value
+        return df
     
     def set_values_batch(
         self,
         df: pd.DataFrame,
         updates: list[tuple[int, str, Any]]
-    ) -> None:
+    ) -> pd.DataFrame:
         """批量设置多个单元格值"""
         for idx, column, value in updates:
             df.at[idx, column] = value
+        return df
     
     # ==================== 列操作 ====================
     
@@ -346,7 +348,8 @@ class PandasEngine(BaseEngine):
         df: pd.DataFrame,
         input_columns: list[str],
         output_columns: list[str],
-        require_all_inputs: bool = True
+        require_all_inputs: bool = True,
+        index_offset: int = 0
     ) -> list[int]:
         """
         向量化过滤: 查找未处理的行
@@ -409,11 +412,11 @@ class PandasEngine(BaseEngine):
         # 检查 NA 值 (NaN, None, pd.NA)
         is_na = series.isna()
         
-        # 检查空白字符串 (仅对 object 类型)
-        if series.dtype == "object":
+        # 检查空白字符串 (object 和 string dtype)
+        if series.dtype == "object" or pd.api.types.is_string_dtype(series):
             # str.strip() 对非字符串返回 NaN，因此 == '' 只匹配真正的空白字符串
             is_blank_str = series.str.strip() == ""
-            result = is_na | is_blank_str
+            result = is_na | is_blank_str.fillna(False)
         else:
             result = is_na
         

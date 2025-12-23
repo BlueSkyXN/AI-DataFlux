@@ -221,7 +221,7 @@ class ExcelTaskPool(BaseTaskPool):
                         if self.engine.has_column(self.df, col_name):
                             value = row_result.get(alias, "")
                             try:
-                                self.engine.set_value(self.df, idx, col_name, value)
+                                self.df = self.engine.set_value(self.df, idx, col_name, value)
                             except Exception as e:
                                 logging.warning(f"设置索引 {idx} 列 '{col_name}' 值失败: {e}")
                     
@@ -299,7 +299,8 @@ class ExcelTaskPool(BaseTaskPool):
                 sub_df,
                 self.columns_to_extract,
                 output_columns,
-                self.require_all_input_fields
+                self.require_all_input_fields,
+                index_offset=min_idx
             )
             logging.debug(f"过滤索引范围 {min_idx}-{max_idx} 完成，找到 {len(unprocessed)} 个未处理索引")
             return unprocessed
@@ -335,7 +336,7 @@ class ExcelTaskPool(BaseTaskPool):
                     
                     # 策略2: 清空问题单元格
                     fixed_df = self.engine.copy(self.df)
-                    cleared_count = self._clear_problematic_cells(fixed_df)
+                    fixed_df, cleared_count = self._clear_problematic_cells(fixed_df)
                     
                     if cleared_count > 0:
                         logging.info(f"🧹 已清空 {cleared_count} 个问题单元格，重新尝试保存...")
@@ -360,14 +361,15 @@ class ExcelTaskPool(BaseTaskPool):
             logging.error(f"❌ 保存文件失败: {e}", exc_info=True)
             raise IOError(f"保存文件失败: {e}") from e
     
-    def _clear_problematic_cells(self, df: Any) -> int:
+    def _clear_problematic_cells(self, df: Any) -> tuple[Any, int]:
         """
         清空 DataFrame 中有编码问题的单元格
         
-        只检查 AI 输出列，返回清空的单元格数量。
+        只检查 AI 输出列，返回更新后的 DataFrame 和清空的单元格数量。
         """
         cleared_count = 0
         ai_columns = list(self.columns_to_write.values())
+        updated_df = df
         
         for col_name in ai_columns:
             if not self.engine.has_column(df, col_name):
@@ -381,7 +383,7 @@ class ExcelTaskPool(BaseTaskPool):
                         value.encode("utf-8")
                     except UnicodeEncodeError:
                         logging.warning(f"❌ 清空问题单元格: 第 {idx} 行, '{col_name}' 列")
-                        self.engine.set_value(df, idx, col_name, "")
+                        updated_df = self.engine.set_value(updated_df, idx, col_name, "")
                         cleared_count += 1
         
-        return cleared_count
+        return updated_df, cleared_count

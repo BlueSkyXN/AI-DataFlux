@@ -133,6 +133,13 @@ class TestPandasEngine:
         assert result.iloc[2] == True  # "" 是空
         assert result.iloc[3] == True  # None 是空
         assert result.iloc[0] == False  # "Q1" 非空
+
+    def test_is_empty_vectorized_string_dtype(self, pandas_engine):
+        """测试 string dtype 的空值判断"""
+        series = pd.Series(["", "text", None], dtype="string")
+        result = pandas_engine.is_empty_vectorized(series)
+        
+        assert result.tolist() == [True, False, True]
     
     def test_filter_indices(self, pandas_engine, sample_dataframe):
         """测试条件过滤"""
@@ -232,3 +239,61 @@ class TestPolarsEngine:
         assert polars_engine.is_empty(None) is True
         assert polars_engine.is_empty("") is True
         assert polars_engine.is_empty("text") is False
+
+    def test_set_value(self, polars_engine):
+        """测试设置值并返回新 DataFrame"""
+        import polars as pl
+        
+        df = pl.DataFrame({"input": ["a", "b"], "output": ["", "done"]})
+        updated = polars_engine.set_value(df, 0, "output", "x")
+        
+        assert updated is not df
+        assert polars_engine.get_row(updated, 0)["output"] == "x"
+        assert polars_engine.get_row(df, 0)["output"] == ""
+
+    def test_set_values_batch(self, polars_engine):
+        """测试批量更新"""
+        import polars as pl
+        
+        df = pl.DataFrame({"output": ["", "", "done"]})
+        updates = [(0, "output", "v0"), (1, "output", "v1")]
+        updated = polars_engine.set_values_batch(df, updates)
+        
+        assert polars_engine.get_row(updated, 0)["output"] == "v0"
+        assert polars_engine.get_row(updated, 1)["output"] == "v1"
+
+    def test_filter_indices_vectorized_with_offset(self, polars_engine):
+        """测试分片过滤返回全局索引"""
+        import polars as pl
+        
+        df = pl.DataFrame({
+            "input": ["a"] * 10,
+            "output": ["done"] * 5 + [""] * 3 + ["done"] * 2
+        })
+        
+        sub_df = polars_engine.slice_by_index_range(df, 3, 8)
+        indices = polars_engine.filter_indices_vectorized(
+            sub_df,
+            input_columns=["input"],
+            output_columns=["output"],
+            require_all_inputs=True,
+            index_offset=3,
+        )
+        
+        assert indices == [5, 6, 7]
+
+    def test_write_excel(self, polars_engine, tmp_path):
+        """测试写回 Excel"""
+        from src.data.engines import XLSXWRITER_AVAILABLE
+        
+        if not XLSXWRITER_AVAILABLE:
+            pytest.skip("xlsxwriter not available")
+        
+        import polars as pl
+        
+        df = pl.DataFrame({"A": [1, 2, 3], "B": ["x", "y", "z"]})
+        output_path = tmp_path / "output.xlsx"
+        
+        polars_engine.write_excel(df, output_path)
+        
+        assert output_path.exists()

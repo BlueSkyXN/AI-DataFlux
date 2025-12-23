@@ -146,7 +146,7 @@ class BaseEngine(ABC):
         idx: int, 
         column: str, 
         value: Any
-    ) -> None:
+    ) -> Any:
         """
         设置单元格值
         
@@ -155,6 +155,9 @@ class BaseEngine(ABC):
             idx: 行索引
             column: 列名
             value: 值
+
+        Returns:
+            更新后的 DataFrame
         """
         pass
     
@@ -163,13 +166,16 @@ class BaseEngine(ABC):
         self,
         df: Any,
         updates: list[tuple[int, str, Any]]
-    ) -> None:
+    ) -> Any:
         """
         批量设置多个单元格值
         
         Args:
             df: DataFrame
             updates: 更新列表 [(idx, column, value), ...]
+
+        Returns:
+            更新后的 DataFrame
         """
         pass
     
@@ -252,7 +258,8 @@ class BaseEngine(ABC):
         df: Any,
         input_columns: list[str],
         output_columns: list[str],
-        require_all_inputs: bool = True
+        require_all_inputs: bool = True,
+        index_offset: int = 0
     ) -> list[int]:
         """
         向量化过滤: 查找未处理的行
@@ -266,6 +273,7 @@ class BaseEngine(ABC):
             input_columns: 输入列名列表
             output_columns: 输出列名列表
             require_all_inputs: 是否要求所有输入列都非空
+            index_offset: 索引偏移量 (用于切片后的局部索引场景)
             
         Returns:
             未处理的行索引列表

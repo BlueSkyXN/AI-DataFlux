@@ -238,45 +238,51 @@ class PolarsEngine(BaseEngine):
         idx: int, 
         column: str, 
         value: Any
-    ) -> None:
+    ) -> pl.DataFrame:
         """
         设置单元格值
         
-        注意: Polars DataFrame 是不可变的，此方法会修改底层数据。
+        注意: Polars DataFrame 是不可变的，此方法会返回新的 DataFrame。
         对于大量更新，建议使用批量操作。
         """
-        # Polars 不支持原地修改，需要重新赋值
-        # 使用 with_columns 和条件表达式
-        row_mask = pl.Series([i == idx for i in range(len(df))])
-        
-        # 创建新列值
-        new_col = pl.when(row_mask).then(pl.lit(value)).otherwise(pl.col(column))
-        
-        # 更新 DataFrame (Polars 不可变，需要重新赋值)
-        # 这里我们直接修改数据 - 注意这在 Polars 中不是最佳实践
-        # 但为了与接口兼容，我们使用这种方式
-        df_new = df.with_columns(new_col.alias(column))
-        
-        # 由于 Python 参数传递机制，我们无法真正原地修改
-        # 调用者需要接收返回值或使用批量操作
-        logging.warning(
-            "Polars set_value: DataFrame 是不可变的，此操作可能不会生效。"
-            "建议使用批量操作或返回新 DataFrame。"
+        df_with_idx = df.with_row_index("__row_idx__")
+        updated = df_with_idx.with_columns(
+            pl.when(pl.col("__row_idx__") == idx)
+            .then(pl.lit(value))
+            .otherwise(pl.col(column))
+            .alias(column)
         )
+        return updated.drop("__row_idx__")
     
     def set_values_batch(
         self,
         df: pl.DataFrame,
         updates: list[tuple[int, str, Any]]
-    ) -> None:
+    ) -> pl.DataFrame:
         """
         批量设置多个单元格值
         
-        注意: Polars DataFrame 是不可变的，此方法仅用于兼容性。
-        实际使用中应该返回新的 DataFrame。
+        注意: Polars DataFrame 是不可变的，此方法会返回新的 DataFrame。
         """
+        if not updates:
+            return df
+        
+        df_with_idx = df.with_row_index("__row_idx__")
+        row_idx_expr = pl.col("__row_idx__")
+        
+        updates_by_col: dict[str, list[tuple[int, Any]]] = {}
         for idx, column, value in updates:
-            self.set_value(df, idx, column, value)
+            updates_by_col.setdefault(column, []).append((idx, value))
+        
+        expressions: list[pl.Expr] = []
+        for column, col_updates in updates_by_col.items():
+            expr = pl.col(column)
+            for idx, value in col_updates:
+                expr = pl.when(row_idx_expr == idx).then(pl.lit(value)).otherwise(expr)
+            expressions.append(expr.alias(column))
+        
+        updated = df_with_idx.with_columns(expressions)
+        return updated.drop("__row_idx__")
     
     # ==================== 列操作 ====================
     
@@ -350,7 +356,8 @@ class PolarsEngine(BaseEngine):
         df: pl.DataFrame,
         input_columns: list[str],
         output_columns: list[str],
-        require_all_inputs: bool = True
+        require_all_inputs: bool = True,
+        index_offset: int = 0
     ) -> list[int]:
         """
         向量化过滤: 查找未处理的行
@@ -411,7 +418,10 @@ class PolarsEngine(BaseEngine):
         df_with_idx = df.with_row_index("__row_idx__")
         filtered = df_with_idx.filter(unprocessed)
         
-        return filtered["__row_idx__"].to_list()
+        indices = filtered["__row_idx__"].to_list()
+        if index_offset:
+            return [idx + index_offset for idx in indices]
+        return indices
     
     # ==================== 值操作 ====================
     
