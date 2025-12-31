@@ -7,6 +7,11 @@ global:
     file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
   flux_api_url: http://127.0.0.1:8787    # Flux API端点URL
 
+# 网关配置
+gateway:
+  max_connections: 1000          # 网关到上游的总并发连接上限
+  max_connections_per_host: 1000 # 单个上游主机的并发连接上限
+
 # 数据源类型配置
 datasource:
   type: excel   # 数据源类型: mysql 或 excel

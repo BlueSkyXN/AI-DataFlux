@@ -21,10 +21,16 @@ class SessionPool:
         sessions: Session 缓存字典
     """
     
-    def __init__(self):
+    def __init__(
+        self,
+        max_connections: int = 1000,
+        max_connections_per_host: int = 1000,
+    ):
         """初始化连接池"""
         self.sessions: dict[tuple[bool, str], aiohttp.ClientSession] = {}
         self._closed = False
+        self.max_connections = max_connections
+        self.max_connections_per_host = max_connections_per_host
     
     async def get_or_create(
         self, 
@@ -50,8 +56,8 @@ class SessionPool:
             # 创建新的 Session
             connector = aiohttp.TCPConnector(
                 ssl=ssl_verify if ssl_verify else False,
-                limit=100,
-                limit_per_host=30,
+                limit=self.max_connections,
+                limit_per_host=self.max_connections_per_host,
             )
             
             session = aiohttp.ClientSession(connector=connector)

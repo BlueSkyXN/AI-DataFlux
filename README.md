@@ -135,6 +135,16 @@ global:
   flux_api_url: "http://127.0.0.1:8787/v1/chat/completions"  # Flux API端点URL
 ```
 
+### 网关配置
+
+```yaml
+gateway:
+  max_connections: 1000           # 网关到上游的总并发连接上限
+  max_connections_per_host: 1000  # 单个上游主机的并发连接上限
+```
+
+仅影响 API 网关自身的上游连接池，不影响数据处理引擎的 `datasource.concurrency` 并发配置。
+
 ### 数据源配置
 
 ```yaml

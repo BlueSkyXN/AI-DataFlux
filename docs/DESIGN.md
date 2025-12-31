@@ -859,6 +859,7 @@ AIDataFluxError (基类)
 | 配置块 | 描述 |
 |--------|------|
 | `global` | 全局配置 (日志、API URL) |
+| `gateway` | 网关配置 (上游连接池并发上限) |
 | `datasource` | 数据源配置 (类型、引擎、并发、重试) |
 | `datasource.engine` | DataFrame 引擎 (auto/pandas/polars) |
 | `datasource.excel_reader` | Excel 读取器 (auto/openpyxl/calamine) |

@@ -85,6 +85,13 @@ class FluxApiService:
         
         # 通道配置
         self.channels = self.config.get("channels", {})
+
+        # 网关连接池配置
+        gateway_cfg = self.config.get("gateway", {}) or {}
+        self.gateway_max_connections = int(gateway_cfg.get("max_connections", 1000))
+        self.gateway_max_connections_per_host = int(
+            gateway_cfg.get("max_connections_per_host", 1000)
+        )
     
     def _init_models(self) -> None:
         """初始化模型配置"""
@@ -138,7 +145,10 @@ class FluxApiService:
     
     async def startup(self) -> None:
         """启动服务 (异步初始化)"""
-        self.session_pool = SessionPool()
+        self.session_pool = SessionPool(
+            max_connections=self.gateway_max_connections,
+            max_connections_per_host=self.gateway_max_connections_per_host,
+        )
         logging.info("FluxApiService 启动完成")
     
     async def shutdown(self) -> None:
