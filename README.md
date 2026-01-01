@@ -296,6 +296,7 @@ channels:
 AI-DataFlux/
 ├── main.py              # 数据处理入口
 ├── gateway.py           # API 网关入口
+├── cli.py               # 统一命令行入口
 ├── config.yaml          # 配置文件
 ├── config-example.yaml  # 配置示例
 ├── requirements.txt     # 依赖列表
@@ -325,7 +326,8 @@ AI-DataFlux/
 │       ├── service.py   # 核心服务逻辑
 │       ├── dispatcher.py # 模型调度器
 │       ├── limiter.py   # 限流组件
-│       ├── session.py   # HTTP 连接池
+│       ├── session.py   # HTTP 连接池管理
+│       ├── resolver.py  # 自定义 DNS 解析器
 │       └── schemas.py   # Pydantic 模型
 ├── docs/
 │   └── DESIGN.md        # 详细设计文档

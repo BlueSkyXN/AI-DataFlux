@@ -16,6 +16,7 @@ import yaml
 
 from .dispatcher import ModelDispatcher, ModelConfig
 from .limiter import ModelRateLimiter
+from .resolver import RoundRobinResolver, build_ip_pools_from_channels
 from .session import SessionPool
 from .schemas import (
     ChatCompletionRequest,
@@ -145,9 +146,17 @@ class FluxApiService:
     
     async def startup(self) -> None:
         """启动服务 (异步初始化)"""
+        # 构建 IP 池并创建自定义解析器
+        ip_pools = build_ip_pools_from_channels(self.channels)
+        resolver = RoundRobinResolver(ip_pools) if ip_pools else None
+
+        if resolver:
+            logging.info(f"已启用 IP 池轮询解析器，共 {len(ip_pools)} 个域名")
+
         self.session_pool = SessionPool(
             max_connections=self.gateway_max_connections,
             max_connections_per_host=self.gateway_max_connections_per_host,
+            resolver=resolver,
         )
         logging.info("FluxApiService 启动完成")
     
@@ -398,6 +407,32 @@ class FluxApiService:
             timeout=timeout,
             proxy=model.proxy or None,
         ) as resp:
+            peer_ip: str | None = None
+            if not model.proxy:
+                try:
+                    if resp.connection and resp.connection.transport:
+                        peername = resp.connection.transport.get_extra_info("peername")
+                        if peername:
+                            peer_ip = peername[0] if isinstance(peername, tuple) else str(peername)
+                except Exception:
+                    peer_ip = None
+
+            if peer_ip:
+                logging.info(
+                    "上游响应 model=%s status=%s url=%s ip=%s",
+                    model.id,
+                    resp.status,
+                    model.api_url,
+                    peer_ip,
+                )
+            else:
+                logging.info(
+                    "上游响应 model=%s status=%s url=%s",
+                    model.id,
+                    resp.status,
+                    model.api_url,
+                )
+
             if resp.status != 200:
                 text = await resp.text()
                 raise aiohttp.ClientResponseError(
