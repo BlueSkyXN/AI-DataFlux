@@ -1,0 +1,23 @@
+# AI-DataFlux 依赖
+# 核心依赖
+pyyaml>=6.0
+aiohttp>=3.9.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+psutil>=5.9.0
+
+# API 网关依赖
+pydantic>=2.0.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# MySQL 数据源 (可选)
+mysql-connector-python>=8.0.0
+
+# 高性能引擎 (可选，推荐安装以获得最佳性能)
+# pip install numpy polars python-calamine fastexcel xlsxwriter
+numpy>=1.24.0           # 向量化计算加速
+polars>=0.20.0          # 高性能 DataFrame (多线程)
+python-calamine>=0.2.0  # Rust Excel 读取器
+fastexcel>=0.9.0        # Calamine Python 封装
+xlsxwriter>=3.1.0       # 高性能 Excel 写入

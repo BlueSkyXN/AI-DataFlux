@@ -5,6 +5,9 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 ## 核心特性
 
 - **多数据源支持**：同时支持MySQL和Excel作为数据源和结果存储
+- **可插拔数据引擎**：支持 Pandas 和 Polars 双引擎，可通过配置切换
+- **高性能读写器**：支持 Calamine (10x 读取) 和 xlsxwriter (3x 写入) 加速
+- **自动引擎选择**：`engine: auto` 自动选择最快的可用引擎和读写器
 - **智能模型调度**：基于加权负载均衡的多模型调度系统，支持自动故障切换
 - **高并发处理**：优化的异步架构实现高吞吐量任务处理
 - **连续任务流**：采用连续任务流模式，比传统批处理模式更高效
@@ -18,18 +21,39 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 - **向量化数据过滤**：DataFrame操作使用向量化方法，大数据集性能提升50-100x
 - **内存使用监控**：自动监控内存使用，在高内存使用时触发垃圾回收
 - **可视化进度**：实时显示处理进度和统计信息
+- **模块化架构**：清晰的 `src/` 模块化设计，易于扩展和维护
 
 ## 快速开始
+
+### 环境要求
+
+- **Python 3.10+**（支持 3.10, 3.11, 3.12, 3.13, 3.14）
+
+> **平台兼容性说明**：
+> - Polars 和 fastexcel 在 **Windows ARM + Python 3.13** 上可能不兼容
+> - 程序会自动检测并安全回退到 Pandas 引擎
+> - 其他平台（Linux x64/ARM, Windows x64, macOS x64/ARM）完全支持
 
 ### 安装依赖
 
 ```bash
-# 基础依赖
-pip install pyyaml aiohttp pandas openpyxl psutil
+# 基础依赖 (必需)
+pip install pyyaml aiohttp pandas openpyxl psutil pydantic fastapi uvicorn
 
-# 如果使用MySQL数据源，需要安装
+# MySQL数据源支持 (可选)
 pip install mysql-connector-python
+
+# 高性能引擎 (推荐，可显著提升性能)
+pip install numpy polars python-calamine fastexcel xlsxwriter
 ```
+
+**性能对比**（处理100万行数据）:
+
+| 操作 | pandas+openpyxl | polars+calamine+xlsxwriter | 提升 |
+|------|-----------------|---------------------------|------|
+| Excel 读取 | ~60s | ~5s | **12x** |
+| 数据过滤 | ~10s | ~0.5s | **20x** |
+| Excel 写入 | ~30s | ~10s | **3x** |
 
 ### 配置文件
 
@@ -41,16 +65,41 @@ cp config-example.yaml config.yaml
 
 然后编辑`config.yaml`，设置您的API密钥、数据源信息等配置。
 
-### 启动 Flux-Api 服务
+### 使用统一命令行 (推荐)
+
+```bash
+# 查看帮助
+python cli.py --help
+
+# 检查依赖库状态
+python cli.py check
+
+# 查看版本
+python cli.py version
+
+# 启动 API 网关
+python cli.py gateway --port 8787
+
+# 运行数据处理
+python cli.py process --config config.yaml
+
+# 仅验证配置
+python cli.py process --config config.yaml --validate
+```
+
+### 启动 API 网关
 
 首先启动API网关（确保始终在后台运行）：
 
 ```bash
-# 启动API网关
-python Flux-Api.py --config config.yaml --port 8787
+# 使用统一入口
+python cli.py gateway --port 8787
 
-# 或者使用nohup在后台运行
-nohup python Flux-Api.py --config config.yaml --port 8787 > flux-api.log 2>&1 &
+# 或使用独立入口
+python gateway.py --config config.yaml --port 8787
+
+# 后台运行
+nohup python cli.py gateway --port 8787 > gateway.log 2>&1 &
 ```
 
 ### 运行数据处理引擎
@@ -58,7 +107,14 @@ nohup python Flux-Api.py --config config.yaml --port 8787 > flux-api.log 2>&1 &
 确保API网关已启动，然后运行数据处理引擎：
 
 ```bash
-python AI-DataFlux.py --config config.yaml
+# 使用统一入口
+python cli.py process --config config.yaml
+
+# 或使用独立入口
+python main.py --config config.yaml
+
+# 仅验证配置文件
+python cli.py process --validate
 ```
 
 您也可以使用`screen`或`tmux`等工具在后台运行这两个组件。
@@ -79,11 +135,35 @@ global:
   flux_api_url: "http://127.0.0.1:8787/v1/chat/completions"  # Flux API端点URL
 ```
 
+### 网关配置
+
+```yaml
+gateway:
+  max_connections: 1000           # 网关到上游的总并发连接上限
+  max_connections_per_host: 1000  # 单个上游主机的并发连接上限
+```
+
+仅影响 API 网关自身的上游连接池，不影响数据处理引擎的 `datasource.concurrency` 并发配置。
+
 ### 数据源配置
 
 ```yaml
 datasource:
   type: excel    # 数据源类型: mysql, excel
+  
+  # === 高性能引擎配置 ===
+  # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
+  # auto: 优先使用 polars (如已安装)，否则回退到 pandas
+  engine: auto
+  
+  # Excel 读取器: auto | openpyxl (默认) | calamine (高性能)
+  # calamine: 基于 Rust 的读取器，速度提升 10-50x，需安装 fastexcel
+  excel_reader: auto
+  
+  # Excel 写入器: auto | openpyxl (默认) | xlsxwriter (高性能)
+  # xlsxwriter: 写入速度提升 2-5x
+  excel_writer: auto
+  
   require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:   # 并发配置
     batch_size: 100         # 批处理大小（也用作最大并发任务数）
@@ -210,13 +290,56 @@ channels:
     ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
 ```
 
+## 项目结构
+
+```
+AI-DataFlux/
+├── main.py              # 数据处理入口
+├── gateway.py           # API 网关入口
+├── config.yaml          # 配置文件
+├── config-example.yaml  # 配置示例
+├── requirements.txt     # 依赖列表
+├── src/
+│   ├── __init__.py      # 版本信息
+│   ├── config/          # 配置管理
+│   │   └── settings.py  # 配置加载与日志初始化
+│   ├── models/          # 数据模型
+│   │   ├── errors.py    # 错误类型定义
+│   │   └── task.py      # 任务元数据
+│   ├── core/            # 核心处理逻辑
+│   │   ├── processor.py # AI 处理引擎
+│   │   ├── scheduler.py # 分片任务调度器
+│   │   └── validator.py # JSON 字段验证器
+│   ├── data/            # 数据源层
+│   │   ├── base.py      # 任务池抽象基类
+│   │   ├── excel.py     # Excel 任务池
+│   │   ├── mysql.py     # MySQL 任务池
+│   │   ├── factory.py   # 任务池工厂
+│   │   └── engines/     # 可插拔数据引擎
+│   │       ├── __init__.py     # 引擎工厂和库检测
+│   │       ├── base.py         # 引擎抽象基类
+│   │       ├── pandas_engine.py  # Pandas 实现 (支持 calamine/xlsxwriter)
+│   │       └── polars_engine.py  # Polars 高性能实现
+│   └── gateway/         # API 网关
+│       ├── app.py       # FastAPI 应用
+│       ├── service.py   # 核心服务逻辑
+│       ├── dispatcher.py # 模型调度器
+│       ├── limiter.py   # 限流组件
+│       ├── session.py   # HTTP 连接池
+│       └── schemas.py   # Pydantic 模型
+├── docs/
+│   └── DESIGN.md        # 详细设计文档
+├── COPILOT.md           # 开发追踪文档
+└── README.md            # 项目文档
+```
+
 ## 系统架构
 
 AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两部分组成：
 
-### 1. Flux-Api 组件
+### 1. API 网关 (gateway.py)
 
-`Flux-Api.py` 是一个OpenAI兼容的API网关，充当AI模型的统一访问层：
+`gateway.py` 是一个OpenAI兼容的API网关，充当AI模型的统一访问层：
 
 - **多模型管理**：管理多个AI模型和厂商API
 - **自动故障切换**：当某个模型暂时不可用或出错时自动切换到其他可用模型
@@ -229,7 +352,7 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 
 启动方式：
 ```bash
-python Flux-Api.py --config config.yaml
+python gateway.py --config config.yaml
 ```
 
 默认监听 `http://127.0.0.1:8787`，提供以下API端点：
@@ -238,40 +361,35 @@ python Flux-Api.py --config config.yaml
 - `/admin/models` - 模型详细状态和指标
 - `/admin/health` - 系统健康状态
 
-### 2. AI-DataFlux 引擎
+### 2. 数据处理引擎 (main.py)
 
-`AI-DataFlux.py` 是主要的数据处理引擎，负责从数据源读取任务、调用Flux-Api、处理结果：
+`main.py` 是主要的数据处理引擎，负责从数据源读取任务、调用API网关、处理结果：
 
-#### 主要组件
+#### 主要模块
 
-1. **任务池管理**：`BaseTaskPool`抽象基类及其具体实现
-   - `MySQLTaskPool`: MySQL数据源实现，支持连接池和事务
+1. **配置管理** (`src/config/`)
+   - 配置加载与验证
+   - 日志初始化
+
+2. **数据模型** (`src/models/`)
+   - `ErrorType`: 错误分类（API/内容/系统）
+   - `TaskMetadata`: 任务元数据，分离业务数据与内部状态
+
+3. **数据引擎** (`src/data/engines/`)
+   - `BaseEngine`: 引擎抽象接口
+   - `PandasEngine`: Pandas 实现，支持 calamine/xlsxwriter 高速读写
+   - `PolarsEngine`: Polars 高性能实现，多线程并行处理
+   - 引擎工厂: 自动检测可用库，支持 auto/pandas/polars 选择
+
+4. **任务池** (`src/data/`)
+   - `BaseTaskPool`: 任务池抽象基类
    - `ExcelTaskPool`: Excel数据源实现，支持向量化过滤和定时保存
+   - `MySQLTaskPool`: MySQL数据源实现，支持连接池和事务
 
-2. **分片任务管理**：`ShardedTaskManager`类
-   - 动态分片大小计算
-   - 分片加载和进度跟踪
-   - 内存使用监控
-   - 按错误类型统计重试次数
-
-3. **任务元数据管理**：`TaskMetadata`类
-   - 完全分离内部状态与业务数据
-   - 按错误类型独立跟踪重试计数
-   - 重试时从数据源重新加载原始数据（避免内存泄漏）
-
-4. **错误处理机制**：`ErrorType`类
-   - 区分API错误、内容错误和系统错误
-   - 各类型独立配置最大重试次数
-   - API错误触发全局暂停
-
-5. **字段验证系统**：`JsonValidator`类
-   - 灵活配置字段值验证规则
-   - 支持JSON Schema格式约束
-
-6. **主处理流程**：`UniversalAIProcessor`类
-   - 连续任务流处理
-   - 智能错误处理和重试
-   - 实时进度报告
+5. **核心处理** (`src/core/`)
+   - `UniversalAIProcessor`: 主处理引擎，连续任务流模式
+   - `ShardedTaskManager`: 分片任务调度器
+   - `JsonValidator`: AI 输出字段验证器
 
 ## Excel 数据源格式
 
@@ -286,6 +404,42 @@ python Flux-Api.py --config config.yaml
 - **写回字段**: 在`columns_to_write`中映射的目标列
 
 ## 高级用法
+
+### 高性能引擎配置
+
+AI-DataFlux 支持多种高性能库来加速数据处理：
+
+```yaml
+datasource:
+  # 引擎选择 (推荐 auto)
+  engine: auto        # auto | pandas | polars
+  
+  # 读取器选择 (推荐 auto)
+  excel_reader: auto  # auto | openpyxl | calamine
+  
+  # 写入器选择 (推荐 auto)
+  excel_writer: auto  # auto | openpyxl | xlsxwriter
+```
+
+**自动回退机制**：
+
+| 配置值 | 优先选择 | 回退选择 | 触发条件 |
+|--------|---------|---------|---------|
+| `engine: auto` | polars | pandas | polars 未安装 |
+| `excel_reader: auto` | calamine | openpyxl | fastexcel 未安装 |
+| `excel_writer: auto` | xlsxwriter | openpyxl | xlsxwriter 未安装 |
+
+**安装高性能库**：
+
+```bash
+# 推荐：安装所有高性能库
+pip install numpy polars python-calamine fastexcel xlsxwriter
+
+# 或单独安装
+pip install polars          # Polars DataFrame 引擎
+pip install fastexcel       # Calamine Excel 读取器
+pip install xlsxwriter      # 高性能 Excel 写入器
+```
 
 ### 连续任务流处理
 
@@ -371,11 +525,11 @@ datasource:
 ### 常见问题
 
 1. **找不到依赖模块**
-   - 安装所需依赖: `pip install pyyaml aiohttp pandas openpyxl psutil`
+   - 安装所需依赖: `pip install pyyaml aiohttp pandas openpyxl psutil pydantic fastapi uvicorn`
    - MySQL支持: `pip install mysql-connector-python`
 
-2. **无法连接到Flux-Api**
-   - 确认Flux-Api.py正在运行: `ps aux | grep Flux-Api.py`
+2. **无法连接到API网关**
+   - 确认gateway.py正在运行: `ps aux | grep gateway.py`
    - 检查global.flux_api_url配置是否正确指向运行的服务
    - 尝试用浏览器访问 http://127.0.0.1:8787/ 确认服务可用
 
@@ -383,18 +537,18 @@ datasource:
    - 增加`api_pause_duration`值，给API更多恢复时间
    - 减少`batch_size`降低并发请求数
    - 检查模型的`safe_rps`设置是否合理
-   - 查看Flux-Api.py的日志了解具体错误原因
+   - 查看gateway.py的日志了解具体错误原因
 
 4. **处理速度慢**
    - 增加`batch_size`提高并发度
    - 调整分片大小参数适应数据量
    - 使用更多权重分配给响应更快的模型
-   - 增加Flux-Api服务的工作进程数: `--workers 4`（多核服务器）
+   - 增加网关服务的工作进程数: `--workers 4`（多核服务器）
 
 5. **内存使用过高**
    - 减小`max_shard_size`和`batch_size`
    - 降低`max_connections`值减少连接池内存占用
-   - 分离运行Flux-Api和AI-DataFlux至不同服务器
+   - 分离运行gateway.py和main.py至不同服务器
 
 6. **Mac上SSL证书验证失败**
    - 错误信息: `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed`
@@ -439,4 +593,4 @@ global:
 
 ---
 
-*AI-DataFlux - 高效、智能的批量AI处理引擎*
+*AI-DataFlux v2 - 高效、智能的批量AI处理引擎*

@@ -7,9 +7,28 @@ global:
     file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
   flux_api_url: http://127.0.0.1:8787    # Flux API端点URL
 
+# 网关配置
+gateway:
+  max_connections: 1000          # 网关到上游的总并发连接上限
+  max_connections_per_host: 1000 # 单个上游主机的并发连接上限
+
 # 数据源类型配置
 datasource:
   type: excel   # 数据源类型: mysql 或 excel
+  
+  # === 高性能引擎配置 ===
+  # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
+  # auto: 优先使用 polars (如已安装)，否则回退到 pandas
+  engine: auto
+  
+  # Excel 读取器: auto | openpyxl (默认) | calamine (高性能，需安装 fastexcel)
+  # calamine: 基于 Rust 的读取器，速度提升 10-50x
+  excel_reader: auto
+  
+  # Excel 写入器: auto | openpyxl (默认) | xlsxwriter (高性能)
+  # xlsxwriter: 写入速度提升 2-5x
+  excel_writer: auto
+  
   require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:
     batch_size: 100        # 批处理大小（也用作最大并发任务数）
