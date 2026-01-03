@@ -644,7 +644,6 @@ class FluxApiService:
             response_time = time.time() - start_time
             stream_fully_successful = returned_successfully
             stream_partially_successful = has_yielded and not returned_successfully
-            stream_failed_early = not has_yielded
 
             if stream_fully_successful:
                 self.dispatcher.mark_model_success(model.id)
@@ -654,7 +653,7 @@ class FluxApiService:
                 logging.warning(
                     f"[{model.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s"
                 )
-            else:  # stream_failed_early
+            else:  # no data yielded
                 self.dispatcher.mark_model_failed(model.id, ErrorType.API)
                 logging.error(f"[{model.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s")
 

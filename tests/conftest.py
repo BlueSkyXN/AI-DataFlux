@@ -7,9 +7,7 @@ Fixtures 是 pytest 的核心概念，用于:
 3. 在多个测试间共享资源
 """
 
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest

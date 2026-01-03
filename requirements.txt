@@ -21,3 +21,6 @@ polars>=0.20.0          # 高性能 DataFrame (多线程)
 python-calamine>=0.2.0  # Rust Excel 读取器
 fastexcel>=0.9.0        # Calamine Python 封装
 xlsxwriter>=3.1.0       # 高性能 Excel 写入
+
+# Token 估算 (可选，用于 token 子命令)
+tiktoken>=0.5.0         # OpenAI 的 BPE 分词器

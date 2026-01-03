@@ -6,9 +6,6 @@ CLI 入口测试
 
 import subprocess
 import sys
-from pathlib import Path
-
-import pytest
 
 
 class TestCLI:
@@ -46,6 +43,7 @@ class TestCLI:
         assert result.returncode == 0
         assert "process" in result.stdout
         assert "gateway" in result.stdout
+        assert "token" in result.stdout
         assert "version" in result.stdout
         assert "check" in result.stdout
     
@@ -107,3 +105,18 @@ class TestCLI:
         assert result.returncode == 0
         # 应该显示帮助信息
         assert "usage" in result.stdout.lower() or "help" in result.stdout.lower()
+    
+    def test_token_help(self):
+        """测试 token 子命令帮助"""
+        result = subprocess.run(
+            [sys.executable, "cli.py", "token", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "--config" in result.stdout
+        assert "--mode" in result.stdout
+        # 验证新的模式选项
+        assert "in" in result.stdout
+        assert "out" in result.stdout
+        assert "io" in result.stdout

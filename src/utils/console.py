@@ -8,7 +8,6 @@ output functions that work on Windows, Linux, and macOS.
 import sys
 import os
 import locale
-import io
 
 
 def _safe_print(text: str):

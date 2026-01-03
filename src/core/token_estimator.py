@@ -1,0 +1,380 @@
+"""
+Token 估算器
+
+用于估算 AI 数据处理任务的 token 用量。
+支持输入 token 预估（处理前）和输出 token 预估（处理后采样）。
+"""
+
+import json
+import logging
+from typing import Any
+
+# 延迟导入 tiktoken，避免在未安装时导入失败
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    tiktoken = None  # type: ignore
+
+
+def normalize_mode(mode: str) -> str:
+    """
+    规范化模式值
+    
+    Args:
+        mode: 原始模式值
+        
+    Returns:
+        规范化后的模式: "in", "out", 或 "io"
+    """
+    mode_mapping = {
+        "input": "in",
+        "input_output": "io",
+        "in": "in",
+        "out": "out",
+        "io": "io",
+    }
+    normalized = mode_mapping.get(mode.lower(), "in")
+    if mode.lower() not in mode_mapping:
+        logging.warning(f"未知的估算模式 '{mode}'，使用默认值 'in'")
+    return normalized
+
+
+class TokenEstimator:
+    """
+    Token 估算器
+    
+    计算 AI 数据处理任务的预估 token 用量:
+    - 输入 token: 系统提示词 + 用户提示词 (含 {record_json} 替换)
+    - 输出 token: 基于已处理数据采样，假设纯 JSON 响应
+    
+    Attributes:
+        config: 完整配置字典
+        mode: 估算模式 ("in", "out", 或 "io")
+        encoding: tiktoken 编码器
+    """
+    
+    def __init__(self, config: dict[str, Any]):
+        """
+        初始化 Token 估算器
+        
+        Args:
+            config: 完整配置字典
+            
+        Raises:
+            ImportError: tiktoken 未安装
+            ValueError: 配置无效
+        """
+        if not TIKTOKEN_AVAILABLE:
+            raise ImportError(
+                "tiktoken 未安装，请运行: pip install tiktoken"
+            )
+        
+        self.config = config
+        
+        # Token 估算配置
+        token_cfg = config.get("token_estimation", {})
+        raw_mode = token_cfg.get("mode", "in")
+        self.mode = normalize_mode(raw_mode)
+        self.sample_size = token_cfg.get("sample_size", 100)
+        
+        # 获取 tiktoken 编码器
+        tiktoken_model = token_cfg.get("tiktoken_model", "gpt-4")
+        encoding_name = token_cfg.get("encoding", None)
+        
+        try:
+            if encoding_name:
+                self.encoding = tiktoken.get_encoding(encoding_name)
+                logging.info(f"使用 tiktoken 编码: {encoding_name}")
+            else:
+                self.encoding = tiktoken.encoding_for_model(tiktoken_model)
+                logging.info(f"使用模型 {tiktoken_model} 的 tiktoken 编码")
+        except Exception as e:
+            logging.warning(f"无法获取指定编码，回退到 cl100k_base: {e}")
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        
+        # 提示词配置
+        prompt_cfg = config.get("prompt", {})
+        self.system_prompt = prompt_cfg.get("system_prompt", "")
+        self.prompt_template = prompt_cfg.get("template", "")
+        self.required_fields = prompt_cfg.get("required_fields", [])
+        
+        # 列配置
+        self.columns_to_extract = config.get("columns_to_extract", [])
+        self.columns_to_write = config.get("columns_to_write", {})
+        
+        if not self.columns_to_extract:
+            raise ValueError("缺少 columns_to_extract 配置")
+        
+        logging.info(f"TokenEstimator 初始化完成 | 模式: {self.mode}")
+    
+    def count_tokens(self, text: str) -> int:
+        """计算文本的 token 数量"""
+        if not text:
+            return 0
+        return len(self.encoding.encode(text))
+    
+    def count_message_tokens(self, messages: list[dict[str, str]]) -> int:
+        """
+        计算消息列表的 token 数量
+
+        直接对拼接后的完整输入文本进行 tiktoken 计数，
+        不包含 chat 消息格式的固定开销。
+        """
+        parts: list[str] = []
+        for message in messages:
+            content = message.get("content")
+            if content:
+                parts.append(str(content))
+
+        combined_text = "\n".join(parts)
+        return self.count_tokens(combined_text)
+    
+    def create_prompt(self, record_data: dict[str, Any]) -> str:
+        """创建提示词 (与 processor 保持一致)"""
+        if not self.prompt_template:
+            return ""
+        
+        try:
+            filtered_data = {
+                k: v for k, v in record_data.items()
+                if v is not None and not k.startswith("_")
+            }
+            record_json_str = json.dumps(
+                filtered_data, 
+                ensure_ascii=False, 
+                separators=(",", ":")
+            )
+        except (TypeError, ValueError) as e:
+            logging.error(f"记录数据无法序列化为 JSON: {e}")
+            return self.prompt_template.replace(
+                "{record_json}", 
+                '{"error": "无法序列化数据"}'
+            )
+        
+        return self.prompt_template.replace("{record_json}", record_json_str)
+    
+    def build_messages(self, prompt: str) -> list[dict[str, str]]:
+        """构建消息列表 (与 processor 保持一致)"""
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return messages
+    
+    def estimate_input_tokens_for_record(
+        self, 
+        record_data: dict[str, Any]
+    ) -> int:
+        """估算单条记录的输入 token 数量"""
+        prompt = self.create_prompt(record_data)
+        messages = self.build_messages(prompt)
+        return self.count_message_tokens(messages)
+    
+    def estimate_output_tokens_for_record(
+        self, 
+        output_data: dict[str, Any]
+    ) -> int:
+        """
+        估算单条记录的输出 token 数量
+        
+        假设输出为纯 JSON 格式，使用 columns_to_write 的别名作为字段名。
+        """
+        # 构建输出 JSON (使用别名作为键)
+        output_json = {}
+        for alias, col_name in self.columns_to_write.items():
+            value = output_data.get(col_name, "")
+            if value is not None:
+                output_json[alias] = value
+        
+        # 序列化为 JSON 字符串
+        try:
+            json_str = json.dumps(
+                output_json, 
+                ensure_ascii=False, 
+                separators=(",", ":")
+            )
+        except (TypeError, ValueError):
+            json_str = "{}"
+        
+        return self.count_tokens(json_str)
+    
+    def estimate(
+        self, 
+        input_pool: Any,
+        output_pool: Any | None = None
+    ) -> dict[str, Any]:
+        """
+        执行 token 估算
+        
+        Args:
+            input_pool: 输入数据源任务池 (用于输入 token 估算)
+            output_pool: 输出数据源任务池 (用于输出 token 估算，可选)
+                         如果为 None，则使用 input_pool
+            
+        Returns:
+            估算结果字典，包含:
+            - total_rows: 采样行数
+            - input_tokens: 输入 token 统计 (仅 in/io 模式)
+            - output_tokens: 输出 token 统计 (仅 out/io 模式)
+            - request_count: 预估请求次数
+        """
+        # 如果未提供 output_pool，使用 input_pool (MySQL 场景)
+        if output_pool is None:
+            output_pool = input_pool
+        
+        result: dict[str, Any] = {
+            "mode": self.mode,
+            "sample_size": self.sample_size,
+            "total_rows": 0,
+            "sampled_rows": 0,
+            "request_count": 0,
+        }
+        
+        # 获取总任务数
+        total_task_count = input_pool.get_total_task_count()
+        result["total_rows"] = total_task_count
+        result["request_count"] = total_task_count
+        
+        # 输入 token 估算 (in 或 io 模式)
+        if self.mode in ("in", "io"):
+            unprocessed_samples = input_pool.sample_unprocessed_rows(self.sample_size)
+            unprocessed_count = len(unprocessed_samples)
+            
+            if unprocessed_count == 0:
+                logging.warning("未找到未处理的行，无法估算输入 token")
+                result["input_tokens"] = {"error": "no_unprocessed_rows"}
+            else:
+                result["sampled_rows"] = unprocessed_count
+                input_tokens_list = []
+                for record_data in unprocessed_samples:
+                    tokens = self.estimate_input_tokens_for_record(record_data)
+                    input_tokens_list.append(tokens)
+                
+                result["input_tokens"] = self._compute_stats(input_tokens_list, total_task_count)
+        
+        # 输出 token 估算 (out 或 io 模式)
+        if self.mode in ("out", "io"):
+            processed_samples = output_pool.sample_processed_rows(self.sample_size)
+            processed_count = len(processed_samples)
+            
+            if processed_count == 0:
+                logging.warning("未找到已处理的行，无法估算输出 token")
+                result["output_tokens"] = {"error": "no_processed_rows"}
+            else:
+                output_tokens_list = []
+                for output_data in processed_samples:
+                    tokens = self.estimate_output_tokens_for_record(output_data)
+                    output_tokens_list.append(tokens)
+                
+                result["output_tokens"] = self._compute_stats(
+                    output_tokens_list, 
+                    total_task_count
+                )
+                result["output_sampled_rows"] = processed_count
+        
+        return result
+    
+    def _compute_stats(
+        self, 
+        tokens_list: list[int], 
+        total_rows: int
+    ) -> dict[str, Any]:
+        """计算 token 统计信息"""
+        if not tokens_list:
+            return {"total": 0, "avg": 0, "min": 0, "max": 0}
+        
+        avg = sum(tokens_list) / len(tokens_list)
+        sample_ratio = total_rows / len(tokens_list) if len(tokens_list) > 0 else 1
+        
+        # 按百分位排序
+        sorted_tokens = sorted(tokens_list)
+        
+        def percentile(p: float) -> int:
+            idx = int(len(sorted_tokens) * p / 100)
+            idx = min(idx, len(sorted_tokens) - 1)
+            return sorted_tokens[idx]
+        
+        return {
+            "total_estimated": int(avg * total_rows),
+            "avg": round(avg, 2),
+            "min": min(tokens_list),
+            "max": max(tokens_list),
+            "p50": percentile(50),
+            "p90": percentile(90),
+            "p99": percentile(99),
+            "sample_count": len(tokens_list),
+        }
+
+
+def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str, Any]:
+    """
+    运行 token 估算
+    
+    Args:
+        config_path: 配置文件路径
+        mode: 可选覆盖模式 ("in", "out", 或 "io")
+        
+    Returns:
+        估算结果字典
+    """
+    import copy
+    from ..config.settings import load_config
+    from ..data import create_task_pool
+    
+    # 加载配置
+    config = load_config(config_path)
+    
+    # 覆盖模式
+    if mode:
+        if "token_estimation" not in config:
+            config["token_estimation"] = {}
+        config["token_estimation"]["mode"] = mode
+    
+    # 创建估算器
+    estimator = TokenEstimator(config)
+    
+    # 创建任务池 (只读模式)
+    columns_to_extract = config.get("columns_to_extract", [])
+    columns_to_write = config.get("columns_to_write", {})
+    
+    # 创建输入池
+    input_pool = create_task_pool(config, columns_to_extract, columns_to_write)
+    
+    # 创建输出池 (仅 Excel 数据源，且 out/io 模式需要)
+    output_pool = None
+    datasource_type = config.get("datasource", {}).get("type", "excel")
+    
+    if datasource_type == "excel" and estimator.mode in ("out", "io"):
+        excel_cfg = config.get("excel", {})
+        output_path = excel_cfg.get("output_path")
+        
+        if output_path and output_path != excel_cfg.get("input_path"):
+            # 创建输出池配置副本，将 input_path 指向 output_path
+            output_config = copy.deepcopy(config)
+            output_config["excel"]["input_path"] = output_path
+            
+            try:
+                output_pool = create_task_pool(
+                    output_config, columns_to_extract, columns_to_write
+                )
+            except FileNotFoundError:
+                logging.error(f"输出文件不存在: {output_path}")
+                return {
+                    "mode": estimator.mode,
+                    "error": "output_file_not_found",
+                    "message": f"输出文件不存在: {output_path}",
+                }
+    
+    # 如果没有单独的输出池，使用输入池 (MySQL 或相同文件场景)
+    if output_pool is None:
+        output_pool = input_pool
+    
+    try:
+        # 执行估算
+        result = estimator.estimate(input_pool, output_pool)
+        return result
+    finally:
+        # 关闭任务池 (不保存)
+        pass  # Excel 任务池的 close() 会保存，这里跳过

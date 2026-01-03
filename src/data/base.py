@@ -188,3 +188,48 @@ class BaseTaskPool(ABC):
         """清空内存队列"""
         with self.lock:
             self.tasks.clear()
+    
+    # ==================== Token 估算采样 (子类可覆盖) ====================
+    
+    def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
+        """
+        采样未处理的行 (用于输入 token 估算)
+        
+        默认实现: 初始化第一个分片并返回采样数据。
+        子类可以覆盖以提供更高效的实现。
+        
+        Args:
+            sample_size: 采样数量
+            
+        Returns:
+            采样数据列表 [{column: value, ...}, ...]
+        """
+        # 默认实现: 使用分片加载
+        min_id, max_id = self.get_id_boundaries()
+        if min_id > max_id:
+            return []
+        
+        # 初始化分片加载部分数据
+        self.initialize_shard(0, min_id, max_id)
+        
+        with self.lock:
+            samples = [data for _, data in self.tasks[:sample_size]]
+        
+        return samples
+    
+    def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
+        """
+        采样已处理的行 (用于输出 token 估算)
+        
+        默认实现返回空列表，子类需要覆盖以提供实际实现。
+        
+        Args:
+            sample_size: 采样数量
+            
+        Returns:
+            采样数据列表 [{column: value, ...}, ...]，包含输出列
+        """
+        logging.warning(
+            f"{self.__class__.__name__} 未实现 sample_processed_rows，返回空列表"
+        )
+        return []

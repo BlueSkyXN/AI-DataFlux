@@ -12,7 +12,7 @@
 import logging
 import subprocess
 import sys
-from typing import Literal, Any
+from typing import Literal
 
 from .base import BaseEngine
 from .pandas_engine import PandasEngine

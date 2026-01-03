@@ -6,7 +6,6 @@ Excel 数据源任务池实现
 """
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -387,3 +386,98 @@ class ExcelTaskPool(BaseTaskPool):
                         cleared_count += 1
         
         return updated_df, cleared_count
+    
+    # ==================== Token 估算采样 ====================
+    
+    def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
+        """
+        采样未处理的行 (用于输入 token 估算)
+        
+        Args:
+            sample_size: 采样数量
+            
+        Returns:
+            采样数据列表 [{column: value, ...}, ...]
+        """
+        min_idx, max_idx = self.engine.get_index_range(self.df)
+        unprocessed_indices = self._filter_unprocessed_indices(min_idx, max_idx)
+        
+        if not unprocessed_indices:
+            return []
+        
+        # 取前 sample_size 个
+        sample_indices = unprocessed_indices[:sample_size]
+        samples = []
+        
+        with self.lock:
+            for idx in sample_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    record_dict = {
+                        col: self.engine.to_string(row_data.get(col, ""))
+                        for col in self.columns_to_extract
+                    }
+                    samples.append(record_dict)
+                except Exception as e:
+                    logging.warning(f"采样索引 {idx} 失败: {e}")
+        
+        logging.info(f"采样 {len(samples)} 条未处理记录用于输入 token 估算")
+        return samples
+    
+    def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
+        """
+        采样已处理的行 (用于输出 token 估算)
+        
+        Args:
+            sample_size: 采样数量
+            
+        Returns:
+            采样数据列表 [{column: value, ...}, ...]，包含输出列
+        """
+        output_columns = list(self.columns_to_write.values())
+        
+        # 过滤已处理的行 (输出列都非空)
+        processed_indices = []
+        
+        with self.lock:
+            all_indices = self.engine.get_indices(self.df)
+            
+            for idx in all_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    
+                    # 检查所有输出列是否都有值
+                    all_filled = True
+                    for col in output_columns:
+                        value = row_data.get(col)
+                        if value is None or (isinstance(value, str) and not value.strip()):
+                            all_filled = False
+                            break
+                    
+                    if all_filled:
+                        processed_indices.append(idx)
+                        if len(processed_indices) >= sample_size:
+                            break
+                except Exception:
+                    continue
+        
+        if not processed_indices:
+            return []
+        
+        # 提取数据
+        samples = []
+        with self.lock:
+            for idx in processed_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    # 只提取输出列
+                    record_dict = {
+                        col: self.engine.to_string(row_data.get(col, ""))
+                        for col in output_columns
+                    }
+                    samples.append(record_dict)
+                except Exception as e:
+                    logging.warning(f"采样已处理索引 {idx} 失败: {e}")
+        
+        logging.info(f"采样 {len(samples)} 条已处理记录用于输出 token 估算")
+        return samples
