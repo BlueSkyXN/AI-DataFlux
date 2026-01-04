@@ -179,9 +179,9 @@ prompt:
 # Token 估算配置 (可选)
 token_estimation:
   mode: in               # 估算模式:
-                         #   in  - 仅输入 token (从 input_path 读取未处理行)
-                         #   out - 仅输出 token (从 output_path 读取已处理行)
-                         #   io  - 输入+输出 (输入从 input_path，输出从 output_path)
-  sample_size: 100         # 采样数量 (用于估算平均值)
-  tiktoken_model: gpt-4    # tiktoken 模型 (用于选择编码器)
-  # encoding: cl100k_base  # 可选: 直接指定 tiktoken 编码名称 (优先于 tiktoken_model)
+                         #   in  - 输入 token
+                         #   out - 输出 token
+                         #   io  - 输入+输出
+  sample_size: -1         # -1=全量计算(忽略处理状态), >0=采样数量
+  encoding: o200k_base    # 固定使用最新编码器
+  # tiktoken_model: gpt-4o  # 可选: 当未指定 encoding 时用于选择编码器

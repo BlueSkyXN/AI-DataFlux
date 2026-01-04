@@ -481,3 +481,32 @@ class ExcelTaskPool(BaseTaskPool):
         
         logging.info(f"采样 {len(samples)} 条已处理记录用于输出 token 估算")
         return samples
+
+    def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有行 (忽略处理状态)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            所有行的数据列表 [{column: value, ...}, ...]
+        """
+        all_rows = []
+
+        with self.lock:
+            all_indices = self.engine.get_indices(self.df)
+
+            for idx in all_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    record_dict = {
+                        col: self.engine.to_string(row_data.get(col, ""))
+                        for col in columns
+                    }
+                    all_rows.append(record_dict)
+                except Exception as e:
+                    logging.warning(f"获取索引 {idx} 数据失败: {e}")
+
+        logging.info(f"已获取 {len(all_rows)} 条记录 (忽略处理状态)")
+        return all_rows

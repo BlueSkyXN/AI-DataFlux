@@ -603,3 +603,42 @@ class MySQLTaskPool(BaseTaskPool):
         except Exception as e:
             logging.error(f"采样已处理行失败: {e}")
             return []
+
+    def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有行 (忽略处理状态)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            所有行的数据列表 [{column: value, ...}, ...]
+        """
+        def _fetch_all(conn: Any, cursor: Any) -> list[dict[str, Any]]:
+            if not columns:
+                return []
+
+            cols_str = ", ".join(
+                f"`{c.replace('`', '``')}`" for c in columns
+            )
+
+            # 不带 WHERE 条件，直接查询所有行
+            sql = f"SELECT {cols_str} FROM `{self.table_name}`"
+
+            logging.info(f"正在查询所有记录: {sql}")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                record_dict = {col: row.get(col) for col in columns}
+                results.append(record_dict)
+
+            logging.info(f"已获取 {len(results)} 条记录 (忽略处理状态)")
+            return results
+
+        try:
+            return self.execute_with_connection(_fetch_all, is_write=False)
+        except Exception as e:
+            logging.error(f"获取所有行失败: {e}")
+            return []

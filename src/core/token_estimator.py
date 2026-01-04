@@ -82,17 +82,27 @@ class TokenEstimator:
         # 获取 tiktoken 编码器
         tiktoken_model = token_cfg.get("tiktoken_model", "gpt-4")
         encoding_name = token_cfg.get("encoding", None)
-        
+
+        # 固定使用 o200k_base，除非用户显式指定其他编码
+        if not encoding_name:
+            encoding_name = "o200k_base"
+            logging.info("默认使用 o200k_base 编码器")
+
         try:
-            if encoding_name:
-                self.encoding = tiktoken.get_encoding(encoding_name)
-                logging.info(f"使用 tiktoken 编码: {encoding_name}")
-            else:
-                self.encoding = tiktoken.encoding_for_model(tiktoken_model)
-                logging.info(f"使用模型 {tiktoken_model} 的 tiktoken 编码")
+            self.encoding = tiktoken.get_encoding(encoding_name)
+            logging.info(f"使用 tiktoken 编码: {encoding_name}")
         except Exception as e:
-            logging.warning(f"无法获取指定编码，回退到 cl100k_base: {e}")
-            self.encoding = tiktoken.get_encoding("cl100k_base")
+            logging.warning(f"无法获取指定编码 {encoding_name}，尝试回退: {e}")
+            if encoding_name != "o200k_base":
+                try:
+                    self.encoding = tiktoken.get_encoding("o200k_base")
+                    logging.info("回退到 o200k_base 编码器")
+                except Exception:
+                    logging.warning("o200k_base 不可用，回退到 cl100k_base")
+                    self.encoding = tiktoken.get_encoding("cl100k_base")
+            else:
+                logging.warning("o200k_base 不可用，回退到 cl100k_base")
+                self.encoding = tiktoken.get_encoding("cl100k_base")
         
         # 提示词配置
         prompt_cfg = config.get("prompt", {})
@@ -239,38 +249,67 @@ class TokenEstimator:
         
         # 输入 token 估算 (in 或 io 模式)
         if self.mode in ("in", "io"):
-            unprocessed_samples = input_pool.sample_unprocessed_rows(self.sample_size)
-            unprocessed_count = len(unprocessed_samples)
-            
-            if unprocessed_count == 0:
-                logging.warning("未找到未处理的行，无法估算输入 token")
-                result["input_tokens"] = {"error": "no_unprocessed_rows"}
+            if self.sample_size == -1:
+                # 全量模式: 获取所有行 (忽略处理状态)
+                logging.info("正在获取所有输入记录进行全量 Token 计算...")
+                unprocessed_samples = input_pool.fetch_all_rows(self.columns_to_extract)
             else:
+                # 采样模式: 仅获取未处理行
+                unprocessed_samples = input_pool.sample_unprocessed_rows(self.sample_size)
+
+            unprocessed_count = len(unprocessed_samples)
+
+            if unprocessed_count == 0:
+                logging.warning("未找到记录，无法估算输入 token")
+                result["input_tokens"] = {"error": "no_rows_found"}
+            else:
+                if self.sample_size == -1:
+                    result["total_rows"] = unprocessed_count
+                    result["request_count"] = unprocessed_count
+
                 result["sampled_rows"] = unprocessed_count
                 input_tokens_list = []
                 for record_data in unprocessed_samples:
                     tokens = self.estimate_input_tokens_for_record(record_data)
                     input_tokens_list.append(tokens)
-                
-                result["input_tokens"] = self._compute_stats(input_tokens_list, total_task_count)
-        
+
+                # 如果是全量模式，total_rows 应该等于 sample_count，避免放大
+                calc_total_rows = unprocessed_count if self.sample_size == -1 else total_task_count
+                result["input_tokens"] = self._compute_stats(input_tokens_list, calc_total_rows)
+
         # 输出 token 估算 (out 或 io 模式)
         if self.mode in ("out", "io"):
-            processed_samples = output_pool.sample_processed_rows(self.sample_size)
-            processed_count = len(processed_samples)
-            
-            if processed_count == 0:
-                logging.warning("未找到已处理的行，无法估算输出 token")
-                result["output_tokens"] = {"error": "no_processed_rows"}
+            if self.sample_size == -1:
+                # 全量模式: 获取所有行 (忽略处理状态)
+                logging.info("正在获取所有输出记录进行全量 Token 计算...")
+                # 注意: 输出通常只在已处理的行中有意义，但为了对应全量输入，我们尝试获取所有
+                # 这里使用 fetch_all_rows 获取 write_colnames
+                write_cols = list(self.columns_to_write.values())
+                processed_samples = output_pool.fetch_all_rows(write_cols)
             else:
+                processed_samples = output_pool.sample_processed_rows(self.sample_size)
+
+            processed_count = len(processed_samples)
+
+            if processed_count == 0:
+                logging.warning("未找到输出记录，无法估算输出 token")
+                result["output_tokens"] = {"error": "no_rows_found"}
+            else:
+                if self.sample_size == -1 and self.mode == "out":
+                    result["total_rows"] = processed_count
+                    result["request_count"] = processed_count
+
                 output_tokens_list = []
                 for output_data in processed_samples:
                     tokens = self.estimate_output_tokens_for_record(output_data)
                     output_tokens_list.append(tokens)
-                
+
+                # 如果是全量模式，total_rows 应该等于 sample_count
+                calc_total_rows = processed_count if self.sample_size == -1 else total_task_count
+
                 result["output_tokens"] = self._compute_stats(
-                    output_tokens_list, 
-                    total_task_count
+                    output_tokens_list,
+                    calc_total_rows
                 )
                 result["output_sampled_rows"] = processed_count
         

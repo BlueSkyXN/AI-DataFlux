@@ -233,3 +233,18 @@ class BaseTaskPool(ABC):
             f"{self.__class__.__name__} 未实现 sample_processed_rows，返回空列表"
         )
         return []
+
+    def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有行 (忽略处理状态)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            所有行的数据列表 [{column: value, ...}, ...]
+        """
+        logging.warning(
+            f"{self.__class__.__name__} 未实现 fetch_all_rows，返回空列表"
+        )
+        return []
