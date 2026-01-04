@@ -48,6 +48,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
     },
+    "token_estimation": {
+        "mode": "io",
+        "sample_size": -1,
+        "encoding": "o200k_base",
+    },
 }
 
 

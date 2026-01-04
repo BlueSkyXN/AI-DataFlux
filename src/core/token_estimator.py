@@ -75,9 +75,9 @@ class TokenEstimator:
         
         # Token 估算配置
         token_cfg = config.get("token_estimation", {})
-        raw_mode = token_cfg.get("mode", "in")
+        raw_mode = token_cfg.get("mode", "io")
         self.mode = normalize_mode(raw_mode)
-        self.sample_size = token_cfg.get("sample_size", 100)
+        self.sample_size = token_cfg.get("sample_size", -1)
         
         # 获取 tiktoken 编码器
         tiktoken_model = token_cfg.get("tiktoken_model", "gpt-4")

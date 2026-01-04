@@ -100,8 +100,9 @@ python cli.py token --config config.yaml --mode io
 
 - 输入 token：系统提示词 + 用户提示词模板渲染后的完整文本（`{record_json}` 来自 `columns_to_extract`），system 与 user 内容用换行拼接后直接用 tiktoken 计数，不包含 chat 消息格式的固定开销。
 - 输出 token：按 `columns_to_write` 重组 JSON（别名为键）并序列化后，用 tiktoken 计数。
-- 默认 mode 为 `in`，可用 `--mode out` 或 `--mode io` 覆盖（命令行会覆盖配置文件中的 `token_estimation.mode`）。
+- 默认 mode 为 `io`，可用 `--mode out` 或 `--mode in` 覆盖（命令行会覆盖配置文件中的 `token_estimation.mode`）。
 - 当 `token_estimation.sample_size: -1` 时，会对所有行进行全量计算（忽略处理状态），并输出进度日志。
+- 默认编码器为 `o200k_base`。
 
 ### 启动 API 网关
 

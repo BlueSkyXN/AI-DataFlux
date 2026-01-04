@@ -178,7 +178,7 @@ prompt:
 
 # Token 估算配置 (可选)
 token_estimation:
-  mode: in               # 估算模式:
+  mode: io               # 估算模式:
                          #   in  - 输入 token
                          #   out - 输出 token
                          #   io  - 输入+输出
