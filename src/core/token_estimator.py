@@ -269,9 +269,15 @@ class TokenEstimator:
 
                 result["sampled_rows"] = unprocessed_count
                 input_tokens_list = []
-                for record_data in unprocessed_samples:
+                log_step = 1000
+                for idx, record_data in enumerate(unprocessed_samples, start=1):
                     tokens = self.estimate_input_tokens_for_record(record_data)
                     input_tokens_list.append(tokens)
+                    if self.sample_size == -1 and idx % log_step == 0:
+                        logging.info(f"输入 Token 计算进度: {idx}/{unprocessed_count}")
+
+                if self.sample_size == -1:
+                    logging.info("输入 Token 计算完成")
 
                 # 如果是全量模式，total_rows 应该等于 sample_count，避免放大
                 calc_total_rows = unprocessed_count if self.sample_size == -1 else total_task_count
@@ -300,9 +306,15 @@ class TokenEstimator:
                     result["request_count"] = processed_count
 
                 output_tokens_list = []
-                for output_data in processed_samples:
+                log_step = 1000
+                for idx, output_data in enumerate(processed_samples, start=1):
                     tokens = self.estimate_output_tokens_for_record(output_data)
                     output_tokens_list.append(tokens)
+                    if self.sample_size == -1 and idx % log_step == 0:
+                        logging.info(f"输出 Token 计算进度: {idx}/{processed_count}")
+
+                if self.sample_size == -1:
+                    logging.info("输出 Token 计算完成")
 
                 # 如果是全量模式，total_rows 应该等于 sample_count
                 calc_total_rows = processed_count if self.sample_size == -1 else total_task_count
@@ -359,27 +371,51 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
         估算结果字典
     """
     import copy
-    from ..config.settings import load_config
+    from pathlib import Path
+    from ..config.settings import load_config, init_logging
     from ..data import create_task_pool
-    
+
     # 加载配置
     config = load_config(config_path)
-    
+
+    # 初始化日志 (token 命令也输出进度日志)
+    global_cfg = config.get("global", {})
+    init_logging(global_cfg.get("log", {}))
+
     # 覆盖模式
     if mode:
         if "token_estimation" not in config:
             config["token_estimation"] = {}
         config["token_estimation"]["mode"] = mode
-    
+        logging.info(f"使用命令行模式覆盖: {mode}")
+
     # 创建估算器
     estimator = TokenEstimator(config)
-    
+
     # 创建任务池 (只读模式)
     columns_to_extract = config.get("columns_to_extract", [])
     columns_to_write = config.get("columns_to_write", {})
-    
-    # 创建输入池
-    input_pool = create_task_pool(config, columns_to_extract, columns_to_write)
+
+    # 创建输入池 (Excel: 若输入文件缺失且输出文件存在，则回退使用输出文件)
+    try:
+        input_pool = create_task_pool(config, columns_to_extract, columns_to_write)
+    except FileNotFoundError as e:
+        datasource_type = config.get("datasource", {}).get("type", "excel")
+        if datasource_type == "excel":
+            excel_cfg = config.get("excel", {})
+            input_path = excel_cfg.get("input_path")
+            output_path = excel_cfg.get("output_path")
+            if output_path and output_path != input_path and Path(output_path).exists():
+                logging.warning(
+                    f"输入文件不存在，回退使用输出文件作为输入: {output_path}"
+                )
+                input_config = copy.deepcopy(config)
+                input_config["excel"]["input_path"] = output_path
+                input_pool = create_task_pool(input_config, columns_to_extract, columns_to_write)
+            else:
+                raise
+        else:
+            raise
     
     # 创建输出池 (仅 Excel 数据源，且 out/io 模式需要)
     output_pool = None
