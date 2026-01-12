@@ -80,7 +80,6 @@ class TokenEstimator:
         self.sample_size = token_cfg.get("sample_size", -1)
         
         # 获取 tiktoken 编码器
-        tiktoken_model = token_cfg.get("tiktoken_model", "gpt-4")
         encoding_name = token_cfg.get("encoding", None)
 
         # 固定使用 o200k_base，除非用户显式指定其他编码
@@ -340,8 +339,7 @@ class TokenEstimator:
             return {"total": 0, "avg": 0, "min": 0, "max": 0}
         
         avg = sum(tokens_list) / len(tokens_list)
-        sample_ratio = total_rows / len(tokens_list) if len(tokens_list) > 0 else 1
-        
+
         # 按百分位排序
         sorted_tokens = sorted(tokens_list)
         
@@ -402,7 +400,7 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
     # 创建输入池 (Excel: 若输入文件缺失且输出文件存在，则回退使用输出文件)
     try:
         input_pool = create_task_pool(config, columns_to_extract, columns_to_write)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         datasource_type = config.get("datasource", {}).get("type", "excel")
         if datasource_type == "excel":
             excel_cfg = config.get("excel", {})

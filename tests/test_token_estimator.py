@@ -4,7 +4,6 @@ Token 估算器测试
 测试 token_estimator.py 的核心功能
 """
 
-import json
 import pytest
 from unittest.mock import MagicMock, patch
 
