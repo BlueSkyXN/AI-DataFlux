@@ -240,12 +240,17 @@ class TokenEstimator:
             "total_rows": 0,
             "sampled_rows": 0,
             "request_count": 0,
+            "processed_total_rows": 0,
         }
-        
-        # 获取总任务数
+
+        # 获取总任务数 (未处理)
         total_task_count = input_pool.get_total_task_count()
         result["total_rows"] = total_task_count
         result["request_count"] = total_task_count
+
+        # 获取已处理总数 (用于输出估算)
+        processed_total_count = output_pool.get_processed_task_count()
+        result["processed_total_rows"] = processed_total_count
         
         # 输入 token 估算 (in 或 io 模式)
         if self.mode in ("in", "io"):
@@ -286,12 +291,10 @@ class TokenEstimator:
         # 输出 token 估算 (out 或 io 模式)
         if self.mode in ("out", "io"):
             if self.sample_size == -1:
-                # 全量模式: 获取所有行 (忽略处理状态)
+                # 全量模式: 获取所有已处理行
                 logging.info("正在获取所有输出记录进行全量 Token 计算...")
-                # 注意: 输出通常只在已处理的行中有意义，但为了对应全量输入，我们尝试获取所有
-                # 这里使用 fetch_all_rows 获取 write_colnames
                 write_cols = list(self.columns_to_write.values())
-                processed_samples = output_pool.fetch_all_rows(write_cols)
+                processed_samples = output_pool.fetch_all_processed_rows(write_cols)
             else:
                 processed_samples = output_pool.sample_processed_rows(self.sample_size)
 
@@ -301,9 +304,9 @@ class TokenEstimator:
                 logging.warning("未找到输出记录，无法估算输出 token")
                 result["output_tokens"] = {"error": "no_rows_found"}
             else:
-                if self.sample_size == -1 and self.mode == "out":
-                    result["total_rows"] = processed_count
-                    result["request_count"] = processed_count
+                if self.mode == "out":
+                    result["total_rows"] = processed_total_count
+                    result["request_count"] = processed_total_count
 
                 output_tokens_list = []
                 log_step = 1000
@@ -316,8 +319,8 @@ class TokenEstimator:
                 if self.sample_size == -1:
                     logging.info("输出 Token 计算完成")
 
-                # 如果是全量模式，total_rows 应该等于 sample_count
-                calc_total_rows = processed_count if self.sample_size == -1 else total_task_count
+                # 输出估算基于已处理总数
+                calc_total_rows = processed_count if self.sample_size == -1 else processed_total_count
 
                 result["output_tokens"] = self._compute_stats(
                     output_tokens_list,

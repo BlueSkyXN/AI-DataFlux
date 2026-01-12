@@ -167,29 +167,34 @@ class TestTokenEstimator:
     def test_mode_out_skips_input_estimation(self, token_config, mock_tiktoken):
         """测试 out 模式跳过输入估算"""
         token_config["token_estimation"]["mode"] = "out"
-        
+
         with patch('src.core.token_estimator.TIKTOKEN_AVAILABLE', True):
             with patch('src.core.token_estimator.tiktoken', mock_tiktoken):
                 from src.core.token_estimator import TokenEstimator
-                
+
                 estimator = TokenEstimator(token_config)
                 assert estimator.mode == "out"
-                
+
                 # 创建 mock 任务池
                 mock_pool = MagicMock()
                 mock_pool.get_total_task_count.return_value = 10
+                mock_pool.get_processed_task_count.return_value = 3
                 mock_pool.sample_processed_rows.return_value = [
                     {"ai_answer": "Answer 1"},
                     {"ai_answer": "Answer 2"},
                 ]
-                
+
                 result = estimator.estimate(mock_pool, mock_pool)
-                
+
                 # out 模式不应有 input_tokens
                 assert "input_tokens" not in result
                 # 应有 output_tokens
                 assert "output_tokens" in result
                 assert "error" not in result.get("output_tokens", {})
+                assert result.get("processed_total_rows") == 3
+                assert result.get("total_rows") == 3
+                assert result.get("request_count") == 3
+                assert result.get("output_tokens", {}).get("total_estimated") > 0
     
     def test_mode_io_estimates_both(self, token_config, mock_tiktoken):
         """测试 io 模式同时估算输入和输出"""
@@ -209,21 +214,24 @@ class TestTokenEstimator:
                     {"question": "Q1", "context": "C1"},
                     {"question": "Q2", "context": "C2"},
                 ]
-                
+
                 # 创建 mock 输出池
                 mock_output_pool = MagicMock()
+                mock_output_pool.get_processed_task_count.return_value = 2
                 mock_output_pool.sample_processed_rows.return_value = [
                     {"ai_answer": "Answer 1"},
                     {"ai_answer": "Answer 2"},
                 ]
-                
+
                 result = estimator.estimate(mock_input_pool, mock_output_pool)
-                
+
                 # io 模式应同时有 input_tokens 和 output_tokens
                 assert "input_tokens" in result
                 assert "output_tokens" in result
                 assert "error" not in result.get("input_tokens", {})
                 assert "error" not in result.get("output_tokens", {})
+                assert result.get("processed_total_rows") == 2
+                assert result.get("output_tokens", {}).get("total_estimated") > 0
 
 
 class TestTokenEstimatorIntegration:

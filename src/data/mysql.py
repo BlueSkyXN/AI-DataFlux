@@ -270,18 +270,38 @@ class MySQLTaskPool(BaseTaskPool):
             where_clause = self._build_unprocessed_condition()
             sql = f"SELECT COUNT(*) as count FROM `{self.table_name}` WHERE {where_clause}"
             logging.debug(f"执行计数查询: {sql}")
-            
+
             cursor.execute(sql)
             result = cursor.fetchone()
             count = result["count"] if result else 0
-            
+
             logging.info(f"数据库中未处理的任务总数: {count}")
             return count
-        
+
         try:
             return self.execute_with_connection(_get_count)
         except Exception as e:
             logging.error(f"获取总任务数时出错: {e}")
+            return 0
+
+    def get_processed_task_count(self) -> int:
+        """获取已处理任务总数"""
+        def _get_count(conn: Any, cursor: Any) -> int:
+            where_clause = self._build_processed_condition()
+            sql = f"SELECT COUNT(*) as count FROM `{self.table_name}` WHERE {where_clause}"
+            logging.debug(f"执行已处理计数查询: {sql}")
+
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            count = result["count"] if result else 0
+
+            logging.info(f"数据库中已处理的任务总数: {count}")
+            return count
+
+        try:
+            return self.execute_with_connection(_get_count)
+        except Exception as e:
+            logging.error(f"获取已处理任务数时出错: {e}")
             return 0
     
     def get_id_boundaries(self) -> tuple[int, int]:
@@ -641,4 +661,42 @@ class MySQLTaskPool(BaseTaskPool):
             return self.execute_with_connection(_fetch_all, is_write=False)
         except Exception as e:
             logging.error(f"获取所有行失败: {e}")
+            return []
+
+    def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有已处理行 (仅输出已完成的记录)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            已处理行的数据列表 [{column: value, ...}, ...]
+        """
+        def _fetch_all(conn: Any, cursor: Any) -> list[dict[str, Any]]:
+            if not columns:
+                return []
+
+            cols_str = ", ".join(
+                f"`{c.replace('`', '``')}`" for c in columns
+            )
+            where_clause = self._build_processed_condition()
+            sql = f"SELECT {cols_str} FROM `{self.table_name}` WHERE {where_clause}"
+
+            logging.info(f"正在查询已处理记录: {sql}")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                record_dict = {col: row.get(col) for col in columns}
+                results.append(record_dict)
+
+            logging.info(f"已获取 {len(results)} 条已处理记录")
+            return results
+
+        try:
+            return self.execute_with_connection(_fetch_all, is_write=False)
+        except Exception as e:
+            logging.error(f"获取已处理行失败: {e}")
             return []

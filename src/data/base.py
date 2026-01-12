@@ -56,9 +56,19 @@ class BaseTaskPool(ABC):
     def get_total_task_count(self) -> int:
         """
         获取未处理任务总数
-        
+
         Returns:
             未处理任务数量
+        """
+        pass
+
+    @abstractmethod
+    def get_processed_task_count(self) -> int:
+        """
+        获取已处理任务总数
+
+        Returns:
+            已处理任务数量
         """
         pass
     
@@ -246,5 +256,20 @@ class BaseTaskPool(ABC):
         """
         logging.warning(
             f"{self.__class__.__name__} 未实现 fetch_all_rows，返回空列表"
+        )
+        return []
+
+    def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有已处理行 (仅输出已完成的记录)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            已处理行的数据列表 [{column: value, ...}, ...]
+        """
+        logging.warning(
+            f"{self.__class__.__name__} 未实现 fetch_all_processed_rows，返回空列表"
         )
         return []

@@ -126,13 +126,43 @@ class ExcelTaskPool(BaseTaskPool):
     def get_total_task_count(self) -> int:
         """获取未处理任务总数"""
         logging.info("正在计算 Excel 中未处理的任务总数...")
-        
+
         min_idx, max_idx = self.engine.get_index_range(self.df)
         unprocessed = self._filter_unprocessed_indices(min_idx, max_idx)
         count = len(unprocessed)
-        
+
         logging.info(f"Excel 中未处理的任务总数: {count}")
         return count
+
+    def get_processed_task_count(self) -> int:
+        """获取已处理任务总数"""
+        logging.info("正在计算 Excel 中已处理的任务总数...")
+
+        output_columns = list(self.columns_to_write.values())
+        if not output_columns:
+            return 0
+
+        processed_count = 0
+        with self.lock:
+            all_indices = self.engine.get_indices(self.df)
+
+            for idx in all_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    all_filled = True
+                    for col in output_columns:
+                        value = row_data.get(col)
+                        if value is None or (isinstance(value, str) and not value.strip()):
+                            all_filled = False
+                            break
+
+                    if all_filled:
+                        processed_count += 1
+                except Exception:
+                    continue
+
+        logging.info(f"Excel 中已处理的任务总数: {processed_count}")
+        return processed_count
     
     def get_id_boundaries(self) -> tuple[int, int]:
         """获取索引边界"""
@@ -510,3 +540,45 @@ class ExcelTaskPool(BaseTaskPool):
 
         logging.info(f"已获取 {len(all_rows)} 条记录 (忽略处理状态)")
         return all_rows
+
+    def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        """
+        获取所有已处理行 (仅输出已完成的记录)
+
+        Args:
+            columns: 需要提取的列名列表
+
+        Returns:
+            已处理行的数据列表 [{column: value, ...}, ...]
+        """
+        output_columns = list(self.columns_to_write.values())
+        if not output_columns:
+            return []
+
+        processed_rows = []
+        with self.lock:
+            all_indices = self.engine.get_indices(self.df)
+
+            for idx in all_indices:
+                try:
+                    row_data = self.engine.get_row(self.df, idx)
+                    all_filled = True
+                    for col in output_columns:
+                        value = row_data.get(col)
+                        if value is None or (isinstance(value, str) and not value.strip()):
+                            all_filled = False
+                            break
+
+                    if not all_filled:
+                        continue
+
+                    record_dict = {
+                        col: self.engine.to_string(row_data.get(col, ""))
+                        for col in columns
+                    }
+                    processed_rows.append(record_dict)
+                except Exception as e:
+                    logging.warning(f"获取已处理索引 {idx} 数据失败: {e}")
+
+        logging.info(f"已获取 {len(processed_rows)} 条已处理记录")
+        return processed_rows

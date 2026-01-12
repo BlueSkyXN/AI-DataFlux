@@ -113,6 +113,10 @@ def cmd_token(args):
     print(f"\n{console.info} Mode: {mode_display} ({mode_desc.get(mode_display, '')})")
     print(f"{console.info} Total rows: {result.get('total_rows', 0)}")
     print(f"{console.info} Sampled rows: {result.get('sampled_rows', 0)}")
+    if result.get("processed_total_rows", 0):
+        print(f"{console.info} Processed rows: {result.get('processed_total_rows', 0)}")
+    if result.get("output_sampled_rows", 0):
+        print(f"{console.info} Output sampled rows: {result.get('output_sampled_rows', 0)}")
     print(f"{console.info} Estimated requests: {result.get('request_count', 0)}")
     
     # Input tokens (in/io modes)
