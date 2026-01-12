@@ -25,6 +25,7 @@
 AI-DataFlux/
 ├── main.py              # 数据处理入口
 ├── gateway.py           # API 网关入口
+├── cli.py               # 统一命令行入口
 ├── config.yaml          # 配置文件
 ├── config-example.yaml  # 配置示例
 ├── requirements.txt     # 依赖列表
@@ -61,8 +62,9 @@ AI-DataFlux/
 │       ├── service.py   # 核心服务逻辑
 │       ├── dispatcher.py # 模型调度器
 │       ├── limiter.py   # 限流组件
-│       ├── session.py   # HTTP 连接池
-│       └── schemas.py   # Pydantic 模型
+│       ├── session.py   # HTTP 连接池管理
+│       ├── resolver.py  # 自定义 DNS 解析器 (IP 池轮询)
+│       └── schemas.py   # Pydantic 数据模型
 └── legacy/              # 旧版代码 (保留备份)
 ```
 
@@ -536,7 +538,7 @@ AIDataFluxError (基类)
 
 #### `engines/polars_engine.py` - PolarsEngine
 
-**功能**: 基于 Polars 的高性能实现。
+**功能**: 基于 Polars 的高性能实现（已完整实现）。
 
 **特点**:
 - 多线程并行处理
@@ -706,11 +708,83 @@ AIDataFluxError (基类)
 
 **类**: `SessionPool`
 
+**初始化参数**:
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `max_connections` | `int` | `1000` | 总最大连接数 |
+| `max_connections_per_host` | `int` | `1000` | 每个主机最大连接数 |
+| `resolver` | `AbstractResolver \| None` | `None` | 自定义 DNS 解析器 |
+
 | 方法 | 描述 |
 |------|------|
 | `get_or_create(ssl_verify, proxy)` | 获取或创建 ClientSession |
 | `close_all()` | 关闭所有 Session |
 | `get_stats()` | 获取连接池统计信息 |
+
+**DNS 缓存行为**:
+- 无自定义解析器: 启用 DNS 缓存 (TTL=10s)
+- 有自定义解析器: 禁用 DNS 缓存，确保每次新连接触发轮询
+
+---
+
+#### `resolver.py` - IP 池轮询解析器
+
+**功能**: 自定义 DNS 解析器，支持按通道配置多 IP 地址，实现均匀负载分配和故障回退。
+
+**使用场景**:
+- 目标 API 有多个服务器 IP，希望均匀分配请求
+- 需要在应用层控制 IP 选择策略
+- DNS 轮询不满足需求（如需要更均匀的分布）
+
+**类**: `RoundRobinResolver`
+
+实现 `aiohttp.abc.AbstractResolver` 接口，对配置了 IP 池的域名进行轮询解析。
+
+**初始化参数**:
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `ip_pools` | `dict[str, list[str]] \| None` | `None` | 域名到 IP 列表的映射 |
+| `default_port` | `int` | `443` | 默认端口号 |
+
+**方法**:
+
+| 方法 | 描述 |
+|------|------|
+| `resolve(host, port, family)` | 解析域名，返回轮询排序的 IP 列表 |
+| `close()` | 关闭解析器 |
+| `get_stats()` | 获取解析器统计信息 |
+
+**轮询行为**:
+```
+IP 列表: [ip1, ip2, ip3]
+
+第 1 次解析: [ip1, ip2, ip3]  # 从 ip1 开始
+第 2 次解析: [ip2, ip3, ip1]  # 从 ip2 开始
+第 3 次解析: [ip3, ip1, ip2]  # 从 ip3 开始
+第 4 次解析: [ip1, ip2, ip3]  # 循环回到 ip1
+```
+
+**故障回退**:
+- aiohttp 会按返回的 IP 列表顺序尝试连接
+- 如果第一个 IP 连接失败，自动尝试下一个
+- 无需额外配置，由 aiohttp 内置机制处理
+
+**函数**: `build_ip_pools_from_channels(channels)`
+
+从通道配置自动构建 IP 池映射。
+
+| 参数 | 类型 | 描述 |
+|------|------|------|
+| `channels` | `dict[str, Any]` | 通道配置字典 |
+
+**返回值**: `dict[str, list[str]]` - 域名到 IP 列表的映射
+
+**注意事项**:
+- 配置了 `proxy` 的通道会忽略 `ip_pool`（代理模式下无效）
+- 只有合法的 IPv4/IPv6 地址会被添加到池中
+- 多个通道指向同一域名时，IP 列表会合并
 
 ---
 
@@ -871,7 +945,37 @@ AIDataFluxError (基类)
 | `prompt` | AI 提示词配置 |
 | `validation` | 字段验证规则 |
 | `models` | 模型配置列表 |
-| `channels` | 通道配置 (API 端点) |
+| `channels` | 通道配置 (API 端点、IP 池) |
+
+### IP 池配置示例
+
+为通道配置多 IP 地址，实现均匀负载分配和故障回退：
+
+```yaml
+channels:
+  "1":
+    name: "openai-api"
+    base_url: "https://api.openai.com"
+    api_path: "/v1/chat/completions"
+    timeout: 300
+    ssl_verify: true
+    # IP 池配置 - 均匀分配请求到多个 IP
+    ip_pool:
+      - "104.18.6.192"
+      - "104.18.7.192"
+      - "172.64.155.188"
+```
+
+**工作原理**:
+1. 启动时从通道配置提取 IP 池，创建 `RoundRobinResolver`
+2. 每次新建连接时，解析器返回轮询排序的 IP 列表
+3. aiohttp 按列表顺序尝试连接，第一个失败自动尝试下一个
+4. 连接复用不受影响，只在新建连接时触发轮询
+
+**注意事项**:
+- 配置了 `proxy` 的通道，`ip_pool` 会被忽略
+- IP 必须是有效的 IPv4 或 IPv6 地址
+- 域名的 TLS/SNI 验证不受影响（仍使用 `base_url` 中的域名）
 
 ### 高性能引擎配置示例
 
@@ -887,4 +991,4 @@ datasource:
 
 ---
 
-*文档版本: 2.1 | 最后更新: 2025-12*
+*文档版本: 2.2 | 最后更新: 2026-01*

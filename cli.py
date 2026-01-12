@@ -6,6 +6,7 @@ AI-DataFlux Unified CLI Entry Point
 Usage:
     python cli.py process --config config.yaml     # Run data processing
     python cli.py gateway --port 8787              # Start API gateway
+    python cli.py token --config config.yaml       # Estimate token usage
     python cli.py version                          # Show version info
     python cli.py check                            # Check library status
 """
@@ -80,6 +81,73 @@ def cmd_check(args):
     return 0
 
 
+def cmd_token(args):
+    """Estimate token usage"""
+    from src.utils.console import console
+    from src.core.token_estimator import run_token_estimation
+    
+    mode = args.mode if hasattr(args, 'mode') and args.mode else None
+    
+    try:
+        result = run_token_estimation(args.config, mode)
+    except ImportError as e:
+        print(f"{console.error} {e}")
+        print(f"{console.tip} Install tiktoken: pip install tiktoken")
+        return 1
+    except Exception as e:
+        print(f"{console.error} Token estimation failed: {e}")
+        return 1
+    
+    # Check for errors
+    if result.get("error"):
+        print(f"{console.error} {result.get('message', result.get('error'))}")
+        return 1
+    
+    # Print results
+    print("\n" + "=" * 50)
+    print("  Token Estimation Results")
+    print("=" * 50)
+    
+    mode_display = result.get('mode', 'in')
+    mode_desc = {"in": "input only", "out": "output only", "io": "input + output"}
+    print(f"\n{console.info} Mode: {mode_display} ({mode_desc.get(mode_display, '')})")
+    print(f"{console.info} Total rows: {result.get('total_rows', 0)}")
+    print(f"{console.info} Sampled rows: {result.get('sampled_rows', 0)}")
+    if result.get("processed_total_rows", 0):
+        print(f"{console.info} Processed rows: {result.get('processed_total_rows', 0)}")
+    if result.get("output_sampled_rows", 0):
+        print(f"{console.info} Output sampled rows: {result.get('output_sampled_rows', 0)}")
+    print(f"{console.info} Estimated requests: {result.get('request_count', 0)}")
+    
+    # Input tokens (in/io modes)
+    input_stats = result.get("input_tokens", {})
+    if input_stats and "error" not in input_stats:
+        print(f"\n{console.ok} Input Token Estimation:")
+        print(f"   Total (estimated): {input_stats.get('total_estimated', 0):,}")
+        print(f"   Per-request avg:   {input_stats.get('avg', 0):.1f}")
+        print(f"   Per-request min:   {input_stats.get('min', 0)}")
+        print(f"   Per-request max:   {input_stats.get('max', 0)}")
+        print(f"   P50: {input_stats.get('p50', 0)} | P90: {input_stats.get('p90', 0)} | P99: {input_stats.get('p99', 0)}")
+    elif mode_display in ('in', 'io') and (not input_stats or "error" in input_stats):
+        print(f"\n{console.warn} Input estimation unavailable (no unprocessed rows found)")
+    
+    # Output tokens (out/io modes)
+    output_stats = result.get("output_tokens", {})
+    if output_stats and "error" not in output_stats:
+        print(f"\n{console.ok} Output Token Estimation:")
+        print(f"   Total (estimated): {output_stats.get('total_estimated', 0):,}")
+        print(f"   Per-response avg:  {output_stats.get('avg', 0):.1f}")
+        print(f"   Per-response min:  {output_stats.get('min', 0)}")
+        print(f"   Per-response max:  {output_stats.get('max', 0)}")
+        print(f"   P50: {output_stats.get('p50', 0)} | P90: {output_stats.get('p90', 0)} | P99: {output_stats.get('p99', 0)}")
+    elif mode_display in ('out', 'io') and (not output_stats or "error" in output_stats):
+        print(f"\n{console.warn} Output estimation unavailable (no processed rows found)")
+    
+    print("\n" + "=" * 50)
+    
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ai-dataflux",
@@ -111,6 +179,16 @@ def main():
     # check subcommand
     p_check = subparsers.add_parser("check", help="Check library status")
     p_check.set_defaults(func=cmd_check)
+    
+    # token subcommand
+    p_token = subparsers.add_parser("token", help="Estimate token usage")
+    p_token.add_argument("-c", "--config", default="config.yaml", help="Config file path")
+    p_token.add_argument(
+        "--mode", 
+        choices=["in", "out", "io"], 
+        help="Estimation mode: in (input from input file), out (output from output file), io (both)"
+    )
+    p_token.set_defaults(func=cmd_token)
     
     args = parser.parse_args()
     

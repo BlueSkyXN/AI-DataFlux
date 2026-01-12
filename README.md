@@ -85,7 +85,24 @@ python cli.py process --config config.yaml
 
 # 仅验证配置
 python cli.py process --config config.yaml --validate
+
+# 估算 Token 用量 (仅输入)
+python cli.py token --config config.yaml
+
+# 估算 Token 用量 (仅输出，需要 output 文件有已处理结果)
+python cli.py token --config config.yaml --mode out
+
+# 估算 Token 用量 (输入+输出)
+python cli.py token --config config.yaml --mode io
 ```
+
+### Token 估算说明
+
+- 输入 token：系统提示词 + 用户提示词模板渲染后的完整文本（`{record_json}` 来自 `columns_to_extract`），system 与 user 内容用换行拼接后直接用 tiktoken 计数，不包含 chat 消息格式的固定开销。
+- 输出 token：按 `columns_to_write` 重组 JSON（别名为键）并序列化后，用 tiktoken 计数。
+- 默认 mode 为 `io`，可用 `--mode out` 或 `--mode in` 覆盖（命令行会覆盖配置文件中的 `token_estimation.mode`）。
+- 当 `token_estimation.sample_size: -1` 时，会对所有行进行全量计算（忽略处理状态），并输出进度日志。
+- 默认编码器为 `o200k_base`。
 
 ### 启动 API 网关
 
@@ -292,10 +309,11 @@ channels:
 
 ## 项目结构
 
-```
+```text
 AI-DataFlux/
 ├── main.py              # 数据处理入口
 ├── gateway.py           # API 网关入口
+├── cli.py               # 统一命令行入口
 ├── config.yaml          # 配置文件
 ├── config-example.yaml  # 配置示例
 ├── requirements.txt     # 依赖列表
@@ -325,7 +343,8 @@ AI-DataFlux/
 │       ├── service.py   # 核心服务逻辑
 │       ├── dispatcher.py # 模型调度器
 │       ├── limiter.py   # 限流组件
-│       ├── session.py   # HTTP 连接池
+│       ├── session.py   # HTTP 连接池管理
+│       ├── resolver.py  # 自定义 DNS 解析器
 │       └── schemas.py   # Pydantic 模型
 ├── docs/
 │   └── DESIGN.md        # 详细设计文档
@@ -351,11 +370,13 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 - **管理API**：提供模型状态和健康监控接口
 
 启动方式：
+
 ```bash
 python gateway.py --config config.yaml
 ```
 
 默认监听 `http://127.0.0.1:8787`，提供以下API端点：
+
 - `/v1/chat/completions` - OpenAI兼容的聊天补全接口
 - `/v1/models` - 可用模型列表
 - `/admin/models` - 模型详细状态和指标
@@ -424,7 +445,7 @@ datasource:
 **自动回退机制**：
 
 | 配置值 | 优先选择 | 回退选择 | 触发条件 |
-|--------|---------|---------|---------|
+| --- | --- | --- | --- |
 | `engine: auto` | polars | pandas | polars 未安装 |
 | `excel_reader: auto` | calamine | openpyxl | fastexcel 未安装 |
 | `excel_writer: auto` | xlsxwriter | openpyxl | xlsxwriter 未安装 |
@@ -461,6 +482,7 @@ datasource:
 ```
 
 当遇到API错误时：
+
 1. 系统暂停所有新请求（api_pause_duration秒）
 2. 暂停后系统进入"错误触发窗口期"
 3. 窗口期内的新错误不会触发额外暂停
@@ -531,7 +553,7 @@ datasource:
 2. **无法连接到API网关**
    - 确认gateway.py正在运行: `ps aux | grep gateway.py`
    - 检查global.flux_api_url配置是否正确指向运行的服务
-   - 尝试用浏览器访问 http://127.0.0.1:8787/ 确认服务可用
+   - 尝试用浏览器访问 `http://127.0.0.1:8787/` 确认服务可用
 
 3. **API错误频繁**
    - 增加`api_pause_duration`值，给API更多恢复时间
@@ -554,6 +576,7 @@ datasource:
    - 错误信息: `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed`
    - 解决方案: 在通道配置中设置 `ssl_verify: false`
    - 示例:
+
      ```yaml
      channels:
        "1":
@@ -561,8 +584,10 @@ datasource:
          base_url: "https://api.example.com"
          ssl_verify: false  # 临时禁用SSL验证
      ```
+
    - ⚠️ 注意: 这会降低安全性，仅建议在测试环境或Mac证书问题时使用
    - 永久解决方案:
+
      ```bash
      # 更新Python证书
      pip install --upgrade certifi
@@ -593,4 +618,6 @@ global:
 
 ---
 
-*AI-DataFlux v2 - 高效、智能的批量AI处理引擎*
+## AI-DataFlux v2
+
+高效、智能的批量AI处理引擎。

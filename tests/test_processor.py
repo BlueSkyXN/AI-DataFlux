@@ -4,9 +4,8 @@
 测试 src/core/processor.py 的核心功能
 """
 
-import json
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 
 class TestPromptProcessing:

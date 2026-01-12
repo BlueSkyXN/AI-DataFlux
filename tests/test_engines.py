@@ -6,7 +6,6 @@
 
 import pytest
 import pandas as pd
-from pathlib import Path
 
 
 class TestEngineFactory:
@@ -130,9 +129,9 @@ class TestPandasEngine:
         import pandas as pd
         assert isinstance(result, pd.Series)
         # 索引 2 是 ""，索引 3 是 None
-        assert result.iloc[2] == True  # "" 是空
-        assert result.iloc[3] == True  # None 是空
-        assert result.iloc[0] == False  # "Q1" 非空
+        assert result.iloc[2]  # "" 是空
+        assert result.iloc[3]  # None 是空
+        assert not result.iloc[0]  # "Q1" 非空
 
     def test_is_empty_vectorized_string_dtype(self, pandas_engine):
         """测试 string dtype 的空值判断"""
