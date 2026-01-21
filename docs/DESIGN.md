@@ -55,7 +55,7 @@ AI-DataFlux/
 │   │       ├── __init__.py
 │   │       ├── base.py          # 引擎抽象基类
 │   │       ├── pandas_engine.py # Pandas 实现
-│   │       └── polars_engine.py # Polars 预留接口
+│   │       └── polars_engine.py # Polars 高性能实现
 │   └── gateway/         # API 网关
 │       ├── __init__.py
 │       ├── app.py       # FastAPI 应用

@@ -50,7 +50,7 @@ pip install numpy polars python-calamine fastexcel xlsxwriter
 **性能对比**（处理100万行数据）:
 
 | 操作 | pandas+openpyxl | polars+calamine+xlsxwriter | 提升 |
-|------|-----------------|---------------------------|------|
+| --- | --- | --- | --- |
 | Excel 读取 | ~60s | ~5s | **12x** |
 | 数据过滤 | ~10s | ~0.5s | **20x** |
 | Excel 写入 | ~30s | ~10s | **3x** |
@@ -86,7 +86,7 @@ python cli.py process --config config.yaml
 # 仅验证配置
 python cli.py process --config config.yaml --validate
 
-# 估算 Token 用量 (仅输入)
+# 估算 Token 用量 (默认输入+输出, mode=io)
 python cli.py token --config config.yaml
 
 # 估算 Token 用量 (仅输出，需要 output 文件有已处理结果)
@@ -192,6 +192,7 @@ datasource:
     api_error_trigger_window: 2.0   # 多少秒内的API错误才会触发暂停
     max_connections: 1000           # aiohttp的最大并发连接数
     max_connections_per_host: 0     # 对每个主机的最大并发连接数（0表示无限制）
+    max_workers: 5                  # MySQL 连接池大小（仅 MySQL 生效）
     retry_limits:                   # 按错误类型配置重试次数
       api_error: 3                  # API错误最多重试3次
       content_error: 1              # 内容错误最多重试1次
@@ -375,8 +376,9 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 python gateway.py --config config.yaml
 ```
 
-默认监听 `http://127.0.0.1:8787`，提供以下API端点：
+默认监听 `http://0.0.0.0:8787`，提供以下API端点：
 
+- `/` - 网关根路径与版本信息
 - `/v1/chat/completions` - OpenAI兼容的聊天补全接口
 - `/v1/models` - 可用模型列表
 - `/admin/models` - 模型详细状态和指标
@@ -434,10 +436,10 @@ AI-DataFlux 支持多种高性能库来加速数据处理：
 datasource:
   # 引擎选择 (推荐 auto)
   engine: auto        # auto | pandas | polars
-  
+
   # 读取器选择 (推荐 auto)
   excel_reader: auto  # auto | openpyxl | calamine
-  
+
   # 写入器选择 (推荐 auto)
   excel_writer: auto  # auto | openpyxl | xlsxwriter
 ```
@@ -449,6 +451,11 @@ datasource:
 | `engine: auto` | polars | pandas | polars 未安装 |
 | `excel_reader: auto` | calamine | openpyxl | fastexcel 未安装 |
 | `excel_writer: auto` | xlsxwriter | openpyxl | xlsxwriter 未安装 |
+
+**说明**：
+
+- PandasEngine 会按 `excel_reader` / `excel_writer` 选择具体读写器。
+- PolarsEngine 读取优先使用 fastexcel（可用时自动使用），写入使用 `polars.DataFrame.write_excel`。`excel_reader`/`excel_writer` 目前主要影响引擎初始化与日志提示，未做强制切换。
 
 **安装高性能库**：
 

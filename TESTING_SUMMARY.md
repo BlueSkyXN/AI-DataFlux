@@ -4,11 +4,6 @@
 
 本次任务参考 **SuperBatchVideoCompressor** 项目的测试最佳实践，为 AI-DataFlux 引入了完整的自动化测试框架。
 
-### 完成时间
-- 开始: 2025-12-09
-- 完成: 2025-12-09
-- 耗时: ~2 小时
-
 ---
 
 ## ✅ 完成的工作
@@ -98,7 +93,7 @@ Python 版本: 5 种
 - 标记为 `unittests` flag
 
 ##### CLI 功能测试 (cli-test job)
-- 测试所有 CLI 命令
+- 测试 version/check/help/process/gateway 命令
 - 配置验证测试
 
 ##### 高性能库测试 (perf-libs job)
@@ -197,25 +192,25 @@ exclude_lines = (10+ 规则)
 
 ## 🎯 测试数量统计
 
-### 按文件统计
+### 按文件统计（基于 `def test_` 计数）
 | 文件 | 测试数 | 行数 |
 |------|--------|------|
-| test_models.py | 22 | 301 |
-| test_scheduler.py | 22 | 311 |
-| test_engines.py | 23 | 235 |
-| test_processor.py | 18 | 323 |
-| test_factory.py | 15 | 289 |
-| test_validator.py | 10 | 133 |
-| test_config.py | 9 | 103 |
-| test_cli.py | 8 | 110 |
-| test_integration.py | 7 | 171 |
-| conftest.py | - | 150 |
+| test_cli.py | 9 | 122 |
+| test_config.py | 9 | 101 |
+| test_engines.py | 28 | 298 |
+| test_factory.py | 17 | 374 |
+| test_integration.py | 7 | 168 |
+| test_models.py | 21 | 289 |
+| test_processor.py | 23 | 333 |
+| test_scheduler.py | 26 | 373 |
+| test_token_estimator.py | 14 | 272 |
+| test_validator.py | 10 | 132 |
+| conftest.py | - | 147 |
 
 ### 总计
-- **测试总数**: 143 个 (1 个跳过)
-- **测试文件**: 9 个
-- **测试代码行数**: 2295 行
-- **通过率**: 100% (143/143 passed)
+- **测试总数**: 164（基于 `def test_`，不含参数化展开与跳过统计）
+- **测试文件**: 10
+- **测试代码行数**: 2636（tests 目录 `.py` 总行数，含 conftest 与 __init__）
 
 ---
 

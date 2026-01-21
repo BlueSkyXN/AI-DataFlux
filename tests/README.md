@@ -18,6 +18,7 @@ tests/
 ├── test_models.py         # 数据模型测试 (TaskMetadata/ErrorType)
 ├── test_processor.py      # 处理器核心逻辑测试
 ├── test_scheduler.py      # 分片调度器测试
+├── test_token_estimator.py # Token 估算器测试
 └── test_validator.py      # JSON 验证器测试
 ```
 
@@ -79,13 +80,11 @@ pytest tests/ -v -m "not slow"
 
 ### 当前覆盖率统计
 
-- **总体覆盖率**: ~33% (不含 gateway 模块)
+覆盖率以 `pytest --cov=src` 结果为准，默认排除 `src/gateway/*` 与 `src/utils/console.py`（见 `.coveragerc`）。
+
+- **总体覆盖率**: 以最新覆盖率报告为准（文档中的历史数值可能过期）
 - **核心模块覆盖率**:
-  - `src/core/scheduler.py`: 83%
-  - `src/core/validator.py`: 84%
-  - `src/data/factory.py`: 87%
-  - `src/data/engines/`: 66%
-  - `src/core/processor.py`: 34% (待提升)
+  - 以覆盖率报告为准
 
 ### 生成覆盖率报告
 
@@ -109,7 +108,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_cli.py
 - **目的**: 测试 CLI 命令行接口
 - **覆盖**: version, check, process, gateway 命令
-- **测试数量**: 8 个测试
+- **测试数量**: 9 个测试
 
 ### test_config.py
 - **目的**: 测试配置文件加载和验证
@@ -119,7 +118,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_engines.py
 - **目的**: 测试数据引擎抽象和实现
 - **覆盖**: PandasEngine, PolarsEngine, 引擎工厂
-- **测试数量**: 23 个测试
+- **测试数量**: 28 个测试
 - **特性**:
   - 引擎自动选择
   - 读写器性能库检测 (Calamine/xlsxwriter)
@@ -128,7 +127,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_factory.py
 - **目的**: 测试数据源任务池工厂
 - **覆盖**: Excel 池创建、MySQL 池创建、引擎选择
-- **测试数量**: 15 个测试
+- **测试数量**: 17 个测试
 - **特性**:
   - 多种引擎配置 (auto/pandas/polars)
   - 读写器配置
@@ -143,7 +142,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_models.py
 - **目的**: 测试数据模型和数据类
 - **覆盖**: TaskMetadata, ErrorRecord, ErrorType
-- **测试数量**: 22 个测试
+- **测试数量**: 21 个测试
 - **特性**:
   - 重试计数管理
   - 错误历史记录
@@ -152,7 +151,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_processor.py
 - **目的**: 测试 AI 处理器核心逻辑
 - **覆盖**: 提示词生成、JSON 提取、Schema 构建、任务状态管理
-- **测试数量**: 18 个测试
+- **测试数量**: 23 个测试
 - **特性**:
   - Markdown 代码块提取
   - 字段验证
@@ -161,11 +160,16 @@ pytest tests/ --cov=src --cov-report=json
 ### test_scheduler.py
 - **目的**: 测试分片任务调度器
 - **覆盖**: 分片计算、加载、进度跟踪、内存监控
-- **测试数量**: 22 个测试
+- **测试数量**: 26 个测试
 - **特性**:
   - 动态分片大小计算
   - 空分片跳过
   - 处理指标统计
+
+### test_token_estimator.py
+- **目的**: 测试 Token 估算器
+- **覆盖**: mode 规范化、输入/输出估算、采样逻辑
+- **测试数量**: 14 个测试
 
 ### test_validator.py
 - **目的**: 测试 JSON 字段验证器
@@ -396,7 +400,10 @@ pytest tests/ --cov=src --cov-report=html
 
 ---
 
-**测试总数**: 144 个测试
-**覆盖模块**: 9 个核心模块
-**测试代码行数**: ~2000 行
-**最后更新**: 2025-12-09
+**测试总数**: 164（基于 `def test_`，不含参数化展开与跳过统计）
+
+**覆盖模块**: 9+ 个核心模块
+
+**测试代码行数**: 2636（tests 目录 `.py` 总行数，含 conftest 与 __init__）
+
+**最后更新**: 2026-01-12
