@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ==================== 配置 Fixtures ====================
 
+
 @pytest.fixture
 def sample_config() -> dict:
     """提供示例配置字典"""
@@ -66,7 +67,7 @@ def sample_config() -> dict:
 def sample_config_file(sample_config, tmp_path) -> Path:
     """创建临时配置文件"""
     import yaml
-    
+
     config_path = tmp_path / "test_config.yaml"
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(sample_config, f, allow_unicode=True)
@@ -75,15 +76,18 @@ def sample_config_file(sample_config, tmp_path) -> Path:
 
 # ==================== 数据 Fixtures ====================
 
+
 @pytest.fixture
 def sample_dataframe() -> pd.DataFrame:
     """提供示例 DataFrame"""
-    return pd.DataFrame({
-        "id": [1, 2, 3, 4, 5],
-        "question": ["Q1", "Q2", "", None, "Q5"],
-        "context": ["C1", "C2", "C3", "C4", ""],
-        "answer": [None, "A2", None, None, None],
-    })
+    return pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4, 5],
+            "question": ["Q1", "Q2", "", None, "Q5"],
+            "context": ["C1", "C2", "C3", "C4", ""],
+            "answer": [None, "A2", None, None, None],
+        }
+    )
 
 
 @pytest.fixture
@@ -96,10 +100,12 @@ def sample_excel_file(sample_dataframe, tmp_path) -> Path:
 
 # ==================== 引擎 Fixtures ====================
 
+
 @pytest.fixture
 def pandas_engine():
     """提供 PandasEngine 实例"""
     from src.data.engines import PandasEngine
+
     return PandasEngine()
 
 
@@ -107,14 +113,17 @@ def pandas_engine():
 def polars_engine():
     """提供 PolarsEngine 实例 (如果可用)"""
     from src.data.engines import POLARS_AVAILABLE
+
     if not POLARS_AVAILABLE:
         pytest.skip("Polars not available")
-    
+
     from src.data.engines.polars_engine import PolarsEngine
+
     return PolarsEngine()
 
 
 # ==================== 临时目录 Fixtures ====================
+
 
 @pytest.fixture
 def temp_dir(tmp_path) -> Path:
@@ -133,15 +142,8 @@ def clean_temp_dir(tmp_path) -> Path:
 
 # ==================== Mock Fixtures ====================
 
+
 @pytest.fixture
 def mock_api_response():
     """模拟 API 响应"""
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"answer": "Test answer"}'
-                }
-            }
-        ]
-    }
+    return {"choices": [{"message": {"content": '{"answer": "Test answer"}'}}]}

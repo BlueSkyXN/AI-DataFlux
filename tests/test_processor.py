@@ -15,7 +15,7 @@ class TestPromptProcessing:
         """测试基本提示词生成"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.prompt_template = "处理数据: {record_json}"
 
@@ -30,7 +30,7 @@ class TestPromptProcessing:
         """测试提示词过滤内部字段"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.prompt_template = "{record_json}"
 
@@ -45,7 +45,7 @@ class TestPromptProcessing:
         """测试提示词过滤 None 值"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.prompt_template = "{record_json}"
 
@@ -59,7 +59,7 @@ class TestPromptProcessing:
         """测试空模板返回空字符串"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.prompt_template = ""
 
@@ -76,7 +76,7 @@ class TestJsonExtraction:
         from src.core.processor import UniversalAIProcessor
         from src.core.validator import JsonValidator
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             p = UniversalAIProcessor(None)
             p.required_fields = ["answer"]
             p.validator = JsonValidator()
@@ -93,11 +93,11 @@ class TestJsonExtraction:
 
     def test_extract_json_from_markdown_block(self, processor):
         """测试从 Markdown 代码块提取 JSON"""
-        content = '''这是一些说明文字
+        content = """这是一些说明文字
 ```json
 {"answer": "代码块中的答案"}
 ```
-后续文字'''
+后续文字"""
         result = processor.extract_json_from_response(content)
 
         assert result.get("answer") == "代码块中的答案"
@@ -148,7 +148,7 @@ class TestJsonSchema:
         from src.core.processor import UniversalAIProcessor
         from src.core.validator import JsonValidator
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.use_json_schema = True
             processor.required_fields = ["answer", "category"]
@@ -170,7 +170,7 @@ class TestJsonSchema:
         from src.core.processor import UniversalAIProcessor
         from src.core.validator import JsonValidator
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.use_json_schema = True
             processor.required_fields = ["category"]
@@ -187,7 +187,7 @@ class TestJsonSchema:
         """测试禁用时返回 None"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.use_json_schema = False
 
@@ -198,7 +198,7 @@ class TestJsonSchema:
         """测试空必需字段返回 None"""
         from src.core.processor import UniversalAIProcessor
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             processor = UniversalAIProcessor(None)
             processor.use_json_schema = True
             processor.required_fields = []
@@ -216,7 +216,7 @@ class TestTaskStateManagement:
         from src.core.processor import UniversalAIProcessor
         import threading
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             p = UniversalAIProcessor(None)
             p.tasks_in_progress = set()
             p.tasks_progress_lock = threading.Lock()
@@ -276,7 +276,7 @@ class TestErrorHandling:
         from src.models.errors import ErrorType
         import threading
 
-        with patch.object(UniversalAIProcessor, '__init__', lambda x, y: None):
+        with patch.object(UniversalAIProcessor, "__init__", lambda x, y: None):
             p = UniversalAIProcessor(None)
             p.max_retry_counts = {
                 ErrorType.API: 3,

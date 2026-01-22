@@ -36,14 +36,14 @@ def get_service() -> FluxApiService:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """应用生命周期管理"""
     global _service
-    
+
     # 启动
     if _service:
         await _service.startup()
         logging.info("FluxApiService 启动完成")
-    
+
     yield
-    
+
     # 关闭
     if _service:
         await _service.shutdown()
@@ -53,18 +53,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(config_path: str) -> FastAPI:
     """
     创建 FastAPI 应用
-    
+
     Args:
         config_path: 配置文件路径
-        
+
     Returns:
         FastAPI 应用实例
     """
     global _service
-    
+
     # 初始化服务
     _service = FluxApiService(config_path)
-    
+
     # 创建应用
     app = FastAPI(
         title="Flux API Gateway",
@@ -72,16 +72,16 @@ def create_app(config_path: str) -> FastAPI:
         version="2.0.0",
         lifespan=lifespan,
     )
-    
+
     # 注册路由
     _register_routes(app)
-    
+
     return app
 
 
 def _register_routes(app: FastAPI) -> None:
     """注册路由"""
-    
+
     @app.middleware("http")
     async def check_service_availability(request: Request, call_next):
         """检查服务可用性"""
@@ -91,10 +91,10 @@ def _register_routes(app: FastAPI) -> None:
                 content={"error": "Service not initialized"},
             )
         return await call_next(request)
-    
+
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completion(
-        request: ChatCompletionRequest
+        request: ChatCompletionRequest,
     ) -> Union[ChatCompletionResponse, StreamingResponse]:
         """
         聊天补全端点（支持流式和非流式）
@@ -116,7 +116,7 @@ def _register_routes(app: FastAPI) -> None:
                         "Cache-Control": "no-cache",
                         "Connection": "keep-alive",
                         "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
-                    }
+                    },
                 )
 
             # 非流式响应，直接返回
@@ -125,7 +125,7 @@ def _register_routes(app: FastAPI) -> None:
         except Exception as e:
             logging.error(f"聊天补全请求失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-    
+
     @app.get("/v1/models")
     async def list_models():
         """列出可用模型 (OpenAI 兼容)"""
@@ -141,25 +141,27 @@ def _register_routes(app: FastAPI) -> None:
 
             # 只添加权重>0且未添加过的模型
             if model.weight > 0 and exposed_id not in seen_exposed_ids:
-                models_list.append({
-                    "id": exposed_id,
-                    "object": "model",
-                    "created": int(service.start_time),  # 使用服务启动时间
-                    "owned_by": "flux-api",
-                })
+                models_list.append(
+                    {
+                        "id": exposed_id,
+                        "object": "model",
+                        "created": int(service.start_time),  # 使用服务启动时间
+                        "owned_by": "flux-api",
+                    }
+                )
                 seen_exposed_ids.add(exposed_id)
 
         return {
             "object": "list",
             "data": models_list,
         }
-    
+
     @app.get("/admin/models", response_model=ModelsResponse)
     async def admin_models() -> ModelsResponse:
         """管理接口: 获取模型详情"""
         service = get_service()
         info = service.get_models_info()
-        
+
         return ModelsResponse(
             models=[
                 ModelInfo(
@@ -177,20 +179,20 @@ def _register_routes(app: FastAPI) -> None:
             total=info["total"],
             available=info["available"],
         )
-    
+
     @app.get("/admin/health", response_model=HealthResponse)
     async def health_check() -> HealthResponse:
         """健康检查"""
         service = get_service()
         health = service.get_health_status()
-        
+
         return HealthResponse(
             status=health["status"],
             available_models=health["available_models"],
             total_models=health["total_models"],
             uptime=health["uptime"],
         )
-    
+
     @app.get("/")
     async def root():
         """根路径"""
@@ -210,7 +212,7 @@ def run_server(
 ) -> None:
     """
     运行服务器
-    
+
     Args:
         config_path: 配置文件路径
         host: 监听地址
@@ -220,7 +222,7 @@ def run_server(
     """
     # 创建应用
     app = create_app(config_path)
-    
+
     # 运行服务器
     uvicorn.run(
         app,
@@ -235,7 +237,8 @@ def main() -> None:
     """命令行入口"""
     parser = argparse.ArgumentParser(description="Flux API Gateway")
     parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         default="config.yaml",
         help="配置文件路径 (默认: config.yaml)",
     )
@@ -245,13 +248,15 @@ def main() -> None:
         help="监听地址 (默认: 0.0.0.0)",
     )
     parser.add_argument(
-        "--port", "-p",
+        "--port",
+        "-p",
         type=int,
         default=8787,
         help="监听端口 (默认: 8787)",
     )
     parser.add_argument(
-        "--workers", "-w",
+        "--workers",
+        "-w",
         type=int,
         default=1,
         help="工作进程数 (默认: 1)",
@@ -261,9 +266,9 @@ def main() -> None:
         action="store_true",
         help="启用自动重载",
     )
-    
+
     args = parser.parse_args()
-    
+
     run_server(
         config_path=args.config,
         host=args.host,

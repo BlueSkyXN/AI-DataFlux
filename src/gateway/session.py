@@ -41,27 +41,25 @@ class SessionPool:
         self.max_connections = max_connections
         self.max_connections_per_host = max_connections_per_host
         self._resolver = resolver
-    
+
     async def get_or_create(
-        self, 
-        ssl_verify: bool = True, 
-        proxy: str = ""
+        self, ssl_verify: bool = True, proxy: str = ""
     ) -> aiohttp.ClientSession:
         """
         获取或创建 ClientSession
-        
+
         Args:
             ssl_verify: 是否验证 SSL 证书
             proxy: 代理地址 (空字符串表示不使用代理)
-            
+
         Returns:
             ClientSession 实例
         """
         if self._closed:
             raise RuntimeError("SessionPool 已关闭")
-        
+
         key = (ssl_verify, proxy)
-        
+
         if key not in self.sessions:
             # 创建新的 Session
             # 如果有自定义解析器，禁用 DNS 缓存以确保每次新连接都走解析器轮询
@@ -76,13 +74,13 @@ class SessionPool:
 
             session = aiohttp.ClientSession(connector=connector)
             self.sessions[key] = session
-            
+
             logging.debug(
                 f"创建新的 ClientSession: ssl_verify={ssl_verify}, proxy={proxy or 'None'}"
             )
-        
+
         return self.sessions[key]
-    
+
     async def close_all(self) -> None:
         """关闭所有 Session"""
         self._closed = True
@@ -105,7 +103,7 @@ class SessionPool:
                 logging.warning(f"关闭 DNS 解析器时出错: {e}")
 
         logging.info("SessionPool 已关闭所有连接")
-    
+
     def get_stats(self) -> dict[str, Any]:
         """获取连接池统计信息"""
         stats: dict[str, Any] = {

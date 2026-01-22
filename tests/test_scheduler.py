@@ -34,10 +34,7 @@ class TestShardedTaskManagerInit:
         mock_pool = MagicMock(spec=BaseTaskPool)
 
         manager = ShardedTaskManager(
-            mock_pool,
-            optimal_shard_size=5000,
-            min_shard_size=500,
-            max_shard_size=20000
+            mock_pool, optimal_shard_size=5000, min_shard_size=500, max_shard_size=20000
         )
 
         assert manager.optimal_shard_size == 5000

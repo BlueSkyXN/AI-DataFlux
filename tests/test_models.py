@@ -174,9 +174,7 @@ class TestErrorRecord:
 
         timestamp = time.time()
         record = ErrorRecord(
-            timestamp=timestamp,
-            error_type=ErrorType.API,
-            message="Connection failed"
+            timestamp=timestamp, error_type=ErrorType.API, message="Connection failed"
         )
 
         assert record.timestamp == timestamp

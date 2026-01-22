@@ -21,16 +21,16 @@ from .pandas_engine import PandasEngine
 def _safe_check_library(import_code: str, lib_name: str, timeout: int = 30) -> bool:
     """
     在子进程中安全检测库是否可用
-    
+
     某些库 (如 polars, fastexcel) 在特定平台上导入时可能导致进程崩溃
     (如 Windows ARM + Python 3.13 上的 "Fatal Python error: Illegal instruction")
     因此必须在子进程中测试，避免崩溃主进程。
-    
+
     Args:
         import_code: 要执行的导入代码
         lib_name: 库名称 (用于日志)
         timeout: 超时时间 (秒)
-        
+
     Returns:
         库是否可用
     """
@@ -58,24 +58,14 @@ def _safe_check_library(import_code: str, lib_name: str, timeout: int = 30) -> b
 
 # 库可用性检测 (全部使用子进程安全检测)
 POLARS_AVAILABLE = _safe_check_library(
-    "import polars; polars.DataFrame({'x': [1]})",
-    "Polars"
+    "import polars; polars.DataFrame({'x': [1]})", "Polars"
 )
 
-FASTEXCEL_AVAILABLE = _safe_check_library(
-    "import fastexcel",
-    "fastexcel"
-)
+FASTEXCEL_AVAILABLE = _safe_check_library("import fastexcel", "fastexcel")
 
-XLSXWRITER_AVAILABLE = _safe_check_library(
-    "import xlsxwriter",
-    "xlsxwriter"
-)
+XLSXWRITER_AVAILABLE = _safe_check_library("import xlsxwriter", "xlsxwriter")
 
-NUMPY_AVAILABLE = _safe_check_library(
-    "import numpy",
-    "numpy"
-)
+NUMPY_AVAILABLE = _safe_check_library("import numpy", "numpy")
 
 # 记录引擎选择
 if not POLARS_AVAILABLE:
@@ -136,31 +126,32 @@ def get_engine(
 ) -> BaseEngine:
     """
     获取 DataFrame 引擎实例
-    
+
     Args:
         engine_type: 引擎类型 "pandas" | "polars" | "auto"
         excel_reader: Excel 读取器 "openpyxl" | "calamine" | "auto"
         excel_writer: Excel 写入器 "openpyxl" | "xlsxwriter" | "auto"
-        
+
     Returns:
         引擎实例
-        
+
     Raises:
         ValueError: 不支持的引擎类型
     """
     resolved_engine = _resolve_engine(engine_type)
     resolved_reader = _resolve_reader(excel_reader)
     resolved_writer = _resolve_writer(excel_writer)
-    
+
     logging.info(
         f"引擎配置: engine={resolved_engine}, "
         f"reader={resolved_reader}, writer={resolved_writer}"
     )
-    
+
     if resolved_engine == "polars":
         # 延迟导入 Polars 引擎
         try:
             from .polars_engine import PolarsEngine
+
             return PolarsEngine(
                 excel_reader=resolved_reader,
                 excel_writer=resolved_writer,
@@ -168,7 +159,7 @@ def get_engine(
         except ImportError as e:
             logging.warning(f"无法导入 PolarsEngine: {e}，回退到 PandasEngine")
             resolved_engine = "pandas"
-    
+
     # 默认使用 PandasEngine
     return PandasEngine(
         excel_reader=resolved_reader,
@@ -179,7 +170,7 @@ def get_engine(
 def get_available_libraries() -> dict[str, bool]:
     """
     获取可用库的状态
-    
+
     Returns:
         {库名: 是否可用}
     """
@@ -196,7 +187,7 @@ def get_available_libraries() -> dict[str, bool]:
 def register_engine(name: str, engine_class: type[BaseEngine]) -> None:
     """
     注册新的引擎实现 (预留扩展接口)
-    
+
     Args:
         name: 引擎名称
         engine_class: 引擎类

@@ -86,3 +86,41 @@ flowchart TB
   Dispatcher --> Claude
   Dispatcher --> Other
 ```
+
+## 外部使用视角
+
+```mermaid
+flowchart TB
+  Customer[客户/业务系统]
+  Config[配置文件\nconfig.yaml]
+  DataSources[数据源\nExcel / MySQL / 其他]
+  ExternalAI[外部 AI 服务]
+  Logs[日志 / 统计报告]
+  OutputData[处理结果\n写回数据源 / 导出文件]
+  APIResponse[API 响应\n文本 / 结构化 JSON]
+
+  subgraph Batch["批处理模式 (离线)"]
+    CLI[CLI\ncli.py process]
+    BatchEngine[AI-DataFlux\n批处理能力]
+  end
+
+  subgraph Online["API 网关模式 (在线)"]
+    Gateway[网关服务\ncli.py gateway / gateway.py]
+    GatewayEngine[AI-DataFlux\nOpenAI 兼容网关]
+  end
+
+  Customer --> CLI
+  CLI --> BatchEngine
+  Config --> BatchEngine
+  DataSources --> BatchEngine
+  BatchEngine --> ExternalAI
+  BatchEngine --> OutputData
+  BatchEngine --> Logs
+
+  Customer --> Gateway
+  Gateway --> GatewayEngine
+  Config --> GatewayEngine
+  GatewayEngine --> ExternalAI
+  GatewayEngine --> APIResponse
+  GatewayEngine --> Logs
+```

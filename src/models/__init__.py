@@ -6,7 +6,7 @@ from .task import TaskMetadata
 __all__ = [
     "ErrorType",
     "AIDataFluxError",
-    "ConfigError", 
+    "ConfigError",
     "DataSourceError",
     "APIError",
     "TaskMetadata",

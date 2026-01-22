@@ -31,37 +31,37 @@ from ..models.errors import ErrorType
 class FluxApiService:
     """
     Flux API 服务
-    
+
     OpenAI API 兼容的服务实现，提供:
     - 多模型管理和调度
     - 自动故障切换
     - 令牌桶限流
     - 连接池复用
     """
-    
+
     def __init__(self, config_path: str):
         """
         初始化服务
-        
+
         Args:
             config_path: 配置文件路径
         """
         self.start_time = time.time()
         self.config_path = config_path
-        
+
         # 加载配置
         self._load_config()
-        
+
         # 初始化组件
         self._init_models()
         self._init_dispatcher()
         self._init_rate_limiter()
-        
+
         # Session 池 (延迟初始化)
         self.session_pool: SessionPool | None = None
-        
+
         logging.info("FluxApiService 初始化完成")
-    
+
     def _load_config(self) -> None:
         """加载配置文件"""
         try:
@@ -70,11 +70,11 @@ class FluxApiService:
             logging.info(f"配置文件 '{self.config_path}' 加载成功")
         except Exception as e:
             raise ValueError(f"无法加载配置文件: {e}") from e
-        
+
         # 全局配置
         global_cfg = self.config.get("global", {})
         log_cfg = global_cfg.get("log", {})
-        
+
         # 初始化日志
         level_str = log_cfg.get("level", "info").upper()
         level = getattr(logging, level_str, logging.INFO)
@@ -83,7 +83,7 @@ class FluxApiService:
             format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        
+
         # 通道配置
         self.channels = self.config.get("channels", {})
 
@@ -93,16 +93,16 @@ class FluxApiService:
         self.gateway_max_connections_per_host = int(
             gateway_cfg.get("max_connections_per_host", 1000)
         )
-    
+
     def _init_models(self) -> None:
         """初始化模型配置"""
         models_cfg = self.config.get("models", [])
-        
+
         if not models_cfg:
             raise ValueError("配置中未找到模型定义")
-        
+
         self.models: list[ModelConfig] = []
-        
+
         for model_dict in models_cfg:
             try:
                 model = ModelConfig(model_dict, self.channels)
@@ -110,7 +110,7 @@ class FluxApiService:
                 logging.info(f"加载模型: {model.id} ({model.model})")
             except Exception as e:
                 logging.warning(f"加载模型失败: {e}")
-        
+
         if not self.models:
             raise ValueError("没有成功加载任何模型")
 
@@ -119,31 +119,37 @@ class FluxApiService:
         # 创建模型名称映射
         self.model_name_to_id: dict[str, str] = {}
         for m in self.models:
-            self.model_name_to_id[m.id] = m.id           # ID 映射
-            if m.model:                                   # 模型标识符映射
-                if m.model in self.model_name_to_id and self.model_name_to_id[m.model] != m.id:
+            self.model_name_to_id[m.id] = m.id  # ID 映射
+            if m.model:  # 模型标识符映射
+                if (
+                    m.model in self.model_name_to_id
+                    and self.model_name_to_id[m.model] != m.id
+                ):
                     logging.debug(f"模型标识符 '{m.model}' 被多个模型使用")
                 self.model_name_to_id[m.model] = m.id
-            if m.name and m.name != m.model:              # 模型别名映射
-                if m.name in self.model_name_to_id and self.model_name_to_id[m.name] != m.id:
+            if m.name and m.name != m.model:  # 模型别名映射
+                if (
+                    m.name in self.model_name_to_id
+                    and self.model_name_to_id[m.name] != m.id
+                ):
                     logging.debug(f"模型名称 '{m.name}' 被多个模型使用")
                 self.model_name_to_id[m.name] = m.id
 
         logging.info(f"模型名称映射已创建，共 {len(self.model_name_to_id)} 个映射")
-        
+
         # 验证至少有一个模型具有有效权重
         if not any(model.weight > 0 for model in self.models):
             logging.warning("所有模型的权重都为 0 或负数，随机选择将无法工作")
-    
+
     def _init_dispatcher(self) -> None:
         """初始化模型调度器"""
         self.dispatcher = ModelDispatcher(self.models)
-    
+
     def _init_rate_limiter(self) -> None:
         """初始化限流器"""
         self.rate_limiter = ModelRateLimiter()
         self.rate_limiter.configure([m.to_dict() for m in self.models])
-    
+
     async def startup(self) -> None:
         """启动服务 (异步初始化)"""
         # 构建 IP 池并创建自定义解析器
@@ -159,7 +165,7 @@ class FluxApiService:
             resolver=resolver,
         )
         logging.info("FluxApiService 启动完成")
-    
+
     async def shutdown(self) -> None:
         """关闭服务"""
         if self.session_pool:
@@ -191,7 +197,7 @@ class FluxApiService:
     def get_available_model(
         self,
         requested_model_name: str | None = None,
-        exclude_models: list[str] | None = None
+        exclude_models: list[str] | None = None,
     ) -> ModelConfig | None:
         """
         获取一个可用的模型
@@ -219,8 +225,16 @@ class FluxApiService:
                 target_model_id = resolved_id
                 use_random_selection = False
             # 如果是 "auto" 或无法解析，则进行随机选择
-            elif requested_model_name.lower() not in ["auto", "any", "default", "*", ""]:
-                logging.error(f"请求了未知的模型 '{requested_model_name}'，将尝试随机选择")
+            elif requested_model_name.lower() not in [
+                "auto",
+                "any",
+                "default",
+                "*",
+                "",
+            ]:
+                logging.error(
+                    f"请求了未知的模型 '{requested_model_name}'，将尝试随机选择"
+                )
 
         # 2. 如果指定了目标模型，检查其可用性
         if target_model_id and not use_random_selection:
@@ -232,27 +246,34 @@ class FluxApiService:
                     can_process = self.rate_limiter.can_process(target_model_id)
 
                     if is_available and can_process:
-                        logging.debug(f"使用请求的可用模型: {model.name or target_model_id}")
+                        logging.debug(
+                            f"使用请求的可用模型: {model.name or target_model_id}"
+                        )
                         return model
                     else:
                         # 指定模型不可用或被限流，转为随机选择
-                        logging.warning(f"请求的模型 [{model.name or target_model_id}] 当前不可用/受限。尝试随机选择")
+                        logging.warning(
+                            f"请求的模型 [{model.name or target_model_id}] 当前不可用/受限。尝试随机选择"
+                        )
                         exclude_set.add(target_model_id)
                         use_random_selection = True
             else:
                 # 指定的模型在排除列表中，转为随机选择
-                logging.warning(f"请求的模型 [{target_model_id}] 在排除列表中。尝试随机选择")
+                logging.warning(
+                    f"请求的模型 [{target_model_id}] 在排除列表中。尝试随机选择"
+                )
                 use_random_selection = True
 
         # 3. 执行加权随机选择 (如果需要)
         if use_random_selection:
             # 从所有模型中过滤出符合条件的模型
             eligible_models = [
-                model for model in self.models
-                if model.weight > 0                                      # 权重必须大于0
-                and model.id not in exclude_set                          # 未被排除
-                and self.dispatcher.is_model_available(model.id)         # 调度器可用
-                and self.rate_limiter.can_process(model.id)              # 限流器允许
+                model
+                for model in self.models
+                if model.weight > 0  # 权重必须大于0
+                and model.id not in exclude_set  # 未被排除
+                and self.dispatcher.is_model_available(model.id)  # 调度器可用
+                and self.rate_limiter.can_process(model.id)  # 限流器允许
             ]
 
             if not eligible_models:
@@ -262,14 +283,15 @@ class FluxApiService:
             # 使用加权随机算法选择模型
             weights = [model.weight for model in eligible_models]
             chosen_model = random.choices(eligible_models, weights=weights, k=1)[0]
-            logging.debug(f"加权随机选择了模型: {chosen_model.name or chosen_model.id} (权重: {chosen_model.weight}/{sum(weights)})")
+            logging.debug(
+                f"加权随机选择了模型: {chosen_model.name or chosen_model.id} (权重: {chosen_model.weight}/{sum(weights)})"
+            )
             return chosen_model
 
         return None
 
     async def chat_completion(
-        self,
-        request: ChatCompletionRequest
+        self, request: ChatCompletionRequest
     ) -> Union[ChatCompletionResponse, AsyncIterable[str]]:
         """
         处理聊天补全请求（支持流式和非流式）
@@ -292,7 +314,7 @@ class FluxApiService:
             # 选择模型 - 使用新的 get_available_model 方法
             model = self.get_available_model(
                 requested_model_name=request.model,  # 传递用户请求的模型
-                exclude_models=list(tried_models)
+                exclude_models=list(tried_models),
             )
 
             if not model:
@@ -331,14 +353,10 @@ class FluxApiService:
                 self.dispatcher.mark_model_failed(model.id)
 
         # 所有模型都失败
-        raise RuntimeError(
-            f"所有模型调用失败: {last_error}"
-        ) from last_error
-    
+        raise RuntimeError(f"所有模型调用失败: {last_error}") from last_error
+
     async def _call_model_api(
-        self,
-        model: ModelConfig,
-        request: ChatCompletionRequest
+        self, model: ModelConfig, request: ChatCompletionRequest
     ) -> Union[ChatCompletionResponse, AsyncIterable[str]]:
         """
         调用模型 API (支持流式和非流式)
@@ -352,8 +370,7 @@ class FluxApiService:
 
         # 获取 Session
         session = await self.session_pool.get_or_create(
-            ssl_verify=model.ssl_verify,
-            proxy=model.proxy
+            ssl_verify=model.ssl_verify, proxy=model.proxy
         )
 
         # 构建请求
@@ -395,7 +412,7 @@ class FluxApiService:
         timeout = aiohttp.ClientTimeout(
             connect=model.connect_timeout,
             total=model.read_timeout,
-            sock_read=300 if request.stream else model.read_timeout
+            sock_read=300 if request.stream else model.read_timeout,
         )
 
         start_time = time.time()
@@ -413,7 +430,11 @@ class FluxApiService:
                     if resp.connection and resp.connection.transport:
                         peername = resp.connection.transport.get_extra_info("peername")
                         if peername:
-                            peer_ip = peername[0] if isinstance(peername, tuple) else str(peername)
+                            peer_ip = (
+                                peername[0]
+                                if isinstance(peername, tuple)
+                                else str(peername)
+                            )
                 except Exception:
                     peer_ip = None
 
@@ -473,18 +494,19 @@ class FluxApiService:
                     finish_reason=choice.get("finish_reason", "stop"),
                 )
             ],
-            usage=ChatCompletionResponseUsage(
-                prompt_tokens=data.get("usage", {}).get("prompt_tokens"),
-                completion_tokens=data.get("usage", {}).get("completion_tokens"),
-                total_tokens=data.get("usage", {}).get("total_tokens"),
-            ) if data.get("usage") else None,
+            usage=(
+                ChatCompletionResponseUsage(
+                    prompt_tokens=data.get("usage", {}).get("prompt_tokens"),
+                    completion_tokens=data.get("usage", {}).get("completion_tokens"),
+                    total_tokens=data.get("usage", {}).get("total_tokens"),
+                )
+                if data.get("usage")
+                else None
+            ),
         )
 
     async def _handle_streaming_response(
-        self,
-        response: aiohttp.ClientResponse,
-        model: ModelConfig,
-        start_time: float
+        self, response: aiohttp.ClientResponse, model: ModelConfig, start_time: float
     ) -> AsyncIterable[str]:
         """
         处理流式响应，返回异步生成器产生 SSE 格式字符串
@@ -532,14 +554,14 @@ class FluxApiService:
 
                 # 解码并添加到缓冲区
                 try:
-                    decoded_chunk = chunk.decode('utf-8')
+                    decoded_chunk = chunk.decode("utf-8")
                     buffer += decoded_chunk
                 except UnicodeDecodeError:
-                    buffer += chunk.decode('utf-8', errors='ignore')
+                    buffer += chunk.decode("utf-8", errors="ignore")
                     logging.warning(f"[{model.id}] 流包含无效UTF-8数据，已忽略")
 
                 # 按行分割处理缓冲区内容
-                lines = buffer.split('\n')
+                lines = buffer.split("\n")
                 buffer = lines.pop()  # 最后一部分可能不完整
 
                 for line in lines:
@@ -548,18 +570,20 @@ class FluxApiService:
                         continue
 
                     # 检查是否是 SSE 数据行
-                    if line.startswith('data:'):
-                        data_content = line[len('data:'):].strip()
+                    if line.startswith("data:"):
+                        data_content = line[len("data:") :].strip()
 
                         # 检查是否是结束标记
-                        if data_content == '[DONE]':
+                        if data_content == "[DONE]":
                             logging.info(f"[{model.id}] 收到 [DONE] 标记")
                             returned_successfully = True
                             break
 
                         elif data_content:
                             # 检查是否是 JSON 格式
-                            if data_content.startswith("{") and data_content.endswith("}"):
+                            if data_content.startswith("{") and data_content.endswith(
+                                "}"
+                            ):
                                 yield f"data: {data_content}\n\n"
                                 has_yielded = True
                             else:
@@ -567,7 +591,9 @@ class FluxApiService:
                                     f"[{model.id}] 流包含非JSON数据块: {data_content[:100]}..."
                                 )
                     else:
-                        logging.debug(f"[{model.id}] 流包含非'data:'行: {line[:100]}...")
+                        logging.debug(
+                            f"[{model.id}] 流包含非'data:'行: {line[:100]}..."
+                        )
 
                 # 如果收到了 [DONE]，则跳出循环
                 if returned_successfully:
@@ -581,12 +607,16 @@ class FluxApiService:
             # 处理循环结束后缓冲区剩余数据
             if not returned_successfully and buffer.strip():
                 line = buffer.strip()
-                if line.startswith('data:'):
-                    data_content = line[len('data:'):].strip()
-                    if data_content == '[DONE]':
+                if line.startswith("data:"):
+                    data_content = line[len("data:") :].strip()
+                    if data_content == "[DONE]":
                         returned_successfully = True
                         logging.info(f"[{model.id}] 在最终缓冲区中收到 [DONE]")
-                    elif data_content and data_content.startswith("{") and data_content.endswith("}"):
+                    elif (
+                        data_content
+                        and data_content.startswith("{")
+                        and data_content.endswith("}")
+                    ):
                         yield f"data: {data_content}\n\n"
                         has_yielded = True
                         returned_successfully = True
@@ -594,7 +624,9 @@ class FluxApiService:
 
         except aiohttp.ClientPayloadError as e:
             logging.error(f"[{model.id}] 流处理 ClientPayloadError: {e}")
-            error_payload = {"error": {"message": f"流响应体错误: {e}", "type": "stream_error"}}
+            error_payload = {
+                "error": {"message": f"流响应体错误: {e}", "type": "stream_error"}
+            }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
             except Exception:
@@ -603,7 +635,9 @@ class FluxApiService:
 
         except aiohttp.ClientConnectionError as e:
             logging.error(f"[{model.id}] 流处理 ClientConnectionError: {e}")
-            error_payload = {"error": {"message": f"流连接错误: {e}", "type": "stream_error"}}
+            error_payload = {
+                "error": {"message": f"流连接错误: {e}", "type": "stream_error"}
+            }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
             except Exception:
@@ -612,7 +646,9 @@ class FluxApiService:
 
         except asyncio.TimeoutError as e:
             logging.error(f"[{model.id}] 流处理 TimeoutError: {e}")
-            error_payload = {"error": {"message": f"流读取超时: {e}", "type": "stream_error"}}
+            error_payload = {
+                "error": {"message": f"流读取超时: {e}", "type": "stream_error"}
+            }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
             except Exception:
@@ -621,7 +657,9 @@ class FluxApiService:
 
         except aiohttp.ClientError as e:
             logging.error(f"[{model.id}] 流处理 ClientError: {e}")
-            error_payload = {"error": {"message": f"流客户端错误: {e}", "type": "stream_error"}}
+            error_payload = {
+                "error": {"message": f"流客户端错误: {e}", "type": "stream_error"}
+            }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
             except Exception:
@@ -631,7 +669,10 @@ class FluxApiService:
         except Exception as e:
             logging.exception(f"[{model.id}] 处理流时发生未知错误", exc_info=e)
             error_payload = {
-                "error": {"message": f"未知流处理错误: {e}", "type": "internal_stream_error"}
+                "error": {
+                    "message": f"未知流处理错误: {e}",
+                    "type": "internal_stream_error",
+                }
             }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -655,11 +696,15 @@ class FluxApiService:
                 )
             else:  # no data yielded
                 self.dispatcher.mark_model_failed(model.id, ErrorType.API)
-                logging.error(f"[{model.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s")
+                logging.error(
+                    f"[{model.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s"
+                )
 
             # 更新指标
             self.dispatcher.update_model_metrics(
-                model.id, response_time, stream_fully_successful or stream_partially_successful
+                model.id,
+                response_time,
+                stream_fully_successful or stream_partially_successful,
             )
 
             # 确保关闭响应连接
@@ -682,18 +727,23 @@ class FluxApiService:
         for line in lines:
             line = line.strip()
             # 查找 data: 开头且非 [DONE] 的行
-            if line.startswith('data:') and not line.endswith('[DONE]'):
+            if line.startswith("data:") and not line.endswith("[DONE]"):
                 try:
-                    data_str = line[len('data:'):].strip()
+                    data_str = line[len("data:") :].strip()
                     if data_str:
                         data = json.loads(data_str)
                         # 尝试按 OpenAI 流格式提取 delta content
-                        if (isinstance(data, dict) and 'choices' in data and
-                            isinstance(data['choices'], list) and data['choices'] and
-                            isinstance(data['choices'][0], dict) and 'delta' in data['choices'][0] and
-                            isinstance(data['choices'][0]['delta'], dict) and
-                            'content' in data['choices'][0]['delta']):
-                            content_part = data['choices'][0]['delta']['content']
+                        if (
+                            isinstance(data, dict)
+                            and "choices" in data
+                            and isinstance(data["choices"], list)
+                            and data["choices"]
+                            and isinstance(data["choices"][0], dict)
+                            and "delta" in data["choices"][0]
+                            and isinstance(data["choices"][0]["delta"], dict)
+                            and "content" in data["choices"][0]["delta"]
+                        ):
+                            content_part = data["choices"][0]["delta"]["content"]
                             if isinstance(content_part, str):
                                 full_content.append(content_part)
                 except Exception:
@@ -701,36 +751,36 @@ class FluxApiService:
                     logging.debug(f"从意外事件流提取内容时忽略行: {line}")
                     continue
 
-        return ''.join(full_content)
+        return "".join(full_content)
 
     def get_uptime(self) -> float:
         """获取服务运行时间"""
         return time.time() - self.start_time
-    
+
     def get_health_status(self) -> dict[str, Any]:
         """获取健康状态"""
         available = len(self.dispatcher.get_available_models())
         total = len(self.models)
-        
+
         if available == 0:
             status = "unhealthy"
         elif available < total:
             status = "degraded"
         else:
             status = "healthy"
-        
+
         return {
             "status": status,
             "available_models": available,
             "total_models": total,
             "uptime": self.get_uptime(),
         }
-    
+
     def get_models_info(self) -> dict[str, Any]:
         """获取模型信息"""
         stats = self.dispatcher.get_all_model_stats()
         available = sum(1 for s in stats if s["available"])
-        
+
         return {
             "models": stats,
             "total": len(stats),
