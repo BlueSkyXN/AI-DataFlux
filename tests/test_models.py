@@ -1,7 +1,11 @@
 """
 模型数据结构测试
 
-测试 src/models/ 中的数据模型
+测试 src/models/ 中的数据模型，包括：
+- TaskMetadata: 任务元数据生命周期
+- ErrorType: 错误类型枚举
+- 重试计数管理
+- 时间戳追踪
 """
 
 import time

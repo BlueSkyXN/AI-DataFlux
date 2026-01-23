@@ -1,3 +1,14 @@
+"""
+Flux AI 客户端单元测试
+
+测试 src/core/clients/flux_client.py 的 FluxAIClient 类功能，包括：
+- API 调用成功场景
+- HTTP 错误处理
+- 超时处理
+- 响应解析
+- JSON 模式支持
+"""
+
 import pytest
 import aiohttp
 import asyncio

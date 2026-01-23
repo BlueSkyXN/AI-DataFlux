@@ -1,3 +1,35 @@
+# -*- coding: utf-8 -*-
+"""
+AI-DataFlux 旧版主程序 (Legacy)
+
+此文件是 AI-DataFlux 的旧版实现，保留用于参考和向后兼容。
+新项目应使用重构后的组件化架构 (src/ 目录)。
+
+旧版架构:
+    AI-DataFlux.py (主编排器)
+        ├── Flux_Data.py (数据源处理)
+        └── Flux-Api.py (API 网关)
+
+新版架构对应:
+    cli.py / main.py
+        ├── src/core/processor.py (UniversalAIProcessor)
+        ├── src/data/ (数据源层)
+        └── src/gateway/ (API 网关层)
+
+主要功能:
+    - 连续任务流处理 (Continuous Task Flow)
+    - 分片数据加载
+    - 错误分类重试
+    - 内存监控
+
+迁移指南:
+    旧版: python AI-DataFlux.py --config config.yaml
+    新版: python cli.py process --config config.yaml
+
+Warning:
+    此文件已弃用，不再维护。请使用新版组件化架构。
+"""
+
 # AI_DataFlux.py (Main Orchestrator - Modified for Continuous Task Flow)
 
 # --- Standard Imports ---

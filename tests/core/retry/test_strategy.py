@@ -1,3 +1,13 @@
+"""
+重试策略单元测试
+
+测试 src/core/retry/strategy.py 的 RetryStrategy 类功能，包括：
+- 重试决策逻辑 (RETRY/FAIL/PAUSE_THEN_RETRY)
+- 错误类型分类处理
+- API 熔断机制
+- 最大重试次数限制
+"""
+
 import pytest
 from src.core.retry.strategy import RetryStrategy, RetryAction
 from src.models.errors import ErrorType

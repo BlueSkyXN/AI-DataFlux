@@ -1,7 +1,11 @@
 """
 Token 估算器测试
 
-测试 token_estimator.py 的核心功能
+测试 src/core/token_estimator.py 的核心功能，包括：
+- 模式规范化 (in/out/io)
+- Token 计数算法
+- tiktoken 编码选择
+- 批量估算性能
 """
 
 import pytest

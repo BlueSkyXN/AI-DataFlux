@@ -1,10 +1,63 @@
 """
-Pandas DataFrame 引擎实现
+Pandas DataFrame 引擎实现模块
 
-基于 pandas + openpyxl 的默认实现，支持可选的高性能读写器:
-- calamine (fastexcel): 10x+ Excel 读取速度
-- xlsxwriter: 2-5x Excel 写入速度
-- numpy: 向量化计算加速
+本模块提供基于 Pandas 的 DataFrame 引擎实现，是项目的默认引擎。
+Pandas 生态成熟稳定，兼容性最好，适合大多数使用场景。
+
+核心特性:
+    - 成熟稳定: Pandas 是 Python 数据分析的标准库
+    - 生态丰富: 与 NumPy、SciPy 等科学计算库无缝集成
+    - 高性能读写器: 可选 calamine (10x) 和 xlsxwriter (3x)
+    - 向量化优化: 利用 NumPy 实现高效计算
+
+性能优化配置:
+    ┌─────────────────────────────────────────────────────────┐
+    │ 组件          │ 标准配置       │ 高性能配置           │
+    ├─────────────────────────────────────────────────────────┤
+    │ Excel 读取    │ openpyxl       │ calamine (fastexcel) │
+    │ Excel 写入    │ openpyxl       │ xlsxwriter           │
+    │ 向量计算      │ pandas 内置    │ numpy 加速           │
+    └─────────────────────────────────────────────────────────┘
+
+读取器对比:
+    - openpyxl: 纯 Python，功能完整，支持读写
+    - calamine (fastexcel): Rust 实现，读取速度 10x，仅支持读取
+
+写入器对比:
+    - openpyxl: 支持读写，功能完整，速度较慢
+    - xlsxwriter: 仅支持写入，速度 2-5x，格式支持更好
+
+使用示例:
+    from src.data.engines.pandas_engine import PandasEngine
+    
+    # 标准配置
+    engine = PandasEngine()
+    
+    # 高性能配置
+    engine = PandasEngine(
+        excel_reader="calamine",
+        excel_writer="xlsxwriter"
+    )
+    
+    # 使用引擎
+    df = engine.read_excel("data.xlsx")
+    engine.write_excel(df, "output.xlsx")
+
+适用场景:
+    ✓ 中小规模数据（< 100万行）
+    ✓ 需要与其他 Pandas 库集成
+    ✓ 复杂数据转换和清洗
+    ✓ 兼容性要求高的环境
+
+依赖:
+    必需: pandas, openpyxl
+    可选: fastexcel (calamine), xlsxwriter, numpy
+
+注意事项:
+    1. calamine 不支持写入，只能用于读取
+    2. xlsxwriter 不支持读取，只能用于写入
+    3. 大文件（>100万行）建议使用 PolarsEngine
+    4. 向量化操作需要 numpy 支持
 """
 
 import logging
@@ -15,10 +68,11 @@ import pandas as pd
 
 from .base import BaseEngine
 
-# 可选库导入
+# ==================== 可选库导入 ====================
+# 这些库用于性能优化，不是必需的
+
 try:
     import numpy as np
-
     NUMPY_AVAILABLE = True
 except ImportError:
     np = None  # type: ignore
@@ -26,7 +80,6 @@ except ImportError:
 
 try:
     import fastexcel
-
     FASTEXCEL_AVAILABLE = True
 except ImportError:
     fastexcel = None  # type: ignore
@@ -34,7 +87,6 @@ except ImportError:
 
 try:
     import xlsxwriter as xlsxwriter_lib  # noqa: F401
-
     XLSXWRITER_AVAILABLE = True
 except ImportError:
     XLSXWRITER_AVAILABLE = False
@@ -42,21 +94,31 @@ except ImportError:
 
 class PandasEngine(BaseEngine):
     """
-    基于 pandas + openpyxl 的 DataFrame 引擎
-
-    这是默认的引擎实现，使用 pandas 进行数据处理。
-    支持可选的高性能读写器:
-    - calamine (fastexcel): 使用 Rust 实现的 Excel 解析器，读取速度提升 10x+
-    - xlsxwriter: 高性能 Excel 写入，速度提升 2-5x
-
-    特点:
-    - 成熟稳定，生态丰富
-    - 可选高性能读写器
-    - 适合中小规模数据 (< 100万行)
+    基于 Pandas 的 DataFrame 引擎
+    
+    这是项目的默认引擎实现，使用 pandas 进行数据处理。
+    支持可选的高性能读写器以提升 Excel I/O 性能。
+    
+    高性能读写器:
+        - calamine (fastexcel): Rust 实现的 Excel 解析器
+            - 读取速度提升 10x+
+            - 仅支持读取，不支持写入
+            - 需要安装: pip install fastexcel
+        
+        - xlsxwriter: 高性能 Excel 写入器
+            - 写入速度提升 2-5x
+            - 格式支持更丰富
+            - 仅支持写入，不支持读取
+            - 需要安装: pip install xlsxwriter
 
     Attributes:
-        excel_reader: Excel 读取器类型 ("openpyxl" | "calamine")
-        excel_writer: Excel 写入器类型 ("openpyxl" | "xlsxwriter")
+        excel_reader (str): 当前使用的 Excel 读取器
+        excel_writer (str): 当前使用的 Excel 写入器
+    
+    性能建议:
+        - 小文件（<10MB）: 标准配置即可
+        - 中等文件（10-100MB）: 建议使用 calamine + xlsxwriter
+        - 大文件（>100MB）: 建议切换到 PolarsEngine
     """
 
     def __init__(
@@ -66,15 +128,21 @@ class PandasEngine(BaseEngine):
     ):
         """
         初始化 Pandas 引擎
+        
+        会自动检测高性能库的可用性，不可用时回退到标准配置。
 
         Args:
             excel_reader: Excel 读取器类型
+                - "openpyxl": 标准读取器（默认）
+                - "calamine": 高性能读取器（需要 fastexcel）
             excel_writer: Excel 写入器类型
+                - "openpyxl": 标准写入器（默认）
+                - "xlsxwriter": 高性能写入器（需要 xlsxwriter）
         """
         self._excel_reader = excel_reader
         self._excel_writer = excel_writer
 
-        # 验证读取器可用性
+        # 验证读取器可用性，不可用时自动回退
         if excel_reader == "calamine" and not FASTEXCEL_AVAILABLE:
             logging.warning("fastexcel 不可用，回退到 openpyxl 读取")
             self._excel_reader = "openpyxl"

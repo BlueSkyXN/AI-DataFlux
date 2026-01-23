@@ -1,8 +1,45 @@
 """
 Token 估算器
 
-用于估算 AI 数据处理任务的 token 用量。
-支持输入 token 预估（处理前）和输出 token 预估（处理后采样）。
+本模块用于估算 AI 数据处理任务的 token 用量，帮助用户在大规模
+处理前预测 API 成本。支持输入和输出两个维度的估算。
+
+估算模式:
+    ┌──────────┬─────────────────────────────────────────────────┐
+    │ 模式      │ 说明                                            │
+    ├──────────┼─────────────────────────────────────────────────┤
+    │ in       │ 仅估算输入 token (系统提示 + 用户提示)           │
+    │ out      │ 仅估算输出 token (基于已处理数据采样)            │
+    │ io       │ 同时估算输入和输出 token (默认)                  │
+    └──────────┴─────────────────────────────────────────────────┘
+
+采样策略:
+    - sample_size = -1: 全量计算，遍历所有记录 (精确但较慢)
+    - sample_size > 0: 随机采样，按平均值推算总量 (快速估算)
+
+编码器选择:
+    - 默认使用 o200k_base (GPT-4o, GPT-4 Turbo 等新模型)
+    - 可通过配置指定其他编码器 (如 cl100k_base)
+
+输出统计:
+    - total_estimated: 预估总 token 数
+    - avg: 平均每条记录的 token 数
+    - min/max: 最小/最大值
+    - p50/p90/p99: 百分位数统计
+
+使用示例:
+    from src.core.token_estimator import run_token_estimation
+    
+    # 估算输入+输出 token
+    result = run_token_estimation("config.yaml", mode="io")
+    print(f"预估输入 token: {result['input_tokens']['total_estimated']}")
+    print(f"预估输出 token: {result['output_tokens']['total_estimated']}")
+
+配置示例:
+    token_estimation:
+      mode: io           # in, out, 或 io
+      sample_size: 100   # -1 表示全量
+      encoding: o200k_base
 """
 
 import json
@@ -22,12 +59,20 @@ except ImportError:
 def normalize_mode(mode: str) -> str:
     """
     规范化模式值
+    
+    将用户输入的各种模式表示统一转换为内部使用的标准形式。
 
     Args:
-        mode: 原始模式值
+        mode: 原始模式值 (如 "input", "in", "io" 等)
 
     Returns:
         规范化后的模式: "in", "out", 或 "io"
+        
+    Example:
+        >>> normalize_mode("input")
+        "in"
+        >>> normalize_mode("input_output")
+        "io"
     """
     mode_mapping = {
         "input": "in",
@@ -49,11 +94,21 @@ class TokenEstimator:
     计算 AI 数据处理任务的预估 token 用量:
     - 输入 token: 系统提示词 + 用户提示词 (含 {record_json} 替换)
     - 输出 token: 基于已处理数据采样，假设纯 JSON 响应
+    
+    计算流程:
+        1. 从数据源采样/获取记录
+        2. 构建完整的 API 请求消息 (system + user)
+        3. 使用 tiktoken 编码计算 token 数
+        4. 统计平均值、百分位数等
+        5. 按平均值推算总量
 
     Attributes:
         config: 完整配置字典
         mode: 估算模式 ("in", "out", 或 "io")
         encoding: tiktoken 编码器
+        sample_size: 采样大小 (-1 表示全量)
+        system_prompt: 系统提示词
+        prompt_template: 用户提示词模板
     """
 
     def __init__(self, config: dict[str, Any]):

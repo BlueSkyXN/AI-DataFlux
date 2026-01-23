@@ -1,37 +1,93 @@
 """
-Polars DataFrame 引擎实现
+Polars DataFrame 引擎实现模块
 
-基于 Polars + FastExcel (Calamine) + xlsxwriter 的高性能实现。
+本模块提供基于 Polars 的高性能 DataFrame 引擎实现。
+Polars 是用 Rust 编写的 DataFrame 库，具有卓越的性能表现，
+特别适合大规模数据处理场景。
 
-特点:
-- 多线程并行处理
-- 惰性求值 (LazyFrame)
-- 内存效率高
-- 适合大规模数据 (> 100万行)
+核心特性:
+    - 多线程并行: 自动利用多核 CPU 并行处理
+    - 惰性求值: LazyFrame 支持查询优化
+    - 内存效率: Arrow 列存储格式，内存占用低
+    - 零拷贝: 避免不必要的数据复制
+    - Rust 实现: 比 Pandas 快 10-100x
 
-依赖 (可选安装):
-    pip install polars fastexcel xlsxwriter
+性能对比（预估）:
+    ┌─────────────────────────────────────────────────────────┐
+    │ 操作                   │ Pandas      │ Polars    │ 提升 │
+    ├─────────────────────────────────────────────────────────┤
+    │ Excel 读取 (100万行)   │ 60s         │ 6s        │ 10x  │
+    │ DataFrame 过滤         │ 10s         │ 0.5s      │ 20x  │
+    │ GroupBy 聚合          │ 5s          │ 0.2s      │ 25x  │
+    │ Excel 写入            │ 30s         │ 10s       │ 3x   │
+    └─────────────────────────────────────────────────────────┘
 
-使用方式:
+架构设计:
+    Polars 使用 Apache Arrow 作为内存格式:
+    ┌─────────────────────────────────────────────────────────┐
+    │                    PolarsEngine                          │
+    │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   │
+    │  │ FastExcel   │   │ Polars      │   │ xlsxwriter  │   │
+    │  │ (Calamine)  │   │ DataFrame   │   │             │   │
+    │  │ Rust 读取   │──▶│ Arrow 存储  │──▶│ 高速写入    │   │
+    │  └─────────────┘   └─────────────┘   └─────────────┘   │
+    └─────────────────────────────────────────────────────────┘
+
+使用示例:
+    from src.data.engines.polars_engine import PolarsEngine
+    
+    # 创建引擎
+    engine = PolarsEngine(
+        excel_reader="calamine",
+        excel_writer="xlsxwriter"
+    )
+    
+    # 读取大文件（自动并行）
+    df = engine.read_excel("big_data.xlsx")
+    
+    # 向量化过滤（极快）
+    indices = engine.filter_indices_vectorized(
+        df,
+        input_columns=["content"],
+        output_columns=["result"]
+    )
+    
+    # 写入结果
+    engine.write_excel(df, "output.xlsx")
+
+配置方式:
     在 config.yaml 中设置:
     datasource:
       engine: polars
+      excel_reader: calamine  # 可选
+      excel_writer: xlsxwriter  # 可选
 
-性能对比 (预估):
-    | 操作 | pandas | polars | 提升倍数 |
-    |------|--------|--------|---------|
-    | Excel 读取 (100万行) | 60s | 6s | 10x |
-    | DataFrame 过滤 | 10s | 0.5s | 20x |
-    | Excel 写入 | 30s | 10s | 3x |
+适用场景:
+    ✓ 大规模数据（> 100万行）
+    ✓ 需要高性能过滤和聚合
+    ✓ 内存敏感场景
+    ✓ 多核 CPU 环境
+
+依赖:
+    必需: polars
+    可选: fastexcel (calamine), xlsxwriter
+
+注意事项:
+    1. Polars DataFrame 是不可变的，set_value 返回新 DataFrame
+    2. 索引系统与 Pandas 不同，使用 row_nr 列模拟
+    3. 某些平台可能存在兼容性问题（如 Windows ARM）
+    4. 需要 Python 3.8+
 """
 
 import logging
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
+# ==================== 条件导入 ====================
+# Polars 是可选依赖，不可用时此模块不应被导入
+
 try:
     import polars as pl
-
     POLARS_AVAILABLE = True
 except ImportError:
     pl = None  # type: ignore
@@ -39,7 +95,6 @@ except ImportError:
 
 try:
     import fastexcel
-
     FASTEXCEL_AVAILABLE = True
 except ImportError:
     fastexcel = None  # type: ignore
@@ -47,7 +102,6 @@ except ImportError:
 
 try:
     import xlsxwriter as xlsxwriter_lib  # noqa: F401
-
     XLSXWRITER_AVAILABLE = True
 except ImportError:
     XLSXWRITER_AVAILABLE = False
@@ -58,19 +112,26 @@ from .base import BaseEngine
 class PolarsEngine(BaseEngine):
     """
     基于 Polars 的高性能 DataFrame 引擎
-
+    
     使用 Polars 进行 DataFrame 操作，FastExcel (Calamine) 读取 Excel，
-    xlsxwriter 写入 Excel。
-
-    特点:
-    - 多线程并行处理
-    - 惰性求值 (LazyFrame)
-    - 内存效率高
-    - 适合大规模数据 (> 100万行)
+    xlsxwriter 写入 Excel。专为大规模数据处理设计。
+    
+    性能优势:
+        - 多线程并行: 自动利用所有 CPU 核心
+        - 惰性求值: 查询优化，减少中间计算
+        - 内存效率: Arrow 列存储，压缩存储
+        - 零拷贝: 数据共享，避免复制
+    
+    索引处理:
+        Polars 原生不支持类似 Pandas 的行索引。
+        本实现使用 "_row_nr" 列模拟索引功能:
+        - 读取时自动添加 "_row_nr" 列
+        - 所有索引操作基于此列
+        - 写入时自动移除此列
 
     Attributes:
-        excel_reader: Excel 读取器类型 (polars 默认使用 fastexcel)
-        excel_writer: Excel 写入器类型 (polars 默认使用 xlsxwriter)
+        excel_reader (str): Excel 读取器（默认 calamine）
+        excel_writer (str): Excel 写入器（默认 xlsxwriter）
     """
 
     def __init__(

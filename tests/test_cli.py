@@ -1,7 +1,12 @@
 """
 CLI 入口测试
 
-测试 cli.py 的各个子命令
+测试 cli.py 的各个子命令，包括：
+- version: 版本信息显示
+- check: 依赖库检查
+- help: 帮助信息
+- process: 主处理流程 (配置验证)
+- token: Token 估算命令
 """
 
 import subprocess

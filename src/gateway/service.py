@@ -1,7 +1,45 @@
 """
-Flux API 核心服务
+Flux API 核心服务模块
 
-OpenAI API 兼容的服务实现，管理模型池和请求处理。
+本模块实现 OpenAI API 兼容的核心服务逻辑，是 API 网关的业务层核心。
+负责管理模型池、处理聊天补全请求、协调调度器和限流器。
+
+核心功能:
+    - 多模型管理：加载、验证、映射模型配置
+    - 请求处理：支持流式和非流式聊天补全
+    - 故障切换：自动重试其他可用模型
+    - 状态追踪：健康检查、模型统计
+
+类结构:
+    FluxApiService
+    ├── config: 配置数据
+    ├── models: 模型配置列表 (ModelConfig)
+    ├── dispatcher: 模型调度器 (ModelDispatcher)
+    ├── rate_limiter: 限流器 (ModelRateLimiter)
+    └── session_pool: HTTP 连接池 (SessionPool)
+
+请求处理流程:
+    1. 接收 ChatCompletionRequest
+    2. 解析模型名称，映射到内部模型 ID
+    3. 通过调度器选择可用模型（考虑权重、可用性、限流）
+    4. 构建请求并调用上游 API
+    5. 处理响应（流式 SSE 或 JSON）
+    6. 更新模型指标（成功率、响应时间）
+    7. 失败时自动切换到其他模型重试
+
+使用示例:
+    service = FluxApiService("config.yaml")
+    await service.startup()  # 初始化异步资源
+    
+    response = await service.chat_completion(request)
+    
+    await service.shutdown()  # 清理资源
+
+依赖模块:
+    - ModelDispatcher: 模型调度和故障退避
+    - ModelRateLimiter: 令牌桶限流
+    - SessionPool: HTTP 连接复用
+    - RoundRobinResolver: IP 池轮询
 """
 
 import asyncio
@@ -30,34 +68,52 @@ from ..models.errors import ErrorType
 
 class FluxApiService:
     """
-    Flux API 服务
-
-    OpenAI API 兼容的服务实现，提供:
-    - 多模型管理和调度
-    - 自动故障切换
-    - 令牌桶限流
-    - 连接池复用
+    Flux API 核心服务类
+    
+    OpenAI API 兼容的服务实现，提供多模型管理、自动故障切换、
+    令牌桶限流、连接池复用等企业级功能。
+    
+    Attributes:
+        config_path (str): 配置文件路径
+        config (dict): 加载的配置数据
+        models (list[ModelConfig]): 模型配置列表
+        dispatcher (ModelDispatcher): 模型调度器
+        rate_limiter (ModelRateLimiter): 限流器
+        session_pool (SessionPool): HTTP 连接池
+        start_time (float): 服务启动时间戳
+    
+    生命周期:
+        1. __init__: 加载配置，初始化同步组件
+        2. startup(): 初始化异步组件（连接池）
+        3. chat_completion(): 处理请求
+        4. shutdown(): 清理资源
     """
 
     def __init__(self, config_path: str):
         """
-        初始化服务
+        初始化服务（同步部分）
+        
+        加载配置文件，初始化模型配置、调度器和限流器。
+        异步资源（连接池）在 startup() 中初始化。
 
         Args:
-            config_path: 配置文件路径
+            config_path: 配置文件路径（YAML 格式）
+        
+        Raises:
+            ValueError: 配置文件无效或无可用模型
         """
         self.start_time = time.time()
         self.config_path = config_path
 
-        # 加载配置
+        # 加载配置文件
         self._load_config()
 
-        # 初始化组件
-        self._init_models()
-        self._init_dispatcher()
-        self._init_rate_limiter()
+        # 初始化同步组件
+        self._init_models()       # 模型配置
+        self._init_dispatcher()   # 调度器
+        self._init_rate_limiter() # 限流器
 
-        # Session 池 (延迟初始化)
+        # Session 池在 startup() 中异步初始化
         self.session_pool: SessionPool | None = None
 
         logging.info("FluxApiService 初始化完成")

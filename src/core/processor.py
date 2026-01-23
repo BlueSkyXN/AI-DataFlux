@@ -1,6 +1,60 @@
 """
 通用 AI 数据处理器
-重构版本 (2026-01-22)：采用组件化架构
+
+本模块实现 AI-DataFlux 的核心处理引擎，采用组件化架构设计。
+作为系统的协调者 (Coordinator)，负责编排各个组件完成数据处理工作流。
+
+架构设计:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │              UniversalAIProcessor (协调者/Coordinator)           │
+    ├─────────────────────────────────────────────────────────────────┤
+    │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+    │  │ TaskPool    │  │ Scheduler   │  │ FluxAIClient            │ │
+    │  │ 数据源读写  │  │ 分片调度    │  │ API 通信/超时管理       │ │
+    │  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘ │
+    │         │                │                      │              │
+    │         ▼                ▼                      ▼              │
+    │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+    │  │ Content     │  │ TaskState   │  │ RetryStrategy           │ │
+    │  │ Processor   │  │ Manager     │  │ 错误分类/重试决策       │ │
+    │  │ Prompt/解析 │  │ 状态追踪    │  │ API熔断机制             │ │
+    │  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+    └─────────────────────────────────────────────────────────────────┘
+
+核心处理模式 - 连续任务流 (Continuous Task Flow):
+    传统批处理: 加载批次 → 并发处理 → 等待全部完成 → 写入结果 → 下一批次
+    连续任务流: 动态填充任务池 → 任一完成即处理 → 实时写入 → 持续补充新任务
+    
+    优势:
+    - 无需等待整批完成，响应更快
+    - 更灵活的错误处理和重试机制
+    - 资源利用率更高
+
+错误处理策略:
+    ┌──────────────┬──────────────────┬────────────┬─────────────────┐
+    │ 错误类型      │ 处理动作          │ 数据重载   │ 是否暂停        │
+    ├──────────────┼──────────────────┼────────────┼─────────────────┤
+    │ API_ERROR    │ PAUSE_THEN_RETRY │ ✓          │ ✓ (api_pause)   │
+    │ CONTENT_ERROR│ RETRY            │ ✗          │ ✗               │
+    │ SYSTEM_ERROR │ RETRY            │ ✓          │ ✗               │
+    └──────────────┴──────────────────┴────────────┴─────────────────┘
+
+使用示例:
+    # 基本使用
+    processor = UniversalAIProcessor("config.yaml")
+    processor.run()  # 同步运行
+    
+    # 异步使用
+    await processor.process_shard_async_continuous()
+
+配置要点:
+    - global.flux_api_url: API 网关地址 (必需)
+    - datasource.concurrency.batch_size: 最大并发任务数
+    - datasource.concurrency.api_pause_duration: API 熔断暂停时长
+    - datasource.concurrency.retry_limits: 各类错误最大重试次数
+
+重构历史:
+    2026-01-22: 采用组件化架构重构，拆分为独立的处理组件
 """
 
 import asyncio
@@ -34,6 +88,30 @@ class UniversalAIProcessor:
     4. FluxAIClient: API 通信
     5. TaskStateManager: 状态管理
     6. RetryStrategy: 错误重试决策
+    
+    组件职责分离:
+        - 本类只负责编排协调，不直接实现具体逻辑
+        - 各组件独立可测试，便于单元测试和功能扩展
+        - 组件之间通过明确接口通信，降低耦合度
+    
+    生命周期:
+        __init__ → run() → process_shard_async_continuous() → finalize()
+              ↓           ↓
+         配置加载     异步处理循环
+         组件初始化   分片轮转
+                     任务处理
+                     结果写入
+    
+    Attributes:
+        config: 配置字典
+        flux_api_url: API 网关 URL
+        batch_size: 最大并发任务数
+        client: FluxAIClient 实例
+        content_processor: ContentProcessor 实例
+        state_manager: TaskStateManager 实例
+        retry_strategy: RetryStrategy 实例
+        task_pool: BaseTaskPool 实例
+        task_manager: ShardedTaskManager 实例
     """
 
     def __init__(self, config_path: str):
@@ -143,12 +221,33 @@ class UniversalAIProcessor:
         logging.info("UniversalAIProcessor 初始化完成 (组件化版本)")
 
     async def process_shard_async_continuous(self) -> None:
-        """连续任务流模式的异步处理"""
+        """
+        连续任务流模式的异步处理
+        
+        核心处理入口，实现连续任务流 (Continuous Task Flow) 模式:
+        1. 初始化分片管理器
+        2. 创建 HTTP 连接池
+        3. 进入主处理循环
+        4. 完成后关闭资源
+        
+        连续任务流的关键特性:
+            - 动态任务填充: 任务完成后立即补充新任务，保持并发度
+            - 实时结果处理: 无需等待整批完成，单个任务完成即处理结果
+            - 灵活错误处理: 可针对单个任务进行重试，不影响其他任务
+        
+        HTTP 连接池配置:
+            - limit: 总连接数上限 (max_connections)
+            - limit_per_host: 单主机连接数 (max_connections_per_host)
+        
+        Raises:
+            Exception: 处理过程中的异常会被记录，但不会中断整体流程
+        """
         if not self.task_manager.initialize():
             logging.info("无任务或初始化失败")
             return
 
         try:
+            # 创建连接池
             connector = aiohttp.TCPConnector(
                 limit=self.max_connections,
                 limit_per_host=self.max_connections_per_host
@@ -159,7 +258,55 @@ class UniversalAIProcessor:
             self.task_manager.finalize()
 
     async def _process_loop(self, session: aiohttp.ClientSession) -> None:
-        """主处理循环"""
+        """
+        主处理循环
+        
+        实现连续任务流的核心循环逻辑，包含以下 8 个阶段:
+        
+        处理流程:
+            ┌─────────────────────────────────────────────────────────┐
+            │                      主循环开始                          │
+            └─────────────────────────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   │
+            ┌───────────────┐                          │
+            │ 1. 分片轮转检查│ ─────── 无更多分片 ─────→ 结束
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ 2. 填充任务池  │ ← Backpressure 控制
+            └───────┬───────┘   (保持 batch_size 并发度)
+                    ▼
+            ┌───────────────┐
+            │ 3. 等待任务完成│ ← asyncio.wait(FIRST_COMPLETED)
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ 4. 处理完成任务│ → 成功: 存入结果缓冲
+            └───────┬───────┘   失败: 重试决策
+                    ▼
+            ┌───────────────┐
+            │ 5. API 熔断检查│ → 触发: 暂停 api_pause_duration 秒
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ 6. 重试任务入队│ → 加到队首优先处理
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ 7. 批量写回结果│
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ 8. 监控与日志  │ ← 每 5 秒输出进度
+            └───────┬───────┘   清理过期元数据
+                    │
+                    └─────────────────→ 返回循环开始
+        
+        Args:
+            session: aiohttp 客户端会话
+        """
         current_shard_num = 0
         active_tasks: Set[asyncio.Task] = set()
         task_id_map: Dict[asyncio.Task, Tuple[Any, Dict[str, Any]]] = {}
@@ -308,7 +455,38 @@ class UniversalAIProcessor:
     async def _process_one_record(
         self, session: aiohttp.ClientSession, record_id: Any, row_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """处理单条记录"""
+        """
+        处理单条记录
+        
+        完成单条数据的完整处理流程:
+        1. 生成 Prompt - 使用 ContentProcessor 将原始数据转换为 AI 输入
+        2. 调用 API - 通过 FluxAIClient 发送请求并获取响应
+        3. 解析结果 - 提取 AI 返回的结构化数据
+        
+        异常处理策略:
+            - aiohttp 异常 (连接失败、超时): 返回 API_ERROR
+            - Prompt 生成失败: 返回 SYSTEM_ERROR
+            - 其他未知异常: 返回 SYSTEM_ERROR 并记录详情
+        
+        Args:
+            session: aiohttp 客户端会话
+            record_id: 记录唯一标识符
+            row_data: 原始记录数据字典
+            
+        Returns:
+            处理结果字典:
+            - 成功: 包含解析后的 AI 响应字段
+            - 失败: 包含 _error, _error_type, _details 字段
+        
+        Example:
+            # 成功返回
+            {"field1": "value1", "field2": "value2"}
+            
+            # 失败返回
+            {"_error": "api_call_failed: TimeoutError", 
+             "_error_type": ErrorType.API,
+             "_details": "Connection timeout after 30s"}
+        """
         try:
             # 1. 生成 Prompt
             prompt = self.content_processor.create_prompt(row_data)
@@ -352,7 +530,16 @@ class UniversalAIProcessor:
             }
 
     def run(self) -> None:
-        """运行处理器（同步入口）"""
+        """
+        运行处理器（同步入口）
+        
+        为异步处理提供同步包装，适用于命令行直接调用。
+        内部使用 asyncio.run() 启动事件循环。
+        
+        使用示例:
+            processor = UniversalAIProcessor("config.yaml")
+            processor.run()  # 阻塞直到处理完成
+        """
         logging.info("启动 AI 数据处理引擎...")
         asyncio.run(self.process_shard_async_continuous())
         logging.info("AI 数据处理引擎已停止")

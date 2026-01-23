@@ -1,6 +1,12 @@
 """
 PostgreSQL 数据源任务池单元测试
 
+测试 src/data/postgresql.py 的 PostgreSQLTaskPool 类功能，包括：
+- ThreadedConnectionPool 连接池管理
+- execute_batch 批量写入优化
+- SQL 注入防护 (psycopg2.sql)
+- 连接池大小配置
+
 注意: 这些测试使用 Mock 对象，不需要实际的 PostgreSQL 数据库连接。
 """
 

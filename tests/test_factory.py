@@ -1,7 +1,11 @@
 """
 数据源工厂测试
 
-测试 src/data/factory.py 的任务池工厂功能
+测试 src/data/factory.py 的任务池工厂功能，包括：
+- 工厂函数导入
+- Excel/CSV 任务池创建
+- MySQL/PostgreSQL 可用性检测
+- 无效数据源类型处理
 """
 
 import pytest

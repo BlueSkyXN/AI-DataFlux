@@ -1,5 +1,11 @@
 """
 SQLite 数据源任务池单元测试
+
+测试 src/data/sqlite.py 的 SQLiteTaskPool 类功能，包括：
+- SQLiteConnectionManager 连接管理
+- 线程本地连接隔离
+- WAL 模式配置
+- 任务读取与批量写入
 """
 
 import pytest

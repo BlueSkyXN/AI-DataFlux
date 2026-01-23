@@ -1,3 +1,13 @@
+"""
+内容处理器单元测试
+
+测试 src/core/content/processor.py 的 ContentProcessor 类功能，包括：
+- Prompt 生成 (模板替换、JSON 序列化)
+- AI 响应解析 (JSON 提取、Markdown 代码块处理)
+- 字段验证 (必需字段检查、枚举值验证)
+- JSON Schema 构建
+"""
+
 import pytest
 from unittest.mock import MagicMock
 from src.core.content.processor import ContentProcessor

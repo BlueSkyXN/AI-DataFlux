@@ -1,7 +1,11 @@
 """
 配置加载测试
 
-测试 src/config/settings.py 的配置加载功能
+测试 src/config/settings.py 的配置加载功能，包括：
+- 有效配置文件加载
+- 配置字段验证
+- 错误配置处理 (文件不存在、格式错误)
+- 默认配置深度合并
 """
 
 import pytest

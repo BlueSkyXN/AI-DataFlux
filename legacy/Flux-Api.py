@@ -1,5 +1,40 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+Flux-Api.py - 旧版 API 网关 (Legacy)
+
+此文件是 AI-DataFlux 的旧版 API 网关实现，保留用于参考和向后兼容。
+新项目应使用重构后的网关层 (src/gateway/ 目录)。
+
+模块功能:
+    - OpenAI 兼容的 Chat Completions API
+    - 多模型路由和负载均衡
+    - 令牌桶限流
+    - 指数退避重试
+
+新版对应模块:
+    - src/gateway/app.py: FastAPI 应用定义
+    - src/gateway/service.py: 核心服务逻辑
+    - src/gateway/dispatcher.py: 模型调度器
+    - src/gateway/limiter.py: 令牌桶限流器
+    - src/gateway/resolver.py: DNS 解析器
+    - src/gateway/session.py: HTTP 会话池
+
+主要改进 (新版):
+    1. 更清晰的模块划分
+    2. 读写锁优化
+    3. 按 (ssl_verify, proxy) 复用 HTTP 会话
+    4. 完善的错误处理和日志
+
+启动方式 (旧版):
+    python Flux-Api.py --port 8787 --config channels.yaml
+
+启动方式 (新版):
+    python cli.py gateway --port 8787
+
+Warning:
+    此文件已弃用，不再维护。请使用新版网关层 (src/gateway/)。
+"""
 
 import argparse
 import uvicorn

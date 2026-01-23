@@ -1,7 +1,11 @@
 """
 分片调度器测试
 
-测试 src/core/scheduler.py 的分片任务管理功能
+测试 src/core/scheduler.py 的分片任务管理功能，包括：
+- ShardedTaskManager 初始化
+- 分片大小计算 (最优/最小/最大)
+- 内存监控阈值
+- 分片迭代器行为
 """
 
 import time

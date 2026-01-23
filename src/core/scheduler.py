@@ -1,7 +1,55 @@
 """
 分片任务调度管理器
 
-管理数据分片加载、进度跟踪、内存监控等功能。
+本模块实现大规模数据处理的分片调度机制，负责将海量数据切分为可管理的
+分片单元，并跟踪处理进度、监控内存使用。
+
+设计目标:
+    - 避免一次性加载全部数据导致内存溢出
+    - 动态调整分片大小以适应系统资源
+    - 实时监控处理进度和内存使用
+    - 提供详细的处理统计信息
+
+分片策略:
+    ┌──────────────────────────────────────────────────────────────┐
+    │                      数据源 (N 条记录)                        │
+    └──────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌────────────┼────────────┐
+                    ▼            ▼            ▼
+              ┌──────────┐ ┌──────────┐ ┌──────────┐
+              │ 分片 1   │ │ 分片 2   │ │ 分片 N   │
+              │ ID: 0-999│ │ID:1000-  │ │ ...      │
+              └──────────┘ └──────────┘ └──────────┘
+                    │
+                    ▼
+              ┌──────────────────────────────────────────┐
+              │          逐个分片加载处理                  │
+              │  - 基于 ID 范围过滤                       │
+              │  - 处理完毕后加载下一分片                  │
+              │  - 内存受控，不超出限制                    │
+              └──────────────────────────────────────────┘
+
+动态分片大小计算:
+    分片大小 = min(内存限制, 时间限制, 配置值)
+    
+    - 内存限制: 可用内存 × 30% / 估算记录大小
+    - 时间限制: 处理速率 × 目标时长 (15分钟)
+    - 配置值: optimal_shard_size (默认 10000)
+
+内存监控阈值:
+    - 系统内存 > 85%: 触发 GC
+    - 进程内存 > 40GB: 触发 GC
+
+使用示例:
+    from src.core.scheduler import ShardedTaskManager
+    
+    manager = ShardedTaskManager(task_pool, shard_size=10000)
+    if manager.initialize():
+        while manager.load_next_shard():
+            # 处理当前分片
+            pass
+        manager.finalize()
 """
 
 import gc
@@ -20,6 +68,21 @@ class ShardedTaskManager:
     分片任务管理器
 
     负责将大量数据分片加载、跟踪处理进度、监控内存使用。
+    
+    核心功能:
+        1. 分片计算: 根据 ID 范围和配置计算分片边界
+        2. 分片加载: 逐个加载分片到内存
+        3. 进度跟踪: 记录已处理数量和成功率
+        4. 内存监控: 定期检查内存使用，必要时触发 GC
+        5. 统计输出: 完成后输出详细统计信息
+    
+    生命周期:
+        ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+        │ __init__ │ → │initialize│ → │load_next │ → │ finalize │
+        │ 配置初始化│    │ 计算分片 │    │ _shard   │    │ 统计输出 │
+        └──────────┘    └──────────┘    └────┬─────┘    └──────────┘
+                                            │ ↑
+                                            └─┘ (循环直到无更多分片)
 
     Attributes:
         task_pool: 数据源任务池
@@ -27,6 +90,10 @@ class ShardedTaskManager:
         min_shard_size: 最小分片大小
         max_shard_size: 最大分片大小
         max_retry_counts: 各错误类型的最大重试次数
+        current_shard_index: 当前分片索引
+        total_shards: 总分片数
+        shard_boundaries: 分片边界列表 [(min_id, max_id), ...]
+        total_processed_successfully: 成功处理的记录数
     """
 
     def __init__(
@@ -107,13 +174,23 @@ class ShardedTaskManager:
         """
         动态计算最优分片大小
 
-        基于可用内存和处理速度进行启发式计算。
+        基于可用内存和处理速度进行启发式计算，自动适应系统资源。
+        
+        计算逻辑:
+            1. 内存限制 = 可用内存 × 30% / 记录大小估算 (5KB/条)
+            2. 时间限制 = 处理速率 × 目标时长 (15分钟)
+            3. 最终大小 = min(内存限制, 时间限制, optimal_shard_size)
+            4. 限制在 [min_shard_size, max_shard_size] 范围内
 
         Args:
-            total_range: 总数据范围
+            total_range: 总数据范围 (max_id - min_id + 1)
 
         Returns:
             计算出的分片大小
+            
+        Note:
+            首次运行时 records_per_second 为 0，时间限制不生效。
+            随着处理进行，指标会逐渐准确。
         """
         # 基于内存的限制
         memory_based_limit = self.max_shard_size
@@ -160,9 +237,18 @@ class ShardedTaskManager:
         初始化分片
 
         获取数据边界，计算分片大小，创建分片边界列表。
+        
+        初始化流程:
+            1. 获取待处理任务总数
+            2. 获取 ID/索引边界 (min_id, max_id)
+            3. 计算最优分片大小
+            4. 创建分片边界列表
 
         Returns:
-            是否成功初始化
+            是否成功初始化 (False 表示无任务或初始化失败)
+            
+        Raises:
+            不抛出异常，错误会被记录并返回 False
         """
         logging.info("正在初始化分片任务管理器...")
         self.start_time = time.time()
@@ -230,9 +316,16 @@ class ShardedTaskManager:
     def load_next_shard(self) -> bool:
         """
         加载下一个分片
+        
+        从数据源加载下一个分片的数据到任务池。
+        如果当前分片无任务，会自动递归加载下一个分片。
 
         Returns:
             是否成功加载 (False 表示没有更多分片)
+            
+        Note:
+            如果分片加载失败，会自动跳过并尝试下一个分片，
+            确保单个分片的问题不会阻塞整个处理流程。
         """
         if self.current_shard_index >= self.total_shards:
             logging.info("所有分片已处理完毕，没有更多分片可加载")
@@ -268,11 +361,20 @@ class ShardedTaskManager:
         """
         更新处理指标
 
-        使用指数移动平均更新处理速度指标。
+        使用指数移动平均 (EMA) 更新处理速度指标，平滑因子 α=0.1。
+        EMA 公式: new_value = α × current + (1 - α) × old_value
+        
+        该算法使得:
+            - 新数据占 10% 权重
+            - 历史数据占 90% 权重
+            - 平滑抖动，避免偶发波动影响分片大小计算
 
         Args:
             batch_success_count: 本批次成功处理数量
             batch_processing_time: 本批次处理时间 (秒)
+            
+        Note:
+            batch_success_count <= 0 或 batch_processing_time <= 0 时不更新。
         """
         if batch_processing_time <= 0 or batch_success_count <= 0:
             return
@@ -300,7 +402,17 @@ class ShardedTaskManager:
         """
         监控内存使用
 
-        定期检查内存使用情况，高内存使用时触发 GC。
+        定期检查内存使用情况，高内存使用时触发垃圾回收 (GC)。
+        
+        检查间隔: 60 秒 (memory_tracker["check_interval"])
+        
+        GC 触发条件 (满足任一即触发):
+            - 系统内存使用率 > 85%
+            - 进程内存使用量 > 40GB
+        
+        监控指标:
+            - current_memory_usage: 当前进程内存 (MB)
+            - peak_memory_usage: 峰值内存使用 (MB)
         """
         if not self._process_info:
             return
@@ -347,6 +459,17 @@ class ShardedTaskManager:
     def finalize(self) -> None:
         """
         完成处理，输出统计信息并关闭资源
+        
+        输出内容:
+            - 总耗时
+            - 预估任务数 vs 成功处理数
+            - 各错误类型的重试次数
+            - 重试超限任务数
+            - 平均处理速率 (条/秒)
+            - 峰值内存使用
+        
+        资源清理:
+            - 关闭任务池 (task_pool.close())
         """
         end_time = time.time()
         total_duration = end_time - self.start_time

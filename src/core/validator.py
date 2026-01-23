@@ -1,7 +1,39 @@
 """
 JSON 字段验证器
 
-根据配置规则验证 AI 响应中的字段值是否在允许的范围内。
+本模块实现 AI 响应数据的字段值验证功能，确保 AI 返回的数据
+符合预定义的枚举值约束。
+
+设计目标:
+    - 验证 AI 响应中的字段值是否在允许的范围内
+    - 支持多字段同时验证
+    - 提供详细的错误信息，便于重试决策
+
+使用场景:
+    当配置了 validation.field_rules 时，ContentProcessor 会在解析
+    AI 响应后调用此验证器，检查返回的分类/枚举字段是否有效。
+    
+    例如: 情感分析任务要求返回 "positive", "neutral", "negative" 之一，
+    但 AI 返回了 "good"，验证器会标记为无效。
+
+配置示例:
+    validation:
+      enabled: true
+      field_rules:
+        category: ["technical", "business", "general"]
+        sentiment: ["positive", "neutral", "negative"]
+        priority: [1, 2, 3, 4, 5]
+
+使用示例:
+    validator = JsonValidator()
+    validator.configure({
+        "enabled": True,
+        "field_rules": {
+            "category": ["technical", "business"],
+            "sentiment": ["positive", "negative"]
+        }
+    })
+    is_valid, errors = validator.validate(ai_response)
 """
 
 import logging
@@ -13,6 +45,15 @@ class JsonValidator:
     JSON 字段验证器
 
     根据配置的字段规则验证 JSON 数据中的字段值是否合法。
+    
+    验证逻辑:
+        - 仅验证配置了规则的字段
+        - 数据中不存在的字段不会触发验证失败
+        - 值必须精确匹配（类型和值都要匹配）
+    
+    Attributes:
+        enabled: 是否启用验证
+        field_rules: 字段规则 {field: [allowed_values]}
 
     Example:
         >>> validator = JsonValidator()

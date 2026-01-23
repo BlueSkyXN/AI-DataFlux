@@ -1,7 +1,11 @@
 """
 数据引擎测试
 
-测试 src/data/engines/ 的引擎实现
+测试 src/data/engines/ 的引擎实现，包括：
+- 引擎工厂 (get_engine)
+- Pandas 引擎操作
+- Polars 引擎操作 (如可用)
+- 自动引擎选择 (auto)
 """
 
 import pytest

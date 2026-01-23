@@ -1,7 +1,11 @@
 """
 JSON 验证器测试
 
-测试 src/core/validator.py 的字段验证功能
+测试 src/core/validator.py 的字段验证功能，包括：
+- 枚举值验证
+- 多字段规则配置
+- 验证启用/禁用
+- 无效值检测与报告
 """
 
 import pytest

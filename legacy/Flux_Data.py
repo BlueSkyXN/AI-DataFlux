@@ -1,3 +1,34 @@
+# -*- coding: utf-8 -*-
+"""
+Flux_Data.py - 旧版数据源处理模块 (Legacy)
+
+此文件是 AI-DataFlux 的旧版数据源实现，保留用于参考和向后兼容。
+新项目应使用重构后的数据层 (src/data/ 目录)。
+
+模块功能:
+    - BaseTaskPool: 数据源任务池抽象基类
+    - ExcelTaskPool: Excel/CSV 数据源实现
+    - MySQLTaskPool: MySQL 数据源实现
+    - create_task_pool: 任务池工厂函数
+
+新版对应模块:
+    - src/data/base.py: BaseTaskPool 抽象基类
+    - src/data/excel.py: ExcelTaskPool 实现
+    - src/data/mysql.py: MySQLTaskPool 实现
+    - src/data/postgresql.py: PostgreSQLTaskPool 实现 (新增)
+    - src/data/sqlite.py: SQLiteTaskPool 实现 (新增)
+    - src/data/factory.py: create_task_pool 工厂函数
+
+主要改进 (新版):
+    1. 支持更多数据源 (PostgreSQL, SQLite)
+    2. 可插拔数据引擎 (Pandas/Polars)
+    3. 向量化操作优化
+    4. 更完善的错误处理
+
+Warning:
+    此文件已弃用，不再维护。请使用新版数据层 (src/data/)。
+"""
+
 # Flux_Data.py
 import logging
 import threading

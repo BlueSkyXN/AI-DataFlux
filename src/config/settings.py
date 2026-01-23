@@ -1,7 +1,54 @@
 """
 配置管理模块
 
-提供配置文件加载、日志初始化和默认配置定义。
+本模块提供 AI-DataFlux 的核心配置功能，包括：
+- YAML 配置文件加载与解析
+- 默认配置定义
+- 日志系统初始化
+- 配置工具函数
+
+配置文件结构:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                        config.yaml                               │
+    ├─────────────────────────────────────────────────────────────────┤
+    │ global:                                                          │
+    │   flux_api_url: "http://..."     # API 网关地址                  │
+    │   log:                                                           │
+    │     level: info                  # 日志级别                      │
+    │     format: text                 # 日志格式 (text/json)          │
+    │     output: console              # 输出目标 (console/file)       │
+    │                                                                  │
+    │ datasource:                                                      │
+    │   type: excel                    # 数据源类型                    │
+    │   engine: pandas                 # 数据引擎                      │
+    │   concurrency:                                                   │
+    │     batch_size: 100              # 批处理大小                    │
+    │     retry_limits: {...}          # 重试限制                      │
+    │                                                                  │
+    │ prompt:                                                          │
+    │   template: "..."                # Prompt 模板                   │
+    │   required_fields: [...]         # 必需字段                      │
+    └─────────────────────────────────────────────────────────────────┘
+
+配置合并策略:
+    使用深度合并 (merge_config)，用户配置覆盖默认配置。
+    对于嵌套字典，只覆盖指定的键，未指定的键保留默认值。
+
+日志格式:
+    - text: 传统文本格式，适合控制台阅读
+      格式: "2024-01-01 12:00:00 [INFO] [logger] message"
+    - json: JSON 格式，适合日志聚合系统
+      格式: {"time": "...", "level": "...", "message": "..."}
+
+使用示例:
+    # 加载配置
+    config = load_config("config.yaml")
+    
+    # 初始化日志
+    init_logging(config.get("global", {}).get("log"))
+    
+    # 获取嵌套配置
+    batch_size = get_nested(config, "datasource", "concurrency", "batch_size", default=100)
 """
 
 import logging
@@ -16,6 +63,7 @@ from ..models.errors import ConfigError
 
 
 # 默认配置值
+# 用户配置会深度合并到此默认配置上
 DEFAULT_CONFIG: dict[str, Any] = {
     "global": {
         "log": {
@@ -60,14 +108,20 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     """
     加载 YAML 配置文件
 
+    从指定路径加载 YAML 格式的配置文件并解析为 Python 字典。
+
     Args:
-        config_path: 配置文件路径
+        config_path: 配置文件路径 (相对或绝对路径)
 
     Returns:
         配置字典
 
     Raises:
         ConfigError: 配置文件不存在或格式错误
+        
+    Note:
+        此函数只负责加载和解析，不进行与默认配置的合并。
+        合并操作由调用方根据需要执行。
     """
     config_path = Path(config_path)
 
@@ -94,7 +148,7 @@ def init_logging(log_config: dict[str, Any] | None = None) -> None:
     """
     初始化日志系统
 
-    支持控制台和文件输出，支持 text 和 json 两种格式。
+    配置 Python 标准日志库，支持控制台和文件输出，支持 text 和 json 两种格式。
 
     Args:
         log_config: 日志配置字典，包含以下可选键:
@@ -103,6 +157,16 @@ def init_logging(log_config: dict[str, Any] | None = None) -> None:
             - output: 输出目标 (console/file)
             - file_path: 日志文件路径 (当 output=file 时)
             - date_format: 日期格式
+            
+    日志级别映射:
+        debug → DEBUG (10)
+        info → INFO (20)
+        warning → WARNING (30)
+        error → ERROR (40)
+        
+    第三方库日志:
+        自动将 aiohttp, asyncio, urllib3, mysql.connector 等
+        库的日志级别设为 WARNING，减少干扰。
     """
     if log_config is None:
         log_config = {}
@@ -111,6 +175,7 @@ def init_logging(log_config: dict[str, Any] | None = None) -> None:
     level_str = log_config.get("level", "info").upper()
     level = getattr(logging, level_str, logging.INFO)
 
+    # 选择日志格式
     log_format_type = log_config.get("format", "text")
     if log_format_type == "json":
         log_format = (
@@ -149,10 +214,10 @@ def init_logging(log_config: dict[str, Any] | None = None) -> None:
         format=log_format,
         datefmt=date_format,
         handlers=handlers,
-        force=True,
+        force=True,  # 覆盖已有配置
     )
 
-    # 降低第三方库的日志级别
+    # 降低第三方库的日志级别，减少干扰
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -170,10 +235,12 @@ def get_nested(config: dict[str, Any], *keys: str, default: Any = None) -> Any:
     """
     安全获取嵌套配置值
 
+    遍历键路径获取嵌套字典中的值，任意一级不存在则返回默认值。
+
     Args:
         config: 配置字典
-        *keys: 键路径
-        default: 默认值
+        *keys: 键路径 (可变参数)
+        default: 键不存在时返回的默认值
 
     Returns:
         配置值或默认值
@@ -200,12 +267,21 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
     """
     深度合并配置字典
 
+    递归合并两个字典，override 中的值覆盖 base 中的同名键。
+    对于嵌套字典，会递归合并而非直接替换。
+
     Args:
         base: 基础配置
         override: 覆盖配置
 
     Returns:
         合并后的配置 (新字典，不修改原始配置)
+        
+    Example:
+        >>> base = {"a": {"b": 1, "c": 2}}
+        >>> override = {"a": {"b": 10}}
+        >>> merge_config(base, override)
+        {"a": {"b": 10, "c": 2}}
     """
     result = base.copy()
 

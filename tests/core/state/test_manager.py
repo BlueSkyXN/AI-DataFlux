@@ -1,3 +1,13 @@
+"""
+任务状态管理器单元测试
+
+测试 src/core/state/manager.py 的 TaskStateManager 类功能，包括：
+- 任务状态追踪 (开始/完成/查询)
+- 元数据管理 (创建/获取/删除)
+- 过期数据清理
+- 并发安全性
+"""
+
 import time
 from concurrent.futures import ThreadPoolExecutor
 import pytest
