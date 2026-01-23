@@ -53,11 +53,34 @@ mysql:
   password: "your_password"
   database: "ai_tasks"
   table_name: "tasks"
+  pool_size: 10                   # 数据库连接池大小（默认为batch_size的1/10）
 
 # Excel数据源配置（仅当type=excel时有效）
 excel:
   input_path: "./data/input.xlsx"
   output_path: "./data/output.xlsx"
+
+# PostgreSQL数据源配置（仅当type=postgresql时有效）
+postgresql:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "your_password"
+  database: "ai_tasks"
+  table_name: "tasks"
+  schema_name: "public"           # 可选，默认为 public
+  pool_size: 10                   # 连接池大小（默认为batch_size的1/10）
+
+# SQLite数据源配置（仅当type=sqlite时有效）
+sqlite:
+  db_path: "./data/tasks.db"      # 数据库文件路径
+  table_name: "tasks"
+
+# CSV数据源配置（仅当type=csv时有效）
+csv:
+  input_path: "./data/input.csv"
+  output_path: "./data/output.csv"  # 可选，默认为 input_path
+  encoding: "utf-8"               # 可选，默认为 utf-8
 
 # 需要从表中提取的字段
 columns_to_extract:

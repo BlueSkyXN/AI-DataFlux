@@ -67,7 +67,17 @@ class FluxApiService:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self.config = yaml.safe_load(f)
+
+            # 验证配置根节点类型
+            if not isinstance(self.config, dict):
+                raise ValueError(
+                    f"配置文件根节点必须是字典类型，"
+                    f"实际类型为 {type(self.config).__name__}"
+                )
+
             logging.info(f"配置文件 '{self.config_path}' 加载成功")
+        except yaml.YAMLError as e:
+            raise ValueError(f"配置文件 YAML 格式错误: {e}") from e
         except Exception as e:
             raise ValueError(f"无法加载配置文件: {e}") from e
 
@@ -382,29 +392,31 @@ class FluxApiService:
         payload: dict[str, Any] = {
             "model": model.model,
             "messages": [m.model_dump() for m in request.messages],
-            "temperature": request.temperature or model.temperature,
+            "temperature": request.temperature if request.temperature is not None else model.temperature,
             "stream": request.stream or False,
         }
 
-        # 添加可选参数
-        if request.max_tokens:
+        # 添加可选参数 (使用 is not None 以支持 0 和 False)
+        if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
-        if request.response_format:
+        if request.response_format is not None:
             payload["response_format"] = request.response_format.model_dump()
-        if request.stop:
+        if request.stop is not None:
             payload["stop"] = request.stop
         if request.top_p is not None:
             payload["top_p"] = request.top_p
-        if request.user:
+        if request.user is not None:
             payload["user"] = request.user
+        if request.n is not None:
+            payload["n"] = request.n
 
         # 高级参数 (如果模型支持)
         if model.supports_advanced_params:
-            if request.presence_penalty:
+            if request.presence_penalty is not None:
                 payload["presence_penalty"] = request.presence_penalty
-            if request.frequency_penalty:
+            if request.frequency_penalty is not None:
                 payload["frequency_penalty"] = request.frequency_penalty
-            if request.logit_bias:
+            if request.logit_bias is not None:
                 payload["logit_bias"] = request.logit_bias
 
         # 发送请求
@@ -417,6 +429,35 @@ class FluxApiService:
 
         start_time = time.time()
 
+        # 流式响应：手动管理响应生命周期，避免 async with 提前关闭连接
+        if request.stream:
+            resp = await session.post(
+                model.api_url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                proxy=model.proxy or None,
+            )
+
+            # 记录日志
+            peer_ip = self._extract_peer_ip(resp, model)
+            self._log_upstream_response(model, resp.status, peer_ip)
+
+            if resp.status != 200:
+                text = await resp.text()
+                resp.close()
+                raise aiohttp.ClientResponseError(
+                    resp.request_info,
+                    resp.history,
+                    status=resp.status,
+                    message=text[:500],
+                    headers=resp.headers,
+                )
+
+            # 返回流式响应生成器，响应将在生成器 finally 中关闭
+            return self._handle_streaming_response(resp, model, start_time)
+
+        # 非流式响应：使用 async with 自动管理
         async with session.post(
             model.api_url,
             headers=headers,
@@ -424,35 +465,8 @@ class FluxApiService:
             timeout=timeout,
             proxy=model.proxy or None,
         ) as resp:
-            peer_ip: str | None = None
-            if not model.proxy:
-                try:
-                    if resp.connection and resp.connection.transport:
-                        peername = resp.connection.transport.get_extra_info("peername")
-                        if peername:
-                            peer_ip = (
-                                peername[0]
-                                if isinstance(peername, tuple)
-                                else str(peername)
-                            )
-                except Exception:
-                    peer_ip = None
-
-            if peer_ip:
-                logging.info(
-                    "上游响应 model=%s status=%s url=%s ip=%s",
-                    model.id,
-                    resp.status,
-                    model.api_url,
-                    peer_ip,
-                )
-            else:
-                logging.info(
-                    "上游响应 model=%s status=%s url=%s",
-                    model.id,
-                    resp.status,
-                    model.api_url,
-                )
+            peer_ip = self._extract_peer_ip(resp, model)
+            self._log_upstream_response(model, resp.status, peer_ip)
 
             if resp.status != 200:
                 text = await resp.text()
@@ -463,10 +477,6 @@ class FluxApiService:
                     message=text[:500],
                     headers=resp.headers,
                 )
-
-            # 处理流式响应
-            if request.stream:
-                return self._handle_streaming_response(resp, model, start_time)
 
             # 处理非流式响应
             data = await resp.json()
@@ -504,6 +514,41 @@ class FluxApiService:
                 else None
             ),
         )
+
+    def _extract_peer_ip(
+        self, resp: aiohttp.ClientResponse, model: ModelConfig
+    ) -> str | None:
+        """从响应中提取对端 IP 地址"""
+        if model.proxy:
+            return None
+        try:
+            if resp.connection and resp.connection.transport:
+                peername = resp.connection.transport.get_extra_info("peername")
+                if peername:
+                    return peername[0] if isinstance(peername, tuple) else str(peername)
+        except Exception:
+            pass
+        return None
+
+    def _log_upstream_response(
+        self, model: ModelConfig, status: int, peer_ip: str | None
+    ) -> None:
+        """记录上游响应日志"""
+        if peer_ip:
+            logging.info(
+                "上游响应 model=%s status=%s url=%s ip=%s",
+                model.id,
+                status,
+                model.api_url,
+                peer_ip,
+            )
+        else:
+            logging.info(
+                "上游响应 model=%s status=%s url=%s",
+                model.id,
+                status,
+                model.api_url,
+            )
 
     async def _handle_streaming_response(
         self, response: aiohttp.ClientResponse, model: ModelConfig, start_time: float
@@ -576,6 +621,8 @@ class FluxApiService:
                         # 检查是否是结束标记
                         if data_content == "[DONE]":
                             logging.info(f"[{model.id}] 收到 [DONE] 标记")
+                            # 转发 [DONE] 事件给客户端
+                            yield "data: [DONE]\n\n"
                             returned_successfully = True
                             break
 
@@ -610,6 +657,8 @@ class FluxApiService:
                 if line.startswith("data:"):
                     data_content = line[len("data:") :].strip()
                     if data_content == "[DONE]":
+                        # 转发 [DONE] 事件给客户端
+                        yield "data: [DONE]\n\n"
                         returned_successfully = True
                         logging.info(f"[{model.id}] 在最终缓冲区中收到 [DONE]")
                     elif (
@@ -621,6 +670,12 @@ class FluxApiService:
                         has_yielded = True
                         returned_successfully = True
                         logging.info(f"[{model.id}] 成功处理最终缓冲区内容")
+
+            # 如果流正常结束但没有收到 [DONE]，也发送 [DONE] 保证客户端能正常结束
+            if has_yielded and not returned_successfully:
+                logging.warning(f"[{model.id}] 未收到 [DONE] 但流已结束，补发 [DONE]")
+                yield "data: [DONE]\n\n"
+                returned_successfully = True
 
         except aiohttp.ClientPayloadError as e:
             logging.error(f"[{model.id}] 流处理 ClientPayloadError: {e}")

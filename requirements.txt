@@ -14,6 +14,12 @@ uvicorn>=0.23.0
 # MySQL 数据源 (可选)
 mysql-connector-python>=8.0.0
 
+# PostgreSQL 数据源 (可选)
+# pip install psycopg2-binary
+psycopg2-binary>=2.9.0
+
+# SQLite 数据源 - Python 标准库自带，无需安装
+
 # 高性能引擎 (可选，推荐安装以获得最佳性能)
 # pip install numpy polars python-calamine fastexcel xlsxwriter
 numpy>=1.24.0           # 向量化计算加速

@@ -83,14 +83,21 @@ class ExcelTaskPool(BaseTaskPool):
         if hasattr(self.engine, "excel_writer"):
             logging.info(f"  - Excel 写入器: {self.engine.excel_writer}")
 
-        # 读取 Excel 文件
-        logging.info(f"正在读取 Excel 文件: {self.input_path}")
+        # 自动检测文件类型（CSV 或 Excel）
+        self._is_csv = self.input_path.suffix.lower() == ".csv"
+
+        # 读取文件（CSV 或 Excel）
+        file_type = "CSV" if self._is_csv else "Excel"
+        logging.info(f"正在读取 {file_type} 文件: {self.input_path}")
         try:
-            self.df = self.engine.read_excel(self.input_path)
+            if self._is_csv:
+                self.df = self.engine.read_csv(self.input_path)
+            else:
+                self.df = self.engine.read_excel(self.input_path)
             row_count = self.engine.row_count(self.df)
-            logging.info(f"Excel 文件读取成功，共 {row_count} 行")
+            logging.info(f"{file_type} 文件读取成功，共 {row_count} 行")
         except Exception as e:
-            raise IOError(f"无法读取 Excel 文件 {self.input_path}: {e}") from e
+            raise IOError(f"无法读取 {file_type} 文件 {self.input_path}: {e}") from e
 
         # 保存相关
         self.save_interval = save_interval
@@ -154,9 +161,9 @@ class ExcelTaskPool(BaseTaskPool):
                     all_filled = True
                     for col in output_columns:
                         value = row_data.get(col)
-                        if value is None or (
-                            isinstance(value, str) and not value.strip()
-                        ):
+                        # 使用引擎的 is_empty 方法统一处理空值判断
+                        # 包括 None、NaN、空字符串等各种空值类型
+                        if self.engine.is_empty(value):
                             all_filled = False
                             break
 
@@ -363,10 +370,15 @@ class ExcelTaskPool(BaseTaskPool):
 
     def _save_excel(self) -> None:
         """
-        保存 Excel 文件
+        保存文件（Excel 或 CSV）
 
+        根据文件类型和输出路径自动选择保存方式。
         处理 Unicode 编码问题，必要时清空问题单元格或回退到 CSV。
         """
+        # 检查输出路径是否为 CSV（可能输入输出格式不同）
+        output_is_csv = self.output_path.suffix.lower() == ".csv"
+        file_type = "CSV" if (self._is_csv or output_is_csv) else "Excel"
+
         logging.info(f"正在尝试保存 DataFrame 到: {self.output_path}")
 
         try:
@@ -376,6 +388,13 @@ class ExcelTaskPool(BaseTaskPool):
                 if output_dir and not output_dir.exists():
                     output_dir.mkdir(parents=True, exist_ok=True)
 
+                # CSV 文件直接保存
+                if self._is_csv or output_is_csv:
+                    self.engine.write_csv(self.df, self.output_path)
+                    logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
+                    return
+
+                # Excel 文件保存策略
                 # 策略1: 直接保存
                 try:
                     self.engine.write_excel(self.df, self.output_path)
