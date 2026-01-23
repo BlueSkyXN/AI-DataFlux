@@ -5,7 +5,7 @@ global:
     format: "text"        # 日志格式: text 或 json
     output: "console"     # 日志输出: console 或 file
     file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
-  flux_api_url: http://127.0.0.1:8787    # Flux API端点URL
+  flux_api_url: http://127.0.0.1:8787    # Flux API端点URL（自动补全 /v1/chat/completions）
 
 # 网关配置
 gateway:
@@ -14,7 +14,7 @@ gateway:
 
 # 数据源类型配置
 datasource:
-  type: excel   # 数据源类型: mysql 或 excel
+  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite
   
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
@@ -80,7 +80,6 @@ sqlite:
 csv:
   input_path: "./data/input.csv"
   output_path: "./data/output.csv"  # 可选，默认为 input_path
-  encoding: "utf-8"               # 可选，默认为 utf-8
 
 # 需要从表中提取的字段
 columns_to_extract:
