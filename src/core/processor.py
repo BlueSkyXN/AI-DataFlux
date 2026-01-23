@@ -6,15 +6,13 @@
 import asyncio
 import logging
 import time
-import threading
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import aiohttp
 
 from ..config.settings import load_config, init_logging
 from ..models.errors import ErrorType
-from ..models.task import TaskMetadata
-from ..data import create_task_pool, BaseTaskPool
+from ..data import create_task_pool
 from .scheduler import ShardedTaskManager
 from .validator import JsonValidator
 

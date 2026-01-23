@@ -528,7 +528,7 @@ class SQLiteTaskPool(BaseTaskPool):
             cols_str = ", ".join(f"[{c}]" for c in columns)
             sql = f"SELECT {cols_str} FROM [{self.table_name}]"
 
-            logging.info(f"正在查询所有记录")
+            logging.info("正在查询所有记录")
             cursor.execute(sql)
             rows = cursor.fetchall()
             cursor.close()
@@ -566,7 +566,7 @@ class SQLiteTaskPool(BaseTaskPool):
             where_clause = self._build_processed_condition()
             sql = f"SELECT {cols_str} FROM [{self.table_name}] WHERE {where_clause}"
 
-            logging.info(f"正在查询已处理记录")
+            logging.info("正在查询已处理记录")
             cursor.execute(sql)
             rows = cursor.fetchall()
             cursor.close()

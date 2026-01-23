@@ -316,7 +316,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 sql.SQL(where_clause),
             )
 
-            logging.debug(f"执行计数查询")
+            logging.debug("执行计数查询")
 
             cursor.execute(query)
             result = cursor.fetchone()
@@ -715,7 +715,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 sql.Identifier(self.table_name),
             )
 
-            logging.info(f"正在查询所有记录")
+            logging.info("正在查询所有记录")
             cursor.execute(query)
             rows = cursor.fetchall()
 
@@ -758,7 +758,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 sql.SQL(where_clause),
             )
 
-            logging.info(f"正在查询已处理记录")
+            logging.info("正在查询已处理记录")
             cursor.execute(query)
             rows = cursor.fetchall()
 

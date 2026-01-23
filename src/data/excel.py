@@ -377,8 +377,6 @@ class ExcelTaskPool(BaseTaskPool):
         """
         # 检查输出路径是否为 CSV（可能输入输出格式不同）
         output_is_csv = self.output_path.suffix.lower() == ".csv"
-        file_type = "CSV" if (self._is_csv or output_is_csv) else "Excel"
-
         logging.info(f"正在尝试保存 DataFrame 到: {self.output_path}")
 
         try:

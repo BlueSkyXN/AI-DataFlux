@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Set
 
 from ...models.task import TaskMetadata
 

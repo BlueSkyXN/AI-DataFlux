@@ -1,7 +1,7 @@
 import pytest
 import aiohttp
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from src.core.clients.flux_client import FluxAIClient
 
 @pytest.mark.asyncio
