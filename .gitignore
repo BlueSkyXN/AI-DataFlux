@@ -178,8 +178,3 @@ CLAUDE.md
 COPILOT.md
 docs/PLAN.md
 AGENTS.md
-docs/architecture_diagram.md
-docs/csv_implementation_guide.md
-docs/postgresql_implementation_guide.md
-docs/new_datasources_overview.md
-docs/sqlite_implementation_guide.md

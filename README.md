@@ -4,24 +4,24 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 
 ## 核心特性
 
-- **多数据源支持**：同时支持MySQL和Excel作为数据源和结果存储
-- **可插拔数据引擎**：支持 Pandas 和 Polars 双引擎，可通过配置切换
-- **高性能读写器**：支持 Calamine (10x 读取) 和 xlsxwriter (3x 写入) 加速
-- **自动引擎选择**：`engine: auto` 自动选择最快的可用引擎和读写器
-- **智能模型调度**：基于加权负载均衡的多模型调度系统，支持自动故障切换
-- **高并发处理**：优化的异步架构实现高吞吐量任务处理
-- **连续任务流**：采用连续任务流模式，比传统批处理模式更高效
-- **API错误自适应**：全局暂停机制替代传统重试，更优雅地处理API限流
-- **分类重试机制**：按错误类型（API/内容/系统）独立配置重试次数
-- **灵活的配置系统**：通过YAML文件实现全方位配置
-- **字段值验证**：支持对返回结果的字段值进行枚举验证
-- **JSON Schema支持**：通过Schema约束AI输出格式，提高结果一致性
-- **读写锁优化**：使用读写锁分离，提高多线程下的并发性能
-- **Session连接池**：HTTP连接复用，减少连接建立开销
-- **向量化数据过滤**：DataFrame操作使用向量化方法，大数据集性能提升50-100x
-- **内存使用监控**：自动监控内存使用，在高内存使用时触发垃圾回收
-- **可视化进度**：实时显示处理进度和统计信息
-- **模块化架构**：清晰的 `src/` 模块化设计，易于扩展和维护
+- **全能数据源支持**：完整支持 **Excel (xlsx/xls)**、**CSV**、**MySQL**、**PostgreSQL** 和 **SQLite**。
+- **可插拔数据引擎**：支持 Pandas 和 Polars 双引擎，可通过配置切换。
+- **高性能读写器**：支持 Calamine (10x 读取) 和 xlsxwriter (3x 写入) 加速。
+- **自动引擎选择**：`engine: auto` 自动选择最快的可用引擎和读写器。
+- **智能模型调度**：基于加权负载均衡的多模型调度系统，支持自动故障切换。
+- **高并发处理**：优化的异步架构实现高吞吐量任务处理。
+- **连续任务流**：采用连续任务流模式，比传统批处理模式更高效。
+- **API错误自适应**：全局暂停机制替代传统重试，更优雅地处理API限流。
+- **分类重试机制**：按错误类型（API/内容/系统）独立配置重试次数。
+- **灵活的配置系统**：通过YAML文件实现全方位配置。
+- **字段值验证**：支持对返回结果的字段值进行枚举验证。
+- **JSON Schema支持**：通过Schema约束AI输出格式，提高结果一致性。
+- **读写锁优化**：使用读写锁分离，提高多线程下的并发性能。
+- **Session连接池**：HTTP连接复用，减少连接建立开销。
+- **向量化数据过滤**：DataFrame操作使用向量化方法，大数据集性能提升50-100x。
+- **内存使用监控**：自动监控内存使用，在高内存使用时触发垃圾回收。
+- **可视化进度**：实时显示处理进度和统计信息。
+- **组件化架构**：清晰的 `src/core/` 组件化设计（Content, State, Retry, Clients），易于扩展和维护。
 
 ## 快速开始
 
@@ -40,8 +40,10 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 # 基础依赖 (必需)
 pip install pyyaml aiohttp pandas openpyxl psutil pydantic fastapi uvicorn
 
-# MySQL数据源支持 (可选)
-pip install mysql-connector-python
+# 数据库支持 (按需选择)
+pip install mysql-connector-python  # MySQL
+pip install psycopg2-binary         # PostgreSQL
+# SQLite 为 Python 标准库，无需安装
 
 # 高性能引擎 (推荐，可显著提升性能)
 pip install numpy polars python-calamine fastexcel xlsxwriter
@@ -166,21 +168,21 @@ gateway:
 
 ```yaml
 datasource:
-  type: excel    # 数据源类型: mysql, excel
-  
+  type: excel    # 数据源类型: mysql, postgresql, sqlite, excel, csv
+
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
   # auto: 优先使用 polars (如已安装)，否则回退到 pandas
   engine: auto
-  
+
   # Excel 读取器: auto | openpyxl (默认) | calamine (高性能)
   # calamine: 基于 Rust 的读取器，速度提升 10-50x，需安装 fastexcel
   excel_reader: auto
-  
+
   # Excel 写入器: auto | openpyxl (默认) | xlsxwriter (高性能)
   # xlsxwriter: 写入速度提升 2-5x
   excel_writer: auto
-  
+
   require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:   # 并发配置
     batch_size: 100         # 批处理大小（也用作最大并发任务数）
@@ -192,7 +194,7 @@ datasource:
     api_error_trigger_window: 2.0   # 多少秒内的API错误才会触发暂停
     max_connections: 1000           # aiohttp的最大并发连接数
     max_connections_per_host: 0     # 对每个主机的最大并发连接数（0表示无限制）
-    max_workers: 5                  # MySQL 连接池大小（仅 MySQL 生效）
+    max_workers: 5                  # 数据库连接池大小
     retry_limits:                   # 按错误类型配置重试次数
       api_error: 3                  # API错误最多重试3次
       content_error: 1              # 内容错误最多重试1次
@@ -210,11 +212,33 @@ mysql:
   password: "your_password"
   database: "ai_tasks"
   table_name: "tasks"
+  pool_size: 10
+
+# PostgreSQL数据源配置
+postgresql:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "your_password"
+  database: "ai_tasks"
+  table_name: "tasks"
+  schema_name: "public"
+  pool_size: 10
+
+# SQLite数据源配置
+sqlite:
+  db_path: "./data/tasks.db"
+  table_name: "tasks"
 
 # Excel数据源配置
 excel:
   input_path: "./data/input.xlsx"
   output_path: "./data/output.xlsx"
+
+# CSV数据源配置
+csv:
+  input_path: "./data/input.csv"
+  output_path: "./data/output.csv"
 ```
 
 ### 字段配置
@@ -228,7 +252,7 @@ columns_to_extract:
 # 结果写回映射配置（别名 -> 实际字段名）
 columns_to_write:
   answer: "ai_answer"
-  category: "ai_category" 
+  category: "ai_category"
   confidence: "ai_confidence"
   sentiment: "ai_sentiment"
 ```
@@ -252,7 +276,7 @@ prompt:
     请分析以下数据并提供专业的回答:
 
     {record_json}
-    
+
     系统要求:
     1. 请详细分析问题和上下文，提供准确、有深度的回答
     2. 回答应专业、清晰、有条理，避免冗余内容
@@ -325,19 +349,26 @@ AI-DataFlux/
 │   ├── models/          # 数据模型
 │   │   ├── errors.py    # 错误类型定义
 │   │   └── task.py      # 任务元数据
-│   ├── core/            # 核心处理逻辑
-│   │   ├── processor.py # AI 处理引擎
+│   ├── core/            # 核心处理逻辑 (组件化架构)
+│   │   ├── clients/     # API 客户端
+│   │   ├── content/     # 内容处理与解析
+│   │   ├── retry/       # 重试决策策略
+│   │   ├── state/       # 任务状态管理
+│   │   ├── processor.py # 核心协调器 (UniversalAIProcessor)
 │   │   ├── scheduler.py # 分片任务调度器
-│   │   └── validator.py # JSON 字段验证器
+│   │   ├── validator.py # JSON 字段验证器
+│   │   └── token_estimator.py # Token 估算器
 │   ├── data/            # 数据源层
 │   │   ├── base.py      # 任务池抽象基类
-│   │   ├── excel.py     # Excel 任务池
+│   │   ├── excel.py     # Excel/CSV 任务池
 │   │   ├── mysql.py     # MySQL 任务池
+│   │   ├── postgresql.py # PostgreSQL 任务池
+│   │   ├── sqlite.py    # SQLite 任务池
 │   │   ├── factory.py   # 任务池工厂
 │   │   └── engines/     # 可插拔数据引擎
 │   │       ├── __init__.py     # 引擎工厂和库检测
 │   │       ├── base.py         # 引擎抽象基类
-│   │       ├── pandas_engine.py  # Pandas 实现 (支持 calamine/xlsxwriter)
+│   │       ├── pandas_engine.py  # Pandas 实现
 │   │       └── polars_engine.py  # Polars 高性能实现
 │   └── gateway/         # API 网关
 │       ├── app.py       # FastAPI 应用
@@ -348,8 +379,9 @@ AI-DataFlux/
 │       ├── resolver.py  # 自定义 DNS 解析器
 │       └── schemas.py   # Pydantic 模型
 ├── docs/
-│   └── DESIGN.md        # 详细设计文档
-├── COPILOT.md           # 开发追踪文档
+│   ├── DESIGN.md        # 详细设计文档
+│   ├── LOGIC_FRAMEWORK.md # 逻辑架构图
+│   └── architecture_diagram.md # 系统架构图
 └── README.md            # 项目文档
 ```
 
@@ -406,11 +438,16 @@ python gateway.py --config config.yaml
 
 4. **任务池** (`src/data/`)
    - `BaseTaskPool`: 任务池抽象基类
-   - `ExcelTaskPool`: Excel数据源实现，支持向量化过滤和定时保存
-   - `MySQLTaskPool`: MySQL数据源实现，支持连接池和事务
+   - `ExcelTaskPool`: Excel/CSV数据源实现，支持向量化过滤
+   - `MySQLTaskPool`: MySQL数据源实现，支持连接池
+   - `PostgreSQLTaskPool`: PostgreSQL数据源实现，支持批量更新
+   - `SQLiteTaskPool`: SQLite数据源实现，支持WAL模式
 
 5. **核心处理** (`src/core/`)
-   - `UniversalAIProcessor`: 主处理引擎，连续任务流模式
+   - `UniversalAIProcessor`: 主处理引擎（协调器）
+   - `ContentProcessor`: 提示词生成与响应解析
+   - `RetryStrategy`: 智能重试策略
+   - `TaskStateManager`: 任务状态与并发控制
    - `ShardedTaskManager`: 分片任务调度器
    - `JsonValidator`: AI 输出字段验证器
 
@@ -418,11 +455,11 @@ python gateway.py --config config.yaml
 
 对于Excel数据源，您的输入文件应至少包含在`columns_to_extract`中指定的列。程序会自动创建配置的写回字段列。
 
-## MySQL 数据源格式
+## 数据库数据源格式
 
-对于MySQL数据源，您的表应包含：
+对于 MySQL/PostgreSQL/SQLite 数据源，您的表应包含：
 
-- **id**: 主键列（必须）
+- **id**: 主键列（必须，支持整数或字符串）
 - **提取字段**: 在`columns_to_extract`中指定的列
 - **写回字段**: 在`columns_to_write`中映射的目标列
 
@@ -555,7 +592,7 @@ datasource:
 
 1. **找不到依赖模块**
    - 安装所需依赖: `pip install pyyaml aiohttp pandas openpyxl psutil pydantic fastapi uvicorn`
-   - MySQL支持: `pip install mysql-connector-python`
+   - 数据库支持: `pip install mysql-connector-python psycopg2-binary`
 
 2. **无法连接到API网关**
    - 确认gateway.py正在运行: `ps aux | grep gateway.py`
@@ -625,6 +662,6 @@ global:
 
 ---
 
-## AI-DataFlux v2
+## AI-DataFlux v2.3
 
 高效、智能的批量AI处理引擎。
