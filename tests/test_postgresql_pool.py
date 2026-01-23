@@ -5,7 +5,7 @@ PostgreSQL 数据源任务池单元测试
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 
 def create_mock_sql():

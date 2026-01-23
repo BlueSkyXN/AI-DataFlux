@@ -4,10 +4,7 @@ SQLite 数据源任务池单元测试
 
 import pytest
 import sqlite3
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
+from unittest.mock import MagicMock
 from src.data.sqlite import SQLiteTaskPool, SQLiteConnectionManager
 
 
@@ -117,13 +114,17 @@ class TestSQLiteTaskPool:
 
     def test_initialization_table_not_found(self, temp_db):
         """测试表不存在时抛出异常"""
-        with pytest.raises(ValueError, match="不存在"):
-            SQLiteTaskPool(
-                db_path=temp_db,
-                table_name="nonexistent_table",
-                columns_to_extract=["input_text"],
-                columns_to_write={"result": "output"},
-            )
+        try:
+            with pytest.raises(ValueError, match="不存在"):
+                SQLiteTaskPool(
+                    db_path=temp_db,
+                    table_name="nonexistent_table",
+                    columns_to_extract=["input_text"],
+                    columns_to_write={"result": "output"},
+                )
+        finally:
+            # 确保关闭连接，否则 Windows 下 fixture 清理文件会报 PermissionError
+            SQLiteConnectionManager.close_connection()
 
     def test_get_total_task_count(self, task_pool):
         """测试获取未处理任务数"""

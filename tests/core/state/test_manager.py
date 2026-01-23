@@ -1,5 +1,4 @@
 import time
-import threading
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 from src.core.state.manager import TaskStateManager

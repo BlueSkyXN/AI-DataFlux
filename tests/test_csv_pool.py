@@ -6,8 +6,6 @@ CSV 数据源复用 ExcelTaskPool，通过文件扩展名自动检测。
 """
 
 import pytest
-import tempfile
-from pathlib import Path
 
 from src.data.excel import ExcelTaskPool
 from src.data.factory import create_task_pool

@@ -17,6 +17,7 @@ class TestCLI:
             [sys.executable, "cli.py", "version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "AI-DataFlux" in result.stdout
@@ -28,6 +29,7 @@ class TestCLI:
             [sys.executable, "cli.py", "check"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "pandas" in result.stdout
@@ -39,6 +41,7 @@ class TestCLI:
             [sys.executable, "cli.py", "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "process" in result.stdout
@@ -53,6 +56,7 @@ class TestCLI:
             [sys.executable, "cli.py", "process", "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--config" in result.stdout
@@ -64,6 +68,7 @@ class TestCLI:
             [sys.executable, "cli.py", "gateway", "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--port" in result.stdout
@@ -82,6 +87,7 @@ class TestCLI:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "Config valid" in result.stdout or "[OK]" in result.stdout
@@ -102,6 +108,7 @@ class TestCLI:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode != 0
 
@@ -111,6 +118,7 @@ class TestCLI:
             [sys.executable, "cli.py"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         # 应该显示帮助信息
@@ -122,6 +130,7 @@ class TestCLI:
             [sys.executable, "cli.py", "token", "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--config" in result.stdout
