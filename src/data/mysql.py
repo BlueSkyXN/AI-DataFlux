@@ -93,7 +93,7 @@ import logging
 import threading
 from typing import Any
 
-from .base import BaseTaskPool
+from .base import BaseTaskPool, validate_sql_identifier
 
 # ==================== 条件导入 MySQL 连接器 ====================
 # mysql-connector-python 是可选依赖，不可用时提供占位符类
@@ -332,7 +332,14 @@ class MySQLTaskPool(BaseTaskPool):
 
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
 
-        self.table_name = table_name
+        # 验证表名和列名，防止 SQL 注入
+        self.table_name = validate_sql_identifier(table_name, "表名")
+        for col in columns_to_extract:
+            validate_sql_identifier(col, "输入列名")
+        for alias, col in columns_to_write.items():
+            validate_sql_identifier(alias, "输出别名")
+            validate_sql_identifier(col, "输出列名")
+
         self.select_columns = list(set(["id"] + self.columns_to_extract))
         self.write_aliases = list(self.columns_to_write.keys())
         self.write_colnames = list(self.columns_to_write.values())
