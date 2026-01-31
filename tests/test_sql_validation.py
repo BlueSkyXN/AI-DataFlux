@@ -34,16 +34,29 @@ class TestValidateSqlIdentifier:
         assert validate_sql_identifier("field字段", "列名") == "field字段"
 
     def test_valid_numbers_in_name(self):
-        """测试包含数字的名称"""
+        """测试包含数字的名称（数字不能在首位）"""
         assert validate_sql_identifier("table1", "表名") == "table1"
         assert validate_sql_identifier("v2_users", "表名") == "v2_users"
+        assert validate_sql_identifier("users_2024", "表名") == "users_2024"
+
+    def test_invalid_digit_prefix(self):
+        """测试以数字开头的名称（SQL 标准不允许）"""
+        invalid_names = [
+            "1table",
+            "2users",
+            "123_data",
+            "0_test",
+        ]
+        for name in invalid_names:
+            with pytest.raises(ValueError, match="包含非法字符"):
+                validate_sql_identifier(name, "表名")
 
     def test_invalid_empty_name(self):
         """测试空名称"""
-        with pytest.raises(ValueError, match="表名不能为空"):
+        with pytest.raises(ValueError, match="表名 不能为空"):
             validate_sql_identifier("", "表名")
 
-        with pytest.raises(ValueError, match="表名不能为空"):
+        with pytest.raises(ValueError, match="表名 不能为空"):
             validate_sql_identifier(None, "表名")
 
     def test_invalid_non_string(self):
