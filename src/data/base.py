@@ -47,9 +47,55 @@
 """
 
 import logging
+import re
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
+
+
+# ==================== SQL 标识符验证 ====================
+# 用于防止 SQL 注入攻击
+
+# 合法的 SQL 标识符模式：字母/下划线开头，后跟字母/数字/下划线
+# 支持中文等 Unicode 字符
+_SAFE_IDENTIFIER_PATTERN = re.compile(r"^[\w\u4e00-\u9fff][\w\u4e00-\u9fff]*$")
+
+
+def validate_sql_identifier(name: str, identifier_type: str = "identifier") -> str:
+    """
+    验证 SQL 标识符（表名、列名等）是否安全
+
+    防止 SQL 注入攻击，确保标识符只包含合法字符。
+    允许的字符：字母、数字、下划线、中文字符。
+
+    Args:
+        name: 待验证的标识符
+        identifier_type: 标识符类型描述（用于错误消息）
+
+    Returns:
+        str: 原始标识符（验证通过时）
+
+    Raises:
+        ValueError: 如果标识符包含非法字符或为空
+    """
+    if not name:
+        raise ValueError(f"{identifier_type}不能为空")
+
+    if not isinstance(name, str):
+        raise ValueError(f"{identifier_type}必须是字符串类型")
+
+    # 检查长度限制（大多数数据库限制为 64-128 字符）
+    if len(name) > 128:
+        raise ValueError(f"{identifier_type}长度不能超过 128 字符")
+
+    # 检查是否匹配安全模式
+    if not _SAFE_IDENTIFIER_PATTERN.match(name):
+        raise ValueError(
+            f"{identifier_type} '{name}' 包含非法字符。"
+            f"只允许字母、数字、下划线和中文字符"
+        )
+
+    return name
 
 
 class BaseTaskPool(ABC):

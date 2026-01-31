@@ -88,7 +88,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTaskPool
+from .base import BaseTaskPool, validate_sql_identifier
 
 
 class SQLiteConnectionManager:
@@ -260,7 +260,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
         Raises:
             FileNotFoundError: 数据库文件不存在
-            ValueError: 目标表不存在
+            ValueError: 目标表不存在或标识符无效
             sqlite3.Error: 数据库连接失败
         """
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
@@ -269,7 +269,14 @@ class SQLiteTaskPool(BaseTaskPool):
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite 数据库文件不存在: {self.db_path}")
 
-        self.table_name = table_name
+        # 验证表名和列名，防止 SQL 注入
+        self.table_name = validate_sql_identifier(table_name, "表名")
+        for col in columns_to_extract:
+            validate_sql_identifier(col, "输入列名")
+        for alias, col in columns_to_write.items():
+            validate_sql_identifier(alias, "输出别名")
+            validate_sql_identifier(col, "输出列名")
+
         self.select_columns = list(set(["id"] + self.columns_to_extract))
         self.write_aliases = list(self.columns_to_write.keys())
         self.write_colnames = list(self.columns_to_write.values())

@@ -53,12 +53,13 @@
     - engines: DataFrame 引擎抽象（Pandas/Polars）
 """
 
-from .base import BaseTaskPool
+from .base import BaseTaskPool, validate_sql_identifier
 from .factory import create_task_pool, MYSQL_AVAILABLE, EXCEL_ENABLED
 
 __all__ = [
     "BaseTaskPool",
     "create_task_pool",
+    "validate_sql_identifier",
     "MYSQL_AVAILABLE",
     "EXCEL_ENABLED",
 ]
