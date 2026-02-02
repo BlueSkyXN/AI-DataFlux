@@ -112,7 +112,7 @@ prompt:
 | 配置项 | 类型 | 必需 | 默认值 | 说明 |
 |--------|------|------|--------|------|
 | `enabled` | bool | 是 | - | 是否启用路由功能 |
-| `field` | string | 是 | - | 用于路由判断的字段名（可自定义，如 `category`、`type`、`department` 等） |
+| `field` | string | 是 | - | 用于路由判断的字段名（可自定义，如 `category`、`type`、`department` 等）<br>**注意**：无需手动添加到 `columns_to_extract`，系统会自动追加 |
 | `subtasks` | list | 是 | - | 路由规则列表 |
 
 ### subtask 配置项
@@ -130,6 +130,83 @@ prompt:
 - `validation` - 结果验证配置
 
 其他配置项（如 `datasource`、`models`、`channels` 等）**不支持**通过路由覆盖。
+
+### 路由字段处理
+
+**显式 vs 隐式路由字段**：
+
+系统根据用户配置自动判断路由字段的用途：
+
+#### 1. **隐式路由字段**（未在 `columns_to_extract` 中声明）
+
+**行为**：
+- ✅ 自动追加到 `columns_to_extract`（数据源加载时包含）
+- ✅ 自动排除出 Prompt JSON（不发送给 AI）
+- ✅ 仅用于内部路由决策
+
+**适用场景**：路由字段纯粹是元数据，不属于业务字段（如部门代码、数据类型标签）
+
+**示例**：
+```yaml
+# 配置
+columns_to_extract:
+  - "title"
+  - "content"
+  # 没有声明 "BGBU"
+
+routing:
+  enabled: true
+  field: "BGBU"  # 隐式路由字段
+  subtasks:
+    - match: "type_a"
+      profile: ".config/rules/type_a.yaml"
+
+# 实际行为
+# 1. 数据源加载: ["title", "content", "BGBU"]  ← 自动追加
+# 2. Prompt 生成: {"title": "...", "content": "..."}  ← BGBU 被排除
+# 3. 路由决策: BGBU = "type_a" → 使用 type_a.yaml 配置
+```
+
+#### 2. **显式路由字段**（在 `columns_to_extract` 中显式声明）
+
+**行为**：
+- ✅ 作为正常业务字段处理
+- ✅ 包含在 Prompt JSON 中（发送给 AI）
+- ✅ 同时用于路由决策
+
+**适用场景**：路由字段本身也是业务字段，需要参与 AI 分析（如产品类别、文章主题）
+
+**示例**：
+```yaml
+# 配置
+columns_to_extract:
+  - "title"
+  - "content"
+  - "category"  # 显式声明为业务字段
+
+routing:
+  enabled: true
+  field: "category"  # 显式路由字段
+  subtasks:
+    - match: "tech"
+      profile: ".config/rules/tech.yaml"
+
+# 实际行为
+# 1. 数据源加载: ["title", "content", "category"]
+# 2. Prompt 生成: {"title": "...", "content": "...", "category": "tech"}  ← category 包含
+# 3. 路由决策: category = "tech" → 使用 tech.yaml 配置
+```
+
+#### 对比总结
+
+| 特性 | 隐式路由字段 | 显式路由字段 |
+|------|-------------|-------------|
+| **配置** | 不在 `columns_to_extract` 中 | 在 `columns_to_extract` 中显式声明 |
+| **数据源加载** | ✅ 自动追加 | ✅ 正常提取 |
+| **Prompt JSON** | ❌ 排除（不发给 AI） | ✅ 包含（发给 AI） |
+| **路由决策** | ✅ 用于路由 | ✅ 用于路由 |
+| **适用场景** | 纯元数据字段 | 业务字段 + 路由 |
+| **Token 使用** | 节省（不发送） | 正常（发送） |
 
 ---
 
@@ -167,9 +244,9 @@ prompt:
 
 ## 使用示例
 
-### 示例：多类型数据分类
+### 示例 1：隐式路由字段（元数据路由）
 
-**场景**：数据文件包含多种类型的数据，每种类型有不同的分类标签体系。
+**场景**：数据文件包含多种部门的数据，部门代码 `BGBU` 仅用于路由，不需要 AI 分析。
 
 **目录结构**：
 ```
@@ -189,12 +266,12 @@ excel:
   input_path: "data/input.xlsx"
   output_path: "data/output.xlsx"
 
-# 提取字段（必须包含路由字段）
+# 提取字段（BGBU 未声明，系统自动追加但不发给 AI）
 columns_to_extract:
-  - "category"      # 路由字段
   - "title"
   - "description"
   - "content"
+  # 无需添加 "BGBU"
 
 # 写回字段
 columns_to_write:
@@ -203,7 +280,7 @@ columns_to_write:
 # 规则路由配置
 routing:
   enabled: true
-  field: "category"
+  field: "BGBU"  # 隐式路由字段（自动追加 + 排除出 Prompt）
   subtasks:
     - match: "type_a"
       profile: ".config/rules/type_a.yaml"
@@ -224,16 +301,100 @@ prompt:
   template: |
     # 任务
     根据内容，选择最匹配的分类标签ID。
-    
+
     # 默认分类列表
     | ID | 类名 |
     |----|------|
     | 1 | 通用分类1 |
     | 2 | 通用分类2 |
     | 0 | 以上都不是 |
-    
-    # 数据内容
+
+    # 数据内容（BGBU 不会出现在这里）
     {record_json}
+```
+
+**实际行为**：
+```
+数据源加载: ["title", "description", "content", "BGBU"]  ← 自动追加
+Prompt 生成: {"title": "...", "description": "...", "content": "..."}  ← BGBU 排除
+路由决策: BGBU = "type_a" → 使用 type_a.yaml 配置
+```
+
+---
+
+### 示例 2：显式路由字段（业务字段路由）
+
+**场景**：数据文件包含多个类别的文章，`category` 字段既用于路由，又需要 AI 参考。
+
+**目录结构**：
+```
+project/
+├── config.yaml
+└── .config/
+    └── rules/
+        ├── tech.yaml
+        ├── business.yaml
+        └── lifestyle.yaml
+```
+
+**config.yaml**：
+```yaml
+# 数据源配置
+excel:
+  input_path: "data/input.xlsx"
+  output_path: "data/output.xlsx"
+
+# 提取字段（category 显式声明，作为业务字段）
+columns_to_extract:
+  - "title"
+  - "content"
+  - "category"  # 显式声明，既用于路由又发给 AI
+
+# 写回字段
+columns_to_write:
+  result: "result"
+
+# 规则路由配置
+routing:
+  enabled: true
+  field: "category"  # 显式路由字段（包含在 Prompt 中）
+  subtasks:
+    - match: "tech"
+      profile: ".config/rules/tech.yaml"
+    - match: "business"
+      profile: ".config/rules/business.yaml"
+    - match: "lifestyle"
+      profile: ".config/rules/lifestyle.yaml"
+
+# 默认配置（未匹配时使用）
+validation:
+  enabled: true
+  field_rules:
+    result: ["0", "1", "2", "3"]
+
+prompt:
+  required_fields: ["result"]
+  use_json_schema: true
+  template: |
+    # 任务
+    根据文章类别和内容，选择最合适的分类标签ID。
+
+    # 默认分类列表
+    | ID | 类名 |
+    |----|------|
+    | 1 | 通用分类1 |
+    | 2 | 通用分类2 |
+    | 0 | 以上都不是 |
+
+    # 数据内容（category 会包含在这里）
+    {record_json}
+```
+
+**实际行为**：
+```
+数据源加载: ["title", "content", "category"]
+Prompt 生成: {"title": "...", "content": "...", "category": "tech"}  ← category 包含
+路由决策: category = "tech" → 使用 tech.yaml 配置
 ```
 
 **执行命令**：

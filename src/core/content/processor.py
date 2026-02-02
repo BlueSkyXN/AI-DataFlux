@@ -82,6 +82,7 @@ class ContentProcessor:
         required_fields: List[str],
         validator: JsonValidator,
         use_json_schema: bool = False,
+        exclude_fields: Optional[List[str]] = None,
     ):
         """
         初始化内容处理器
@@ -91,11 +92,13 @@ class ContentProcessor:
             required_fields: 必需字段列表，解析时会检查这些字段是否存在
             validator: JSON 验证器实例，用于验证字段枚举值
             use_json_schema: 是否使用 JSON Schema 模式
+            exclude_fields: 从 Prompt 中排除的字段列表（如路由字段），默认为 None
         """
         self.prompt_template = prompt_template
         self.required_fields = required_fields
         self.validator = validator
         self.use_json_schema = use_json_schema
+        self.exclude_fields = exclude_fields or []
 
     def create_prompt(self, record_data: Dict[str, Any]) -> str:
         """
@@ -120,11 +123,11 @@ class ContentProcessor:
             return ""
 
         try:
-            # 过滤内部字段（以 _ 开头的字段）和 None 值
+            # 过滤内部字段（以 _ 开头的字段）、None 值和排除字段
             filtered_data = {
                 k: v
                 for k, v in record_data.items()
-                if v is not None and not k.startswith("_")
+                if v is not None and not k.startswith("_") and k not in self.exclude_fields
             }
             # 使用 compact 格式序列化 (节省 token)
             record_json_str = json.dumps(
