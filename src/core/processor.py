@@ -174,32 +174,6 @@ class UniversalAIProcessor:
         self.validator = JsonValidator()
         self.validator.configure(self.config.get("validation"))
 
-        # 规则路由（仅 prompt/validation 覆盖）
-        self.routing_enabled = False
-        self.routing_field = None
-        self.routing_contexts: dict[str, dict[str, Any]] = {}
-        self._init_routing_contexts()
-
-        # 默认内容处理器（需要在路由初始化后创建，以确定 exclude_fields）
-        prompt_cfg = self.config.get("prompt", {})
-        # 只有隐式路由字段才排除（用户未显式声明的字段）
-        exclude_fields = []
-        if self.routing_enabled and self.routing_field and self.routing_field_is_implicit:
-            exclude_fields = [self.routing_field]
-
-        self.content_processor = ContentProcessor(
-            prompt_template=prompt_cfg.get("template", ""),
-            required_fields=prompt_cfg.get("required_fields", []),
-            validator=self.validator,
-            use_json_schema=prompt_cfg.get("use_json_schema", False),
-            exclude_fields=exclude_fields,
-        )
-        # 保存一些 content processor 需要但在 init 中没用到的参数（为了 API 调用）
-        self.ai_model = prompt_cfg.get("model", "auto")
-        self.ai_temperature = prompt_cfg.get("temperature", 0.7)
-        self.ai_system_prompt = prompt_cfg.get("system_prompt")
-        self.ai_use_json_schema = prompt_cfg.get("use_json_schema", False)
-
         # 状态管理器
         self.state_manager = TaskStateManager()
 
@@ -211,6 +185,7 @@ class UniversalAIProcessor:
         )
 
         # 4. 初始化数据源和分片管理器
+        # 注意：需要在路由初始化之前处理 columns_to_extract
         self.columns_to_extract = self.config.get("columns_to_extract", [])
         self.columns_to_write = self.config.get("columns_to_write", {})
 
@@ -220,11 +195,18 @@ class UniversalAIProcessor:
         # 处理路由字段
         # - 如果用户显式声明 → 作为业务字段，提供给 AI
         # - 如果用户未声明 → 自动追加但排除出 Prompt（仅用于路由决策）
+        self.routing_enabled = False
+        self.routing_field = None
         self.routing_field_is_implicit = False  # 是否为隐式路由字段
+        self.routing_contexts: dict[str, dict[str, Any]] = {}
+
         routing_cfg = self.config.get("routing", {})
         if routing_cfg.get("enabled", False):
             routing_field = routing_cfg.get("field")
             if routing_field:
+                self.routing_field = routing_field
+                self.routing_enabled = True
+
                 if routing_field not in self.columns_to_extract:
                     # 隐式路由字段：自动追加，标记为排除
                     logging.info(f"路由字段 '{routing_field}' 自动追加到 columns_to_extract（不发给 AI）")
@@ -234,6 +216,30 @@ class UniversalAIProcessor:
                     # 显式路由字段：用户明确声明，作为业务字段
                     logging.info(f"路由字段 '{routing_field}' 为显式声明的业务字段（会发给 AI）")
                     self.routing_field_is_implicit = False
+
+        # 提前读取 prompt 配置（_init_routing_contexts 需要这些属性）
+        prompt_cfg = self.config.get("prompt", {})
+        self.ai_model = prompt_cfg.get("model", "auto")
+        self.ai_temperature = prompt_cfg.get("temperature", 0.7)
+        self.ai_system_prompt = prompt_cfg.get("system_prompt")
+        self.ai_use_json_schema = prompt_cfg.get("use_json_schema", False)
+
+        # 初始化规则路由上下文（需要在 routing_field_is_implicit 和 ai_* 属性设置后调用）
+        self._init_routing_contexts()
+
+        # 创建默认内容处理器（需要在路由初始化后创建，以确定 exclude_fields）
+        # 只有隐式路由字段才排除（用户未显式声明的字段）
+        exclude_fields = []
+        if self.routing_enabled and self.routing_field and self.routing_field_is_implicit:
+            exclude_fields = [self.routing_field]
+
+        self.content_processor = ContentProcessor(
+            prompt_template=prompt_cfg.get("template", ""),
+            required_fields=prompt_cfg.get("required_fields", []),
+            validator=self.validator,
+            use_json_schema=self.ai_use_json_schema,
+            exclude_fields=exclude_fields,
+        )
 
         try:
             self.task_pool = create_task_pool(
@@ -262,17 +268,23 @@ class UniversalAIProcessor:
         logging.info("UniversalAIProcessor 初始化完成 (组件化版本)")
 
     def _init_routing_contexts(self) -> None:
-        routing_cfg = self.config.get("routing", {})
-        if not routing_cfg or not routing_cfg.get("enabled", False):
+        """
+        初始化规则路由上下文
+
+        加载所有子配置文件，为每个路由规则创建独立的 ContentProcessor 和 Validator。
+
+        前提条件:
+            - self.routing_enabled 已设置
+            - self.routing_field 已设置
+            - self.routing_field_is_implicit 已设置
+        """
+        if not self.routing_enabled:
             return
 
-        field = routing_cfg.get("field")
+        routing_cfg = self.config.get("routing", {})
         subtasks = routing_cfg.get("subtasks")
-        if not field or not isinstance(subtasks, list) or not subtasks:
-            raise ValueError("routing 配置缺少 field 或 subtasks")
-
-        self.routing_enabled = True
-        self.routing_field = field
+        if not isinstance(subtasks, list) or not subtasks:
+            raise ValueError("routing 配置缺少 subtasks")
 
         for idx, subtask in enumerate(subtasks):
             if "match" not in subtask or "profile" not in subtask:
