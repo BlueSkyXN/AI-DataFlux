@@ -53,9 +53,6 @@ def cmd_process(args):
     """
     执行数据处理子命令
     
-    加载配置文件，创建 UniversalAIProcessor 实例并运行数据处理流程。
-    支持 --validate 参数仅验证配置而不执行处理。
-    
     Args:
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
@@ -72,7 +69,6 @@ def cmd_process(args):
     from src.core import UniversalAIProcessor
 
     if args.validate:
-        # 仅验证配置文件的有效性
         from src.config import load_config
 
         config = load_config(args.config)
@@ -83,9 +79,14 @@ def cmd_process(args):
         print(
             f"  - Output columns: {list(config.get('columns_to_write', {}).values())}"
         )
+        # 显示路由配置信息（如果启用）
+        routing = config.get("routing", {})
+        if routing.get("enabled"):
+            subtasks = routing.get("subtasks", [])
+            print(f"  - Routing: enabled on '{routing.get('field', 'N/A')}' ({len(subtasks)} rules)")
         return 0
 
-    # 创建处理器并执行数据处理
+    # 创建处理器并执行（使用配置文件路径）
     processor = UniversalAIProcessor(args.config)
     processor.run()
     return 0
@@ -311,11 +312,11 @@ def main():
         int: 退出码，0 表示成功，1 表示失败
     
     子命令:
-        process - 运行数据处理
-        gateway - 启动 API 网关
-        version - 显示版本信息
-        check   - 检查库安装状态
-        token   - 估算 Token 用量
+        process     - 运行数据处理
+        gateway     - 启动 API 网关
+        version     - 显示版本信息
+        check       - 检查库安装状态
+        token       - 估算 Token 用量
     
     异常处理:
         - KeyboardInterrupt: 用户中断，返回 1
@@ -332,7 +333,11 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # ===== process 子命令：数据处理 =====
-    p_process = subparsers.add_parser("process", help="Run data processing")
+    p_process = subparsers.add_parser(
+        "process",
+        help="Run data processing",
+        description="Run data processing with config file (supports rule routing)"
+    )
     p_process.add_argument(
         "-c", "--config", default="config.yaml", help="Config file path"
     )

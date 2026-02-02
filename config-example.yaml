@@ -207,3 +207,44 @@ token_estimation:
   sample_size: -1         # -1=全量计算(忽略处理状态), >0=采样数量
   encoding: o200k_base    # 固定使用最新编码器
   # tiktoken_model: gpt-4o  # 可选: 当未指定 encoding 时用于选择编码器
+
+# ============================================================
+# 规则路由配置 (可选)
+# ============================================================
+# 
+# 规则路由允许在处理单个数据文件时，根据记录中某个字段的值
+# 动态选择不同的 prompt 和 validation 配置。
+#
+# 使用场景：
+#   - 单个数据文件包含多种类型的数据（如不同部门、产品线）
+#   - 不同类型需要不同的分类标签和提示词
+#   - 希望一次处理完成，无需拆分文件
+#
+# 配置说明：
+#   - routing.enabled: 是否启用路由功能
+#   - routing.field: 用于路由判断的字段名（必须包含在 columns_to_extract 中）
+#   - routing.subtasks: 路由规则列表
+#     - match: 字段值（精确匹配）
+#     - profile: 子配置文件路径（相对于主配置文件目录）
+#
+# 子配置文件限制：
+#   - 仅允许包含 prompt 和 validation 两个顶层键
+#   - 只需写差异字段，未写字段保留主配置的值
+#
+# 行为规则：
+#   - 路由字段不存在于记录中 → 使用主配置（默认配置）
+#   - 路由字段值无匹配规则 → 使用主配置（默认配置）
+#   - 匹配成功 → 子配置深度合并到主配置
+#
+# 详细文档：docs/ROUTING.md
+#
+# routing:
+#   enabled: true
+#   field: "category"                # 用于路由的字段名（示例：按 category 字段路由）
+#   subtasks:
+#     - match: "type_a"              # 当 category="type_a" 时
+#       profile: ".config/rules/type_a.yaml"
+#     - match: "type_b"              # 当 category="type_b" 时
+#       profile: ".config/rules/type_b.yaml"
+#     - match: "type_c"              # 当 category="type_c" 时
+#       profile: ".config/rules/type_c.yaml"

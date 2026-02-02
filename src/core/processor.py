@@ -60,11 +60,12 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 import aiohttp
 
-from ..config.settings import load_config, init_logging
+from ..config.settings import load_config, init_logging, merge_config, DEFAULT_CONFIG
 from ..models.errors import ErrorType
 from ..data import create_task_pool
 from .scheduler import ShardedTaskManager
@@ -120,10 +121,16 @@ class UniversalAIProcessor:
 
         Args:
             config_path: 配置文件路径
+
+        Raises:
+            ValueError: 配置加载失败
         """
         # 1. 加载配置
         try:
-            self.config = load_config(config_path)
+            config_path_obj = Path(config_path)
+            self.config_base_dir = config_path_obj.parent
+            user_config = load_config(config_path)
+            self.config = merge_config(DEFAULT_CONFIG, user_config)
         except Exception as e:
             raise ValueError(f"无法加载配置文件: {e}") from e
 
@@ -163,11 +170,11 @@ class UniversalAIProcessor:
         logging.info(f"API 端点: {self.flux_api_url}")
         self.client = FluxAIClient(self.flux_api_url)
 
-        # 验证器
+        # 默认验证器
         self.validator = JsonValidator()
         self.validator.configure(self.config.get("validation"))
 
-        # 内容处理器
+        # 默认内容处理器
         prompt_cfg = self.config.get("prompt", {})
         self.content_processor = ContentProcessor(
             prompt_template=prompt_cfg.get("template", ""),
@@ -178,6 +185,14 @@ class UniversalAIProcessor:
         # 保存一些 content processor 需要但在 init 中没用到的参数（为了 API 调用）
         self.ai_model = prompt_cfg.get("model", "auto")
         self.ai_temperature = prompt_cfg.get("temperature", 0.7)
+        self.ai_system_prompt = prompt_cfg.get("system_prompt")
+        self.ai_use_json_schema = prompt_cfg.get("use_json_schema", False)
+
+        # 规则路由（仅 prompt/validation 覆盖）
+        self.routing_enabled = False
+        self.routing_field = None
+        self.routing_contexts: dict[str, dict[str, Any]] = {}
+        self._init_routing_contexts()
 
         # 状态管理器
         self.state_manager = TaskStateManager()
@@ -198,7 +213,9 @@ class UniversalAIProcessor:
 
         try:
             self.task_pool = create_task_pool(
-                self.config, self.columns_to_extract, self.columns_to_write
+                self.config,
+                self.columns_to_extract,
+                self.columns_to_write,
             )
         except Exception as e:
             raise RuntimeError(f"无法初始化数据源任务池: {e}") from e
@@ -219,6 +236,107 @@ class UniversalAIProcessor:
             raise RuntimeError(f"无法初始化分片任务管理器: {e}") from e
 
         logging.info("UniversalAIProcessor 初始化完成 (组件化版本)")
+
+    def _init_routing_contexts(self) -> None:
+        routing_cfg = self.config.get("routing", {})
+        if not routing_cfg or not routing_cfg.get("enabled", False):
+            return
+
+        field = routing_cfg.get("field")
+        subtasks = routing_cfg.get("subtasks")
+        if not field or not isinstance(subtasks, list) or not subtasks:
+            raise ValueError("routing 配置缺少 field 或 subtasks")
+
+        self.routing_enabled = True
+        self.routing_field = field
+
+        for idx, subtask in enumerate(subtasks):
+            if "match" not in subtask or "profile" not in subtask:
+                raise ValueError(f"routing.subtasks[{idx}] 必须包含 match 和 profile")
+
+            match_value = str(subtask["match"])
+            profile_path = subtask["profile"]
+            profile_config = self._load_routing_profile(profile_path)
+
+            allowed_keys = {"prompt", "validation"}
+            unknown_keys = set(profile_config.keys()) - allowed_keys
+            if unknown_keys:
+                raise ValueError(
+                    f"routing 子配置仅允许 prompt/validation，发现非法键: {sorted(unknown_keys)}"
+                )
+
+            merged_config = merge_config(self.config, profile_config)
+            prompt_cfg = merged_config.get("prompt", {})
+            validator = JsonValidator()
+            validator.configure(merged_config.get("validation"))
+
+            processor = ContentProcessor(
+                prompt_template=prompt_cfg.get("template", ""),
+                required_fields=prompt_cfg.get("required_fields", []),
+                validator=validator,
+                use_json_schema=prompt_cfg.get("use_json_schema", False),
+            )
+
+            self.routing_contexts[match_value] = {
+                "content_processor": processor,
+                "validator": validator,
+                "model": prompt_cfg.get("model", self.ai_model),
+                "temperature": prompt_cfg.get("temperature", self.ai_temperature),
+                "system_prompt": prompt_cfg.get("system_prompt"),
+                "use_json_schema": prompt_cfg.get("use_json_schema", self.ai_use_json_schema),
+            }
+
+    def _load_routing_profile(self, profile_path: str) -> dict[str, Any]:
+        """
+        加载规则路由的子配置文件
+
+        支持绝对路径和相对路径（相对于主配置文件目录）
+
+        Args:
+            profile_path: 子配置文件路径
+
+        Returns:
+            子配置字典
+        """
+        profile_path_obj = Path(profile_path)
+        if not profile_path_obj.is_absolute():
+            profile_path_obj = self.config_base_dir / profile_path_obj
+
+        return load_config(profile_path_obj)
+
+    def _get_routing_context(self, row_data: Dict[str, Any]) -> dict[str, Any] | None:
+        """
+        根据记录数据获取路由上下文
+        
+        根据 routing.field 指定的字段值，查找匹配的路由上下文。
+        
+        行为说明:
+            - 路由未启用时返回 None（使用默认配置）
+            - 路由字段不存在于记录中时返回 None（使用默认配置）
+            - 路由字段值没有匹配规则时返回 None（使用默认配置）
+            - 匹配成功时返回对应的路由上下文
+        
+        Args:
+            row_data: 记录数据字典
+            
+        Returns:
+            匹配的路由上下文或 None
+        """
+        if not self.routing_enabled or not self.routing_field:
+            return None
+
+        # 字段不存在时使用默认配置
+        if self.routing_field not in row_data:
+            logging.debug(f"routing.field '{self.routing_field}' 不存在于记录中，使用默认配置")
+            return None
+
+        match_value = str(row_data.get(self.routing_field))
+        context = self.routing_contexts.get(match_value)
+        
+        if context is None:
+            logging.debug(f"routing 未找到匹配规则: {self.routing_field}='{match_value}'，使用默认配置")
+        
+        return context
 
     async def process_shard_async_continuous(self) -> None:
         """
@@ -488,8 +606,22 @@ class UniversalAIProcessor:
              "_details": "Connection timeout after 30s"}
         """
         try:
+            routing_context = self._get_routing_context(row_data)
+            if routing_context:
+                content_processor = routing_context["content_processor"]
+                model = routing_context["model"]
+                temperature = routing_context["temperature"]
+                system_prompt = routing_context["system_prompt"]
+                use_schema = routing_context["use_json_schema"]
+            else:
+                content_processor = self.content_processor
+                model = self.ai_model
+                temperature = self.ai_temperature
+                system_prompt = self.ai_system_prompt
+                use_schema = self.ai_use_json_schema
+
             # 1. 生成 Prompt
-            prompt = self.content_processor.create_prompt(row_data)
+            prompt = content_processor.create_prompt(row_data)
             if not prompt:
                 return {
                     "_error": "prompt_generation_failed",
@@ -498,22 +630,20 @@ class UniversalAIProcessor:
 
             # 2. 调用 API
             messages = []
-            if self.config.get("prompt", {}).get("system_prompt"):
-                messages.append({"role": "system", "content": self.config["prompt"]["system_prompt"]})
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-
-            use_schema = self.config.get("prompt", {}).get("use_json_schema", False)
 
             response_content = await self.client.call(
                 session,
                 messages,
-                model=self.ai_model,
-                temperature=self.ai_temperature,
+                model=model,
+                temperature=temperature,
                 use_json_schema=use_schema
             )
 
             # 3. 解析结果
-            result = self.content_processor.parse_response(response_content)
+            result = content_processor.parse_response(response_content)
             return result
 
         except (aiohttp.ClientResponseError, TimeoutError, aiohttp.ClientError) as e:

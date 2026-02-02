@@ -22,6 +22,7 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 - **内存使用监控**：自动监控内存使用，在高内存使用时触发垃圾回收。
 - **可视化进度**：实时显示处理进度和统计信息。
 - **组件化架构**：清晰的 `src/core/` 组件化设计（Content, State, Retry, Clients），易于扩展和维护。
+- **规则路由**：支持按记录字段值动态选择不同的 prompt 和 validation 配置，实现单文件多业务场景处理。
 
 ## 快速开始
 
@@ -97,6 +98,42 @@ python cli.py token --config config.yaml --mode out
 # 估算 Token 用量 (输入+输出)
 python cli.py token --config config.yaml --mode io
 ```
+
+### 规则路由
+
+规则路由允许在处理单个数据文件时，根据记录中某个字段的值动态选择不同的 `prompt` 和 `validation` 配置。
+
+#### 使用方式
+
+```bash
+# 在 config.yaml 中启用 routing 配置
+python cli.py process --config config.yaml
+
+# 验证配置（会显示路由规则数量）
+python cli.py process --config config.yaml --validate
+```
+
+#### 配置结构
+
+```yaml
+# 在主配置文件中添加 routing 节点
+routing:
+  enabled: true
+  field: "category"                # 用于路由的字段名（任意字段皆可）
+  subtasks:
+    - match: "type_a"              # 字段值
+      profile: ".config/rules/type_a.yaml"  # 差异配置文件
+    - match: "type_b"
+      profile: ".config/rules/type_b.yaml"
+```
+
+**核心功能**：
+- **按记录路由**：每条记录根据字段值使用不同配置
+- **差异配置**：子配置只需定义与主配置不同的 `prompt` 和 `validation`
+- **优雅降级**：字段不存在或无匹配规则时使用默认配置
+- **向后兼容**：不启用路由时配置文件格式完全兼容旧版本
+
+**详细文档**：[规则路由配置指南](./docs/ROUTING.md)
 
 ### Token 估算说明
 

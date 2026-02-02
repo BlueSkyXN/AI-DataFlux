@@ -103,7 +103,7 @@ def create_task_pool(
 ) -> BaseTaskPool:
     """
     根据配置创建数据源任务池
-    
+
     工厂函数，读取配置中的 datasource.type 字段，
     创建对应类型的任务池实例。
 
@@ -122,13 +122,14 @@ def create_task_pool(
     Raises:
         ValueError: 配置无效或数据源类型不支持
         ImportError: 所需依赖库不可用
-    
+
     配置读取:
         datasource.type: 数据源类型（必需）
         datasource.engine: DataFrame 引擎（auto/pandas/polars）
         datasource.excel_reader: Excel 读取器（auto/openpyxl/calamine）
         datasource.excel_writer: Excel 写入器（auto/openpyxl/xlsxwriter）
         datasource.require_all_input_fields: 是否要求所有输入字段非空
+
     """
     # 提取数据源配置
     datasource_config = config.get("datasource", {})
@@ -271,7 +272,7 @@ def _create_excel_pool(
 ) -> BaseTaskPool:
     """
     创建 Excel 任务池
-    
+
     Args:
         config: 完整配置（需包含 excel 配置节）
         columns_to_extract: 提取列
@@ -281,10 +282,10 @@ def _create_excel_pool(
         engine_type: DataFrame 引擎类型
         excel_reader: Excel 读取器类型
         excel_writer: Excel 写入器类型
-    
+
     Returns:
         ExcelTaskPool 实例
-    
+
     Raises:
         ImportError: pandas 或 openpyxl 未安装
         ValueError: 缺少必需配置字段
@@ -434,16 +435,16 @@ def _create_csv_pool(
 ) -> BaseTaskPool:
     """
     创建 CSV 任务池
-    
+
     CSV 数据源复用 ExcelTaskPool 实现，因为 BaseEngine 已内置 CSV 读写支持。
     这种设计的优点：
     - 复用向量化过滤、批量更新等优化
     - 自动支持 Pandas/Polars 引擎切换
     - 零额外代码实现
-    
+
     如需 CSV 特有功能（自定义分隔符、特殊编码、压缩支持），
     可以创建独立的 CSVTaskPool 类。
-    
+
     Args:
         config: 完整配置（需包含 csv 配置节）
         columns_to_extract: 提取列
@@ -451,7 +452,7 @@ def _create_csv_pool(
         require_all_input_fields: 是否要求所有输入字段非空
         concurrency_config: 并发配置
         engine_type: DataFrame 引擎类型
-    
+
     Returns:
         ExcelTaskPool 实例（处理 CSV 文件）
     """

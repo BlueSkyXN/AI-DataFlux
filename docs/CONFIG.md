@@ -7,6 +7,7 @@
 ## 目录
 
 - [配置文件结构](#配置文件结构)
+- [配置加载模式](#配置加载模式) ⭐ 新增
 - [全局配置 (global)](#全局配置-global)
 - [网关配置 (gateway)](#网关配置-gateway)
 - [数据源配置 (datasource)](#数据源配置-datasource)
@@ -16,6 +17,7 @@
 - [模型配置 (models)](#模型配置-models)
 - [通道配置 (channels)](#通道配置-channels)
 - [提示词配置 (prompt)](#提示词配置-prompt)
+- [规则路由 (routing)](#规则路由-routing)
 - [Token 估算配置 (token_estimation)](#token-估算配置-token_estimation)
 - [配置加载机制](#配置加载机制)
 
@@ -51,6 +53,136 @@ token_estimation:            # Token 估算配置
 2. 与 `DEFAULT_CONFIG` 深度合并
 3. 初始化日志系统
 4. 传递给各组件使用
+
+---
+
+## 配置加载模式
+
+系统使用单一配置文件模式，通过规则路由实现复杂场景的配置管理。
+
+### 标准模式
+
+**说明**：使用单一配置文件，包含所有配置项。
+
+```bash
+python cli.py process --config config.yaml
+```
+
+**配置结构**：
+```yaml
+# config.yaml（完整配置）
+global:
+  flux_api_url: http://127.0.0.1:8787
+  log:
+    level: info
+
+datasource:
+  type: excel
+  # ...
+
+models:
+  - name: gpt-4
+    # ... (多个模型实例)
+
+channels:
+  "1":
+    api_key: "xxx"
+    # ... (多个通道)
+
+excel:
+  input_path: "data.xlsx"
+  output_path: "result.xlsx"
+
+columns_to_extract: [...]
+columns_to_write: {...}
+prompt:
+  template: "..."
+```
+
+### 规则路由模式
+
+**适用场景**：单个数据文件包含多种数据类型（如不同部门、产品线），需要不同的 prompt 和 validation 配置。
+
+```bash
+python cli.py process --config config.yaml
+```
+
+**配置结构**：
+```
+project/
+├── config.yaml                 # 主配置（包含路由规则）
+└── .config/
+    └── rules/                  # 规则配置目录
+        ├── type_a.yaml         # 类型 A 的差异配置
+        ├── type_b.yaml         # 类型 B 的差异配置
+        └── ...
+```
+
+**主配置示例**：
+```yaml
+# config.yaml
+global:
+  flux_api_url: http://127.0.0.1:8787
+
+datasource:
+  type: excel
+
+excel:
+  input_path: "data.xlsx"
+  output_path: "result.xlsx"
+
+columns_to_extract:
+  - "category"      # 路由字段（字段名可自定义）
+  - "description"
+
+columns_to_write:
+  result: "result"
+
+# 规则路由配置
+routing:
+  enabled: true
+  field: "category"               # 用于路由的字段名（任意字段皆可）
+  subtasks:
+    - match: "type_a"
+      profile: ".config/rules/type_a.yaml"
+    - match: "type_b"
+      profile: ".config/rules/type_b.yaml"
+
+# 默认配置（路由未匹配时使用）
+validation:
+  enabled: true
+  field_rules:
+    result: ["0", "1", "2"]
+
+prompt:
+  required_fields: ["result"]
+  template: |
+    默认模板...
+    {record_json}
+```
+
+**子配置文件示例**（只允许 `prompt` 和 `validation`）：
+```yaml
+# .config/rules/type_a.yaml
+validation:
+  enabled: true
+  field_rules:
+    result: ["0", "1", "2", "3", "4", "5"]  # type_a 专属标签
+
+prompt:
+  template: |
+    type_a 专用模板...
+    {record_json}
+```
+
+**合并顺序**：`DEFAULT_CONFIG → 主配置 → 子配置（仅 prompt/validation）`
+
+**应用场景**：
+- 单文件多业务单元场景
+- 不同业务单元需要不同的分类标签
+- 不同业务单元需要不同的提示词
+
+**详细说明**：参见 [规则路由配置指南](./ROUTING.md)
 
 ---
 
@@ -966,6 +1098,61 @@ for attempt in range(3):  # 最多尝试 3 个模型
 
 **相关文件**：
 - `src/core/content/processor.py` - Prompt 渲染和解析
+
+---
+
+## 规则路由 (routing)
+
+> **仅适用于单文件处理模式**（`cli.py process --config ...`）。
+> 该路由**不拆分任务**，只在每条记录处理时按字段值切换 **prompt/validation**。
+> 未命中规则时**使用主配置**。
+
+### 配置结构
+
+```yaml
+routing:
+  enabled: true
+  field: "category"                # 用于路由的字段名（任意字段皆可）
+  subtasks:
+    - match: "type_a"
+      profile: ".config/rules/type_a.yaml"
+    - match: "type_b"
+      profile: ".config/rules/type_b.yaml"
+```
+
+### 子配置文件要求（profile）
+- **只能包含** `prompt` 与 `validation` 两个顶层键
+- 仅写差异字段，其他字段继承主配置
+
+示例：
+```yaml
+prompt:
+  template: "..."
+  required_fields: ["result"]
+validation:
+  enabled: true
+  field_rules:
+    result: ["0", "1", "2"]
+```
+
+### 行为规则
+- `routing.enabled: true` 才启用
+- `routing.field` 为分流字段（字段名可自定义，如 `category`、`type`、`department` 等）
+- `routing.subtasks` 为规则列表，**精确匹配** `match` 值
+- 每条规则必须包含 `match` 与 `profile`
+- **容错处理**：
+  - 路由字段不存在于记录中 → 使用主配置（不报错）
+  - 路由字段值没有匹配规则 → 使用主配置
+- profile 文件中出现其他键会直接报错
+
+### 示例配置
+
+在 `config-example.yaml` 中查看被注释的 routing 配置示例。子配置文件需放置在 `.config/rules/` 目录下。
+
+### 代码位置
+- 解析与缓存：`src/core/processor.py:_init_routing_contexts()`
+- 规则匹配：`src/core/processor.py:_get_routing_context()`
+- 应用逻辑：`src/core/processor.py:_process_one_record()`
 
 ---
 

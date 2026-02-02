@@ -633,6 +633,7 @@ class ExcelTaskPool(BaseTaskPool):
                 self.require_all_input_fields,
                 index_offset=min_idx,
             )
+
             logging.debug(
                 f"过滤索引范围 {min_idx}-{max_idx} 完成，找到 {len(unprocessed)} 个未处理索引"
             )

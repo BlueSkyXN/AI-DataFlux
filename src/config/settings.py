@@ -292,3 +292,4 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
             result[key] = value
 
     return result
+

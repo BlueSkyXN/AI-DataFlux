@@ -22,10 +22,18 @@
     init_logging(config.get("global", {}).get("log"))
 """
 
-from .settings import load_config, init_logging, DEFAULT_CONFIG
+from .settings import (
+    load_config,
+    init_logging,
+    DEFAULT_CONFIG,
+    merge_config,
+    get_nested,
+)
 
 __all__ = [
     "load_config",
     "init_logging",
     "DEFAULT_CONFIG",
+    "merge_config",
+    "get_nested",
 ]
