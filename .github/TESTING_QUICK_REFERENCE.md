@@ -54,10 +54,10 @@ pytest tests/ -n auto
 
 ## CI/CD 矩阵
 
-- **操作系统**: 9 种 (Ubuntu/Windows/macOS)
+- **操作系统**: 8 种 (Ubuntu/Windows/macOS，不含 Windows ARM)
 - **Python**: 3.10-3.14
-- **架构**: x64, ARM64
-- **并行 job**: 70+
+- **架构**: x64；ARM64 仅 Linux/macOS
+- **并行 job**: 38+
 
 ## 快速链接
 

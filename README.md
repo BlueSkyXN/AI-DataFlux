@@ -31,9 +31,9 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 - **Python 3.10+**（支持 3.10, 3.11, 3.12, 3.13, 3.14）
 
 > **平台兼容性说明**：
-> - Polars 和 fastexcel 在 **Windows ARM + Python 3.13** 上可能不兼容
-> - 程序会自动检测并安全回退到 Pandas 引擎
-> - 其他平台（Linux x64/ARM, Windows x64, macOS x64/ARM）完全支持
+> - **Windows ARM/ARM64 当前不支持，CI 不覆盖**
+> - 已支持平台：Linux x64/ARM64、Windows x64、macOS x64/ARM64
+> - 部分高性能库在个别平台可能不兼容，程序会自动检测并回退到 Pandas 引擎
 
 ### 安装依赖
 

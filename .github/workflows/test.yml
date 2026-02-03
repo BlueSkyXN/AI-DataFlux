@@ -93,9 +93,6 @@ jobs:
           - { os: windows-2025, python: '3.12' }
           - { os: windows-2025, python: '3.13' }
           - { os: windows-2025, python: '3.14' }
-          # Windows 11 ARM
-          - { os: windows-11-arm, python: '3.12', arch: 'arm64' }
-          - { os: windows-11-arm, python: '3.13', arch: 'arm64' }
           # macOS 15 Intel
           - { os: macos-15-intel, python: '3.10', arch: 'x64' }
           - { os: macos-15-intel, python: '3.11', arch: 'x64' }
@@ -131,7 +128,7 @@ jobs:
           python -m pip install pytest pytest-asyncio pytest-cov pytest-mock
 
       - name: Install optional dependencies
-        # Windows ARM64 等平台可能缺少某些依赖的预编译 wheel，允许失败
+        # 部分平台可能缺少某些依赖的预编译 wheel，允许失败
         continue-on-error: true
         run: |
           python -m pip install -r requirements-optional.txt

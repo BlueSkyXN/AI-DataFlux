@@ -273,10 +273,10 @@ def test_performance(self):
 - Python 语法检查
 
 #### 2. 单元测试矩阵 (unit-tests)
-- **操作系统**: Ubuntu 22.04/24.04/24.04-ARM, Windows 2022/2025/11-ARM, macOS 15/26
+- **操作系统**: Ubuntu 22.04/24.04/24.04-ARM, Windows 2022/2025, macOS 15/26
 - **Python 版本**: 3.10, 3.11, 3.12, 3.13, 3.14
-- **架构**: x64, ARM64
-- **总组合**: 70+ 并行测试 job
+- **架构**: x64；ARM64 仅 Linux/macOS（Windows ARM 当前不支持）
+- **总组合**: 38+ 并行测试 job
 
 #### 3. CLI 功能测试 (cli-test)
 - 测试所有 CLI 命令

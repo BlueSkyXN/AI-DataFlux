@@ -1,5 +1,5 @@
 # AI-DataFlux 完整依赖（包含可选高性能库）
-# 如果在某些平台（Windows ARM64）安装失败，可以尝试：
+# 如果在某些平台安装失败，可以尝试：
 #   pip install -r requirements-core.txt
 #   pip install -r requirements-optional.txt  # 允许部分失败
 

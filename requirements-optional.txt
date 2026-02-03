@@ -1,5 +1,5 @@
 # AI-DataFlux 可选依赖（允许安装失败）
-# 这些依赖在某些平台（如 Windows ARM64）可能缺少预编译 wheel
+# 这些依赖在某些平台可能缺少预编译 wheel
 
 # API 网关和异步支持
 aiohttp>=3.9.0
