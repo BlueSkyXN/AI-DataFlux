@@ -14,9 +14,9 @@
 
 使用示例:
     from src.core.state import TaskStateManager
-    
+
     manager = TaskStateManager()
-    
+
     # 尝试开始处理任务
     if manager.try_start_task(task_id):
         # 处理任务...

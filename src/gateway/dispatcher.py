@@ -15,7 +15,7 @@
 退避算法:
     失败次数 <= 3: 退避时间 = 失败次数 * 2 秒
     失败次数 > 3:  退避时间 = min(6 + 2^(失败次数-3), 60) 秒
-    
+
     示例：
     - 第 1 次失败: 2 秒
     - 第 2 次失败: 4 秒
@@ -32,10 +32,10 @@
 使用示例:
     # 创建调度器
     dispatcher = ModelDispatcher(models)
-    
+
     # 选择模型
     model = dispatcher.select_model(exclude_model_ids={"model-1"})
-    
+
     # 标记结果
     if success:
         dispatcher.mark_model_success(model.id)
@@ -54,7 +54,7 @@ from .limiter import RWLock
 class ModelConfig:
     """
     模型配置类
-    
+
     封装单个模型的所有配置信息，包括 API 端点、认证、超时、权重等。
     从配置字典和通道配置中提取并验证必要字段。
 
@@ -77,14 +77,14 @@ class ModelConfig:
     def __init__(self, model_dict: dict[str, Any], channels: dict[str, Any]):
         """
         从配置字典初始化模型配置
-        
+
         解析模型配置和关联的通道配置，验证必填字段，
         计算最终超时时间和 API URL。
 
         Args:
             model_dict: 模型配置字典，需包含 id、model、channel_id
             channels: 通道配置字典，键为 channel_id
-        
+
         Raises:
             ValueError: 缺少必填字段或通道不存在
         """
@@ -97,12 +97,12 @@ class ModelConfig:
         self.timeout = int(model_dict.get("timeout", 300))
         self.weight = int(model_dict.get("weight", 1))
         self.temperature = float(model_dict.get("temperature", 0.7))
-        
+
         # safe_rps: 用于限流，默认基于权重计算
         self.safe_rps = float(
             model_dict.get("safe_rps", max(0.5, min(self.weight / 10, 10)))
         )
-        
+
         # 功能支持标志
         self.supports_json_schema = bool(model_dict.get("supports_json_schema", False))
         self.supports_advanced_params = bool(
@@ -141,7 +141,7 @@ class ModelConfig:
     def to_dict(self) -> dict[str, Any]:
         """
         转换为字典格式
-        
+
         Returns:
             dict: 模型配置的字典表示
         """
@@ -161,7 +161,7 @@ class ModelConfig:
 class ModelDispatcher:
     """
     模型调度器
-    
+
     负责模型的选择和状态管理，实现：
     - 加权随机选择：根据模型权重进行随机选择
     - 故障退避：API 错误时暂时禁用模型
@@ -173,7 +173,7 @@ class ModelDispatcher:
         models (dict): 模型 ID 到 ModelConfig 的映射
         _model_state (dict): 模型运行时状态（失败次数、可用时间等）
         _availability_cache (dict): 可用性缓存
-    
+
     线程安全:
         使用读写锁 (RWLock) 保护共享状态，允许并发读取但独占写入。
     """
@@ -193,10 +193,10 @@ class ModelDispatcher:
         self._model_state: dict[str, dict[str, Any]] = {}
         for m in models:
             self._model_state[m.id] = {
-                "fail_count": 0,           # 连续失败次数
-                "next_available_ts": 0,    # 下次可用的时间戳
-                "success_count": 0,        # 总成功次数
-                "error_count": 0,          # 总错误次数
+                "fail_count": 0,  # 连续失败次数
+                "next_available_ts": 0,  # 下次可用的时间戳
+                "success_count": 0,  # 总成功次数
+                "error_count": 0,  # 总错误次数
                 "avg_response_time": 0.0,  # 平均响应时间（指数移动平均）
             }
 

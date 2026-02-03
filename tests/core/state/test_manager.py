@@ -14,6 +14,7 @@ import pytest
 from src.core.state.manager import TaskStateManager
 from src.models.task import TaskMetadata
 
+
 class TestTaskStateManager:
 
     @pytest.fixture
@@ -61,7 +62,7 @@ class TestTaskStateManager:
 
         # 修改创建时间来模拟过期（Hack）
         with manager._metadata_lock:
-             manager._task_metadata[old_id].created_at = time.time() - (25 * 3600)
+            manager._task_metadata[old_id].created_at = time.time() - (25 * 3600)
 
         # 新元数据
         new_id = "new_task"

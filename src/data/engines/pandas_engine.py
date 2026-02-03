@@ -29,16 +29,16 @@ Pandas 生态成熟稳定，兼容性最好，适合大多数使用场景。
 
 使用示例:
     from src.data.engines.pandas_engine import PandasEngine
-    
+
     # 标准配置
     engine = PandasEngine()
-    
+
     # 高性能配置
     engine = PandasEngine(
         excel_reader="calamine",
         excel_writer="xlsxwriter"
     )
-    
+
     # 使用引擎
     df = engine.read_excel("data.xlsx")
     engine.write_excel(df, "output.xlsx")
@@ -73,6 +73,7 @@ from .base import BaseEngine
 
 try:
     import numpy as np
+
     NUMPY_AVAILABLE = True
 except ImportError:
     np = None  # type: ignore
@@ -80,6 +81,7 @@ except ImportError:
 
 try:
     import fastexcel
+
     FASTEXCEL_AVAILABLE = True
 except ImportError:
     fastexcel = None  # type: ignore
@@ -87,6 +89,7 @@ except ImportError:
 
 try:
     import xlsxwriter as xlsxwriter_lib  # noqa: F401
+
     XLSXWRITER_AVAILABLE = True
 except ImportError:
     XLSXWRITER_AVAILABLE = False
@@ -95,16 +98,16 @@ except ImportError:
 class PandasEngine(BaseEngine):
     """
     基于 Pandas 的 DataFrame 引擎
-    
+
     这是项目的默认引擎实现，使用 pandas 进行数据处理。
     支持可选的高性能读写器以提升 Excel I/O 性能。
-    
+
     高性能读写器:
         - calamine (fastexcel): Rust 实现的 Excel 解析器
             - 读取速度提升 10x+
             - 仅支持读取，不支持写入
             - 需要安装: pip install fastexcel
-        
+
         - xlsxwriter: 高性能 Excel 写入器
             - 写入速度提升 2-5x
             - 格式支持更丰富
@@ -114,7 +117,7 @@ class PandasEngine(BaseEngine):
     Attributes:
         excel_reader (str): 当前使用的 Excel 读取器
         excel_writer (str): 当前使用的 Excel 写入器
-    
+
     性能建议:
         - 小文件（<10MB）: 标准配置即可
         - 中等文件（10-100MB）: 建议使用 calamine + xlsxwriter
@@ -128,7 +131,7 @@ class PandasEngine(BaseEngine):
     ):
         """
         初始化 Pandas 引擎
-        
+
         会自动检测高性能库的可用性，不可用时回退到标准配置。
 
         Args:

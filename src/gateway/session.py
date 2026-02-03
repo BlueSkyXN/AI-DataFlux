@@ -15,7 +15,7 @@ ClientSession 实例，避免重复创建连接，提高请求效率。
     - aiohttp 的 ClientSession 与 TCPConnector 绑定
     - TCPConnector 的 ssl 和代理设置在创建时固定
     - 不同的 ssl_verify 或 proxy 需要不同的 Connector
-    
+
     示例：
     - Session 1: (ssl_verify=True, proxy="")
     - Session 2: (ssl_verify=False, proxy="")
@@ -28,14 +28,14 @@ ClientSession 实例，避免重复创建连接，提高请求效率。
         max_connections_per_host=100,
         resolver=custom_resolver,
     )
-    
+
     # 获取或创建 Session
     session = await pool.get_or_create(ssl_verify=True, proxy="")
-    
+
     # 使用 Session 发送请求
     async with session.get(url) as resp:
         data = await resp.json()
-    
+
     # 关闭连接池
     await pool.close_all()
 
@@ -55,7 +55,7 @@ from aiohttp.abc import AbstractResolver
 class SessionPool:
     """
     HTTP Session 连接池
-    
+
     按 (ssl_verify, proxy) 组合管理 ClientSession 实例，
     相同配置的请求复用同一个 Session，提高连接效率。
 
@@ -63,7 +63,7 @@ class SessionPool:
         sessions (dict): Session 缓存字典，键为 (ssl_verify, proxy) 元组
         max_connections (int): 总最大连接数
         max_connections_per_host (int): 每个主机最大连接数
-    
+
     生命周期:
         1. 创建 SessionPool 实例
         2. 通过 get_or_create() 获取 Session
@@ -96,7 +96,7 @@ class SessionPool:
     ) -> aiohttp.ClientSession:
         """
         获取或创建 ClientSession
-        
+
         根据 ssl_verify 和 proxy 的组合查找或创建 Session。
         相同配置的请求会复用同一个 Session。
 
@@ -106,7 +106,7 @@ class SessionPool:
 
         Returns:
             aiohttp.ClientSession: 可用的 Session 实例
-        
+
         Raises:
             RuntimeError: 如果连接池已关闭
         """
@@ -124,7 +124,9 @@ class SessionPool:
                 limit_per_host=self.max_connections_per_host,
                 resolver=self._resolver,
                 use_dns_cache=self._resolver is None,  # 有自定义解析器时禁用缓存
-                ttl_dns_cache=10 if self._resolver is None else 0,  # 无自定义解析器时使用 10 秒 TTL
+                ttl_dns_cache=(
+                    10 if self._resolver is None else 0
+                ),  # 无自定义解析器时使用 10 秒 TTL
             )
 
             session = aiohttp.ClientSession(connector=connector)
@@ -139,7 +141,7 @@ class SessionPool:
     async def close_all(self) -> None:
         """
         关闭所有 Session
-        
+
         释放所有连接资源，包括 Session 和自定义解析器。
         关闭后不能再获取 Session。
         """
@@ -168,7 +170,7 @@ class SessionPool:
     def get_stats(self) -> dict[str, Any]:
         """
         获取连接池统计信息
-        
+
         Returns:
             dict: 包含以下信息：
                 - total_sessions: Session 总数

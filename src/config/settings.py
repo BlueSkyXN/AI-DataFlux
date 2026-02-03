@@ -43,10 +43,10 @@
 使用示例:
     # 加载配置
     config = load_config("config.yaml")
-    
+
     # 初始化日志
     init_logging(config.get("global", {}).get("log"))
-    
+
     # 获取嵌套配置
     batch_size = get_nested(config, "datasource", "concurrency", "batch_size", default=100)
 """
@@ -118,7 +118,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
 
     Raises:
         ConfigError: 配置文件不存在或格式错误
-        
+
     Note:
         此函数只负责加载和解析，不进行与默认配置的合并。
         合并操作由调用方根据需要执行。
@@ -157,13 +157,13 @@ def init_logging(log_config: dict[str, Any] | None = None) -> None:
             - output: 输出目标 (console/file)
             - file_path: 日志文件路径 (当 output=file 时)
             - date_format: 日期格式
-            
+
     日志级别映射:
         debug → DEBUG (10)
         info → INFO (20)
         warning → WARNING (30)
         error → ERROR (40)
-        
+
     第三方库日志:
         自动将 aiohttp, asyncio, urllib3, mysql.connector 等
         库的日志级别设为 WARNING，减少干扰。
@@ -276,7 +276,7 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
 
     Returns:
         合并后的配置 (新字典，不修改原始配置)
-        
+
     Example:
         >>> base = {"a": {"b": 1, "c": 2}}
         >>> override = {"a": {"b": 10}}
@@ -292,4 +292,3 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
             result[key] = value
 
     return result
-

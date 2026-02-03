@@ -35,23 +35,23 @@ Polars 是用 Rust 编写的 DataFrame 库，具有卓越的性能表现，
 
 使用示例:
     from src.data.engines.polars_engine import PolarsEngine
-    
+
     # 创建引擎
     engine = PolarsEngine(
         excel_reader="calamine",
         excel_writer="xlsxwriter"
     )
-    
+
     # 读取大文件（自动并行）
     df = engine.read_excel("big_data.xlsx")
-    
+
     # 向量化过滤（极快）
     indices = engine.filter_indices_vectorized(
         df,
         input_columns=["content"],
         output_columns=["result"]
     )
-    
+
     # 写入结果
     engine.write_excel(df, "output.xlsx")
 
@@ -88,6 +88,7 @@ from typing import Any, Iterator, Literal
 
 try:
     import polars as pl
+
     POLARS_AVAILABLE = True
 except ImportError:
     pl = None  # type: ignore
@@ -95,6 +96,7 @@ except ImportError:
 
 try:
     import fastexcel
+
     FASTEXCEL_AVAILABLE = True
 except ImportError:
     fastexcel = None  # type: ignore
@@ -102,6 +104,7 @@ except ImportError:
 
 try:
     import xlsxwriter as xlsxwriter_lib  # noqa: F401
+
     XLSXWRITER_AVAILABLE = True
 except ImportError:
     XLSXWRITER_AVAILABLE = False
@@ -112,16 +115,16 @@ from .base import BaseEngine
 class PolarsEngine(BaseEngine):
     """
     基于 Polars 的高性能 DataFrame 引擎
-    
+
     使用 Polars 进行 DataFrame 操作，FastExcel (Calamine) 读取 Excel，
     xlsxwriter 写入 Excel。专为大规模数据处理设计。
-    
+
     性能优势:
         - 多线程并行: 自动利用所有 CPU 核心
         - 惰性求值: 查询优化，减少中间计算
         - 内存效率: Arrow 列存储，压缩存储
         - 零拷贝: 数据共享，避免复制
-    
+
     索引处理:
         Polars 原生不支持类似 Pandas 的行索引。
         本实现使用 "_row_nr" 列模拟索引功能:

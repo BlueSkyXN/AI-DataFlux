@@ -13,17 +13,15 @@ from src.core.retry.strategy import RetryStrategy, RetryAction
 from src.models.errors import ErrorType
 from src.models.task import TaskMetadata
 
+
 class TestRetryStrategy:
 
     @pytest.fixture
     def strategy(self):
         return RetryStrategy(
-            max_retries={
-                ErrorType.API: 3,
-                ErrorType.CONTENT: 1
-            },
+            max_retries={ErrorType.API: 3, ErrorType.CONTENT: 1},
             api_pause_duration=1.0,
-            api_error_trigger_window=1.0
+            api_error_trigger_window=1.0,
         )
 
     @pytest.fixture
@@ -40,7 +38,7 @@ class TestRetryStrategy:
     def test_decide_retry_after_pause(self, strategy, metadata):
         # 第一次错误，触发暂停
         strategy.decide(ErrorType.API, metadata)
-        strategy.record_pause() # 更新暂停时间
+        strategy.record_pause()  # 更新暂停时间
 
         # 马上又来一个错误（在窗口内），应该直接重试不暂停
         metadata.increment_retry(ErrorType.API)
@@ -52,7 +50,7 @@ class TestRetryStrategy:
         # API 错误超过最大次数
         metadata.increment_retry(ErrorType.API)
         metadata.increment_retry(ErrorType.API)
-        metadata.increment_retry(ErrorType.API) # 3次
+        metadata.increment_retry(ErrorType.API)  # 3次
 
         decision = strategy.decide(ErrorType.API, metadata)
         assert decision.action == RetryAction.FAIL

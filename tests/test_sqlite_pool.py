@@ -26,9 +26,7 @@ class TestSQLiteConnectionManager:
         """测试未设置路径时获取连接抛出异常"""
         # 重置状态
         SQLiteConnectionManager._db_path = None
-        SQLiteConnectionManager._thread_local = type(
-            "local", (), {"conn": None}
-        )()
+        SQLiteConnectionManager._thread_local = type("local", (), {"conn": None})()
 
         with pytest.raises(ValueError, match="数据库路径未设置"):
             SQLiteConnectionManager.get_connection()
@@ -76,17 +74,19 @@ class TestSQLiteTaskPool:
             (4, "", "上下文4", None, None),  # 空输入
             (5, "输入文本5", "", None, None),  # 空上下文
         ]
-        cursor.executemany(
-            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)", test_data
-        )
+        cursor.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?, ?)", test_data)
         conn.commit()
         conn.close()
 
         yield db_path
 
         # 清理
-        if db_path.exists():
-            db_path.unlink()
+        # 确保连接彻底关闭，避免 Windows 文件锁
+        try:
+            SQLiteConnectionManager.close_connection()
+        finally:
+            if db_path.exists():
+                db_path.unlink()
 
     @pytest.fixture
     def task_pool(self, temp_db):
@@ -278,6 +278,13 @@ class TestSQLiteTaskPoolWithRequireAny:
         conn.close()
 
         yield db_path
+
+        # 清理，避免 Windows 下文件锁导致 tmp_path 回收失败
+        try:
+            SQLiteConnectionManager.close_connection()
+        finally:
+            if db_path.exists():
+                db_path.unlink()
 
     def test_require_any_input_field(self, temp_db):
         """测试 require_all_input_fields=False"""

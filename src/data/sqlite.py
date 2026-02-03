@@ -41,24 +41,24 @@ WAL 模式优化:
 
 使用示例:
     from src.data.sqlite import SQLiteTaskPool
-    
+
     pool = SQLiteTaskPool(
         db_path="data/tasks.db",
         table_name="tasks",
         columns_to_extract=["title", "content"],
         columns_to_write={"result": "ai_result"},
     )
-    
+
     # 初始化分片
     count = pool.initialize_shard(0, 1, 1000)
-    
+
     # 获取任务批次
     batch = pool.get_task_batch(100)
-    
+
     # 处理后更新结果
     results = {1: {"result": "分析结果"}}
     pool.update_task_results(results)
-    
+
     # 关闭连接
     pool.close()
 
@@ -94,28 +94,28 @@ from .base import BaseTaskPool
 class SQLiteConnectionManager:
     """
     SQLite 连接管理器（线程级单例）
-    
+
     SQLite 连接不能在线程间共享，因此每个线程需要独立的连接。
     使用 threading.local() 存储线程级连接，确保线程安全。
-    
+
     WAL 模式:
         Write-Ahead Logging 模式允许并发读取，提升性能:
         - 读操作不阻塞写操作
         - 多个读操作可以并发执行
         - 写操作仍然是串行的
-    
+
     Attributes:
         _thread_local: 线程本地存储，保存连接实例
         _db_path: 数据库文件路径（类级别，所有实例共享）
         _lock: 设置路径时的线程锁
-    
+
     使用模式:
         # 设置全局数据库路径（可选）
         SQLiteConnectionManager.set_db_path("data/tasks.db")
-        
+
         # 获取当前线程的连接
         conn = SQLiteConnectionManager.get_connection()
-        
+
         # 关闭当前线程的连接
         SQLiteConnectionManager.close_connection()
     """
@@ -128,9 +128,9 @@ class SQLiteConnectionManager:
     def set_db_path(cls, db_path: str) -> None:
         """
         设置数据库路径（全局配置）
-        
+
         在首次使用前设置，后续所有线程共享此路径。
-        
+
         Args:
             db_path: 数据库文件的路径
         """
@@ -141,7 +141,7 @@ class SQLiteConnectionManager:
     def get_connection(cls, db_path: str | None = None) -> sqlite3.Connection:
         """
         获取当前线程的数据库连接
-        
+
         如果当前线程没有连接，会创建新连接并配置 WAL 模式。
         连接存储在 threading.local() 中，每个线程独立。
 
@@ -155,7 +155,7 @@ class SQLiteConnectionManager:
 
         Raises:
             ValueError: 数据库路径未设置
-            
+
         连接配置:
             - check_same_thread=False: 允许跨线程（需谨慎使用）
             - timeout=30.0: 锁等待超时 30 秒
@@ -165,7 +165,9 @@ class SQLiteConnectionManager:
         # 确定使用的路径
         path_to_use = db_path or cls._db_path
         if not path_to_use:
-            raise ValueError("数据库路径未设置，请先调用 set_db_path() 或传入 db_path 参数")
+            raise ValueError(
+                "数据库路径未设置，请先调用 set_db_path() 或传入 db_path 参数"
+            )
 
         # 检查是否需要创建新连接
         if not hasattr(cls._thread_local, "conn") or cls._thread_local.conn is None:
@@ -192,14 +194,16 @@ class SQLiteConnectionManager:
     def close_connection(cls) -> None:
         """
         关闭当前线程的连接
-        
+
         在线程结束前调用，释放数据库资源。
         关闭后可以重新获取连接（会创建新连接）。
         """
         if hasattr(cls._thread_local, "conn") and cls._thread_local.conn:
             try:
                 cls._thread_local.conn.close()
-                logging.debug(f"线程 {threading.current_thread().name} 的 SQLite 连接已关闭")
+                logging.debug(
+                    f"线程 {threading.current_thread().name} 的 SQLite 连接已关闭"
+                )
             except Exception as e:
                 logging.warning(f"关闭 SQLite 连接时出错: {e}")
             finally:
@@ -209,10 +213,10 @@ class SQLiteConnectionManager:
 class SQLiteTaskPool(BaseTaskPool):
     """
     SQLite 数据源任务池
-    
+
     从 SQLite 数据库表读取未处理的任务数据，AI 处理后将结果写回。
     轻量级实现，适合本地开发和中小规模数据处理。
-    
+
     与 MySQL/PostgreSQL 版本的差异:
         1. 无连接池: 使用线程级单例连接
         2. 手动事务: 需要显式 BEGIN/COMMIT
@@ -224,7 +228,7 @@ class SQLiteTaskPool(BaseTaskPool):
         table_name (str): 目标数据表名
         select_columns (list[str]): 查询列（id + 输入列）
         write_colnames (list[str]): 写入列名列表
-    
+
     SQL 安全:
         - 表名和列名使用方括号转义
         - 值使用参数化查询（? 占位符）
@@ -240,7 +244,7 @@ class SQLiteTaskPool(BaseTaskPool):
     ):
         """
         初始化 SQLite 任务池
-        
+
         创建流程:
             1. 验证数据库文件存在
             2. 初始化基类
@@ -292,9 +296,9 @@ class SQLiteTaskPool(BaseTaskPool):
     def _validate_table(self) -> None:
         """
         验证目标表是否存在
-        
+
         查询 sqlite_master 系统表检查表是否存在。
-        
+
         Raises:
             ValueError: 表不存在
         """
@@ -316,7 +320,7 @@ class SQLiteTaskPool(BaseTaskPool):
     def get_total_task_count(self) -> int:
         """
         获取未处理任务总数
-        
+
         Returns:
             int: 未处理任务数量，查询失败返回 0
         """
@@ -342,9 +346,9 @@ class SQLiteTaskPool(BaseTaskPool):
     def get_processed_task_count(self) -> int:
         """
         获取已处理任务总数
-        
+
         统计所有输出列都非空的记录数。
-        
+
         Returns:
             int: 已处理任务数量，查询失败返回 0
         """
@@ -370,7 +374,7 @@ class SQLiteTaskPool(BaseTaskPool):
     def get_id_boundaries(self) -> tuple[int, int]:
         """
         获取表中 ID 的边界值
-        
+
         Returns:
             tuple[int, int]: (最小ID, 最大ID)
             表为空或查询失败返回 (0, 0)
@@ -379,7 +383,9 @@ class SQLiteTaskPool(BaseTaskPool):
             conn = SQLiteConnectionManager.get_connection()
             cursor = conn.cursor()
 
-            sql = f"SELECT MIN(id) as min_id, MAX(id) as max_id FROM [{self.table_name}]"
+            sql = (
+                f"SELECT MIN(id) as min_id, MAX(id) as max_id FROM [{self.table_name}]"
+            )
             cursor.execute(sql)
             result = cursor.fetchone()
             cursor.close()
@@ -460,10 +466,10 @@ class SQLiteTaskPool(BaseTaskPool):
     def get_task_batch(self, batch_size: int) -> list[tuple[Any, dict[str, Any]]]:
         """
         从内存任务队列获取一批任务
-        
+
         Args:
             batch_size: 请求的任务数量
-            
+
         Returns:
             list[tuple[Any, dict[str, Any]]]: 任务列表
         """
@@ -475,13 +481,13 @@ class SQLiteTaskPool(BaseTaskPool):
     def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
         """
         批量写回任务结果到数据库
-        
+
         使用显式事务（BEGIN TRANSACTION / COMMIT）确保原子性。
         所有更新要么全部成功，要么全部回滚。
 
         Args:
             results: 结果字典 {记录ID: {别名: 值, ...}}
-        
+
         事务管理:
             - BEGIN TRANSACTION: 开始事务
             - COMMIT: 全部成功时提交
@@ -529,7 +535,9 @@ class SQLiteTaskPool(BaseTaskPool):
 
                 # 提交事务
                 cursor.execute("COMMIT")
-                logging.info(f"SQLite 更新完成，成功: {success_count}, 失败: {error_count}")
+                logging.info(
+                    f"SQLite 更新完成，成功: {success_count}, 失败: {error_count}"
+                )
 
             except Exception as e:
                 cursor.execute("ROLLBACK")
@@ -576,7 +584,7 @@ class SQLiteTaskPool(BaseTaskPool):
     def close(self) -> None:
         """
         关闭当前线程的数据库连接
-        
+
         释放数据库资源。其他线程的连接不受影响。
         """
         logging.info("关闭 SQLite 连接...")
@@ -587,12 +595,12 @@ class SQLiteTaskPool(BaseTaskPool):
     def _build_unprocessed_condition(self) -> str:
         """
         构建未处理任务的 WHERE 条件
-        
+
         SQLite 使用方括号 [] 引用标识符（也支持双引号）。
-        
+
         Returns:
             str: WHERE 条件字符串
-        
+
         示例输出:
             "(([col1] IS NOT NULL AND [col1] <> '')) AND (([out1] IS NULL OR [out1] = ''))"
         """
@@ -618,9 +626,9 @@ class SQLiteTaskPool(BaseTaskPool):
     def _build_processed_condition(self) -> str:
         """
         构建已处理任务的 WHERE 条件
-        
+
         已处理定义: 所有输出列都非空。
-        
+
         Returns:
             str: WHERE 条件字符串
         """

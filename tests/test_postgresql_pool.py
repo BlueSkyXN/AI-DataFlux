@@ -253,9 +253,7 @@ class TestPostgreSQLTaskPoolMocked:
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.extras")
     @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
-    def test_update_task_results_batch(
-        self, mock_sql, mock_extras, mock_pool_manager
-    ):
+    def test_update_task_results_batch(self, mock_sql, mock_extras, mock_pool_manager):
         """测试批量更新 - 验证方法被正确调用"""
         from src.data.postgresql import PostgreSQLTaskPool
 
@@ -344,9 +342,7 @@ class TestPostgreSQLTaskPoolConditionBuilding:
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.PostgreSQLConnectionPoolManager")
     @patch("src.data.postgresql.extras")
-    def test_build_unprocessed_condition_all_required(
-        self, mock_extras, mock_manager
-    ):
+    def test_build_unprocessed_condition_all_required(self, mock_extras, mock_manager):
         """测试 require_all_input_fields=True 的条件构建"""
         from src.data.postgresql import PostgreSQLTaskPool
 
@@ -370,14 +366,12 @@ class TestPostgreSQLTaskPoolConditionBuilding:
         # 输入列使用 AND
         assert '"col1" IS NOT NULL' in condition
         assert '"col2" IS NOT NULL' in condition
-        assert ' AND ' in condition
+        assert " AND " in condition
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.PostgreSQLConnectionPoolManager")
     @patch("src.data.postgresql.extras")
-    def test_build_unprocessed_condition_any_required(
-        self, mock_extras, mock_manager
-    ):
+    def test_build_unprocessed_condition_any_required(self, mock_extras, mock_manager):
         """测试 require_all_input_fields=False 的条件构建"""
         from src.data.postgresql import PostgreSQLTaskPool
 

@@ -13,7 +13,7 @@ AI 客户端抽象基类
     1. 继承 BaseAIClient
     2. 实现 call 方法
     3. 在 __init__.py 中导出新类
-    
+
     class NewAIClient(BaseAIClient):
         async def call(self, session, messages, model, **kwargs) -> str:
             # 实现具体的 API 调用逻辑
@@ -29,10 +29,10 @@ import aiohttp
 class BaseAIClient(ABC):
     """
     AI 客户端抽象基类
-    
+
     定义与 AI 服务交互的标准接口。所有具体客户端实现
     必须继承此类并实现 call 方法。
-    
+
     接口契约:
         - call 方法是异步的，使用 aiohttp 进行 HTTP 通信
         - 返回值是 AI 响应的原始文本内容
@@ -61,7 +61,7 @@ class BaseAIClient(ABC):
 
         Returns:
             API 响应的内容字符串 (通常是 AI 生成的文本)
-            
+
         Raises:
             aiohttp.ClientResponseError: API 返回非 200 状态码
             aiohttp.ClientError: 网络连接错误

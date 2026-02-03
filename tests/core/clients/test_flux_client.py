@@ -15,6 +15,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from src.core.clients.flux_client import FluxAIClient
 
+
 @pytest.mark.asyncio
 class TestFluxAIClient:
 
@@ -31,7 +32,9 @@ class TestFluxAIClient:
         # 模拟成功响应
         mock_response = AsyncMock()
         mock_response.status = 200
-        mock_response.text.return_value = '{"choices": [{"message": {"content": "Hello"}}]}'
+        mock_response.text.return_value = (
+            '{"choices": [{"message": {"content": "Hello"}}]}'
+        )
 
         # 配置 session.post 上下文管理器
         mock_session.post.return_value.__aenter__.return_value = mock_response

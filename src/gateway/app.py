@@ -20,10 +20,10 @@ API 路由:
 使用方式:
     # 直接运行
     python -m src.gateway.app --config config.yaml --port 8787
-    
+
     # 通过 CLI
     python cli.py gateway --config config.yaml --port 8787
-    
+
     # 程序化使用
     from src.gateway.app import create_app, run_server
     app = create_app("config.yaml")
@@ -32,7 +32,7 @@ API 路由:
 架构说明:
     本模块使用全局变量 _service 存储 FluxApiService 实例，
     通过 lifespan 上下文管理器确保服务的正确启动和关闭。
-    
+
     请求处理流程:
     1. FastAPI 接收 HTTP 请求
     2. 路由处理函数调用 get_service() 获取服务实例
@@ -71,10 +71,10 @@ _service: FluxApiService | None = None
 def get_service() -> FluxApiService:
     """
     获取全局 FluxApiService 实例
-    
+
     Returns:
         FluxApiService: 已初始化的服务实例
-    
+
     Raises:
         RuntimeError: 如果服务尚未初始化
     """
@@ -87,16 +87,16 @@ def get_service() -> FluxApiService:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     应用生命周期管理器
-    
+
     使用 FastAPI 的 lifespan 机制管理服务的启动和关闭，
     确保资源的正确初始化和清理。
-    
+
     Args:
         app: FastAPI 应用实例
-    
+
     Yields:
         None: 控制权交给应用运行
-    
+
     生命周期:
         1. 启动阶段: 调用 _service.startup() 初始化连接池等资源
         2. 运行阶段: yield，应用正常处理请求
@@ -120,7 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(config_path: str) -> FastAPI:
     """
     创建并配置 FastAPI 应用实例
-    
+
     初始化 FluxApiService 服务，创建 FastAPI 应用，注册所有路由。
     这是创建网关应用的主要工厂函数。
 
@@ -129,7 +129,7 @@ def create_app(config_path: str) -> FastAPI:
 
     Returns:
         FastAPI: 配置完成的 FastAPI 应用实例
-    
+
     配置加载:
         配置文件应包含 models、channels、gateway 等配置节，
         详见 config-example.yaml
@@ -156,7 +156,7 @@ def create_app(config_path: str) -> FastAPI:
 def _register_routes(app: FastAPI) -> None:
     """
     注册所有 API 路由和中间件
-    
+
     包括:
     - HTTP 中间件：服务可用性检查
     - POST /v1/chat/completions：聊天补全
@@ -164,7 +164,7 @@ def _register_routes(app: FastAPI) -> None:
     - GET /admin/models：管理接口
     - GET /admin/health：健康检查
     - GET /：根路径
-    
+
     Args:
         app: FastAPI 应用实例
     """
@@ -173,7 +173,7 @@ def _register_routes(app: FastAPI) -> None:
     async def check_service_availability(request: Request, call_next):
         """
         HTTP 中间件：检查服务是否已初始化
-        
+
         在所有请求处理前检查 _service 是否可用，
         避免在服务未就绪时处理请求。
         """
@@ -190,20 +190,20 @@ def _register_routes(app: FastAPI) -> None:
     ) -> Union[ChatCompletionResponse, StreamingResponse]:
         """
         聊天补全端点（OpenAI 兼容，支持流式和非流式）
-        
+
         处理流程:
             1. 解析请求中的模型名称
             2. 选择可用模型（指定模型或加权随机）
             3. 调用上游 API
             4. 返回响应（JSON 或 SSE 流）
-        
+
         Args:
             request: 聊天补全请求，包含 model、messages 等字段
 
         Returns:
             - 非流式 (stream=False): ChatCompletionResponse JSON
             - 流式 (stream=True): StreamingResponse (text/event-stream)
-        
+
         Raises:
             HTTPException: 500 - 所有模型调用失败
         """
@@ -234,13 +234,13 @@ def _register_routes(app: FastAPI) -> None:
     async def list_models():
         """
         列出可用模型（OpenAI 兼容格式）
-        
+
         返回当前配置中权重大于 0 的所有模型，
         格式与 OpenAI /v1/models 接口兼容。
-        
+
         去重逻辑:
             同一个 exposed_id (name > model > id) 只返回一次
-        
+
         Returns:
             dict: {"object": "list", "data": [模型列表]}
         """
@@ -275,13 +275,13 @@ def _register_routes(app: FastAPI) -> None:
     async def admin_models() -> ModelsResponse:
         """
         管理接口：获取所有模型的详细信息
-        
+
         返回每个模型的配置和运行时统计，包括：
         - 模型 ID、名称、权重
         - 成功率和平均响应时间
         - 当前可用状态
         - 所属通道
-        
+
         Returns:
             ModelsResponse: 模型详情列表
         """
@@ -310,14 +310,14 @@ def _register_routes(app: FastAPI) -> None:
     async def health_check() -> HealthResponse:
         """
         健康检查端点
-        
+
         返回服务健康状态，用于负载均衡器和监控系统。
-        
+
         状态定义:
             - healthy: 所有模型可用
             - degraded: 部分模型可用
             - unhealthy: 无可用模型
-        
+
         Returns:
             HealthResponse: 健康状态信息
         """
@@ -335,9 +335,9 @@ def _register_routes(app: FastAPI) -> None:
     async def root():
         """
         根路径端点
-        
+
         返回网关基本信息，可用于快速验证服务是否运行。
-        
+
         Returns:
             dict: 网关名称、版本和状态
         """
@@ -357,7 +357,7 @@ def run_server(
 ) -> None:
     """
     启动 uvicorn 服务器运行网关应用
-    
+
     这是一个便捷函数，创建应用并使用 uvicorn 运行。
     适用于生产环境和开发环境。
 
@@ -367,7 +367,7 @@ def run_server(
         port: 监听端口（默认 8787）
         workers: 工作进程数（默认 1，生产环境可增加）
         reload: 是否启用热重载（开发模式使用）
-    
+
     注意:
         - workers > 1 时不能使用 reload=True
         - 生产环境建议使用 gunicorn + uvicorn workers
@@ -388,10 +388,10 @@ def run_server(
 def main() -> None:
     """
     命令行入口函数
-    
+
     解析命令行参数并启动网关服务器。
     当直接运行本模块时调用 (python -m src.gateway.app)。
-    
+
     支持的参数:
         --config, -c: 配置文件路径
         --host: 监听地址

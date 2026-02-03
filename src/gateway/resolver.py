@@ -16,12 +16,12 @@
     - 第 2 次解析: 返回 [ip2, ip3, ip1]
     - 第 3 次解析: 返回 [ip3, ip1, ip2]
     - 第 4 次解析: 返回 [ip1, ip2, ip3]（循环）
-    
+
     aiohttp 会按返回顺序尝试连接，第一个失败时自动尝试下一个。
 
 配置方式:
     在 channels 中配置 ip_pool:
-    
+
     channels:
       "1":
         base_url: "https://api.example.com"
@@ -33,10 +33,10 @@
 使用示例:
     # 从通道配置构建 IP 池
     ip_pools = build_ip_pools_from_channels(channels)
-    
+
     # 创建解析器
     resolver = RoundRobinResolver(ip_pools)
-    
+
     # 创建使用自定义解析器的连接器
     connector = aiohttp.TCPConnector(resolver=resolver)
     session = aiohttp.ClientSession(connector=connector)
@@ -61,7 +61,7 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 class RoundRobinResolver(AbstractResolver):
     """
     轮询 DNS 解析器
-    
+
     对配置了 IP 池的域名进行轮询解析，实现多 IP 均匀使用。
     未配置 IP 池的域名使用系统默认解析。
 
@@ -75,7 +75,7 @@ class RoundRobinResolver(AbstractResolver):
         _ip_pools (dict): 域名到 IP 列表的映射
         _default_port (int): 默认端口号（通常为 443）
         _counters (dict): 域名到轮询计数器的映射
-    
+
     Example:
         ip_pools = {
             "api.example.com": ["1.2.3.4", "1.2.3.5", "1.2.3.6"],
@@ -116,9 +116,9 @@ class RoundRobinResolver(AbstractResolver):
     def _get_default_resolver(self) -> aiohttp.DefaultResolver:
         """
         获取或创建默认解析器
-        
+
         延迟初始化，确保在事件循环中创建。
-        
+
         Returns:
             aiohttp.DefaultResolver: 默认 DNS 解析器
         """
@@ -134,7 +134,7 @@ class RoundRobinResolver(AbstractResolver):
     ) -> list[ResolveResult]:
         """
         解析域名
-        
+
         对配置了 IP 池的域名返回轮询排序的 IP 列表，
         未配置的域名使用默认解析器。
 
@@ -145,7 +145,7 @@ class RoundRobinResolver(AbstractResolver):
 
         Returns:
             list[ResolveResult]: 按轮询顺序排列的解析结果列表
-        
+
         轮询逻辑:
             IP 列表 [a, b, c]，计数器从 0 开始:
             - 计数器=0: 返回 [a, b, c]
@@ -216,7 +216,7 @@ class RoundRobinResolver(AbstractResolver):
     async def close(self) -> None:
         """
         关闭解析器
-        
+
         清理默认解析器资源。
         """
         if self._default_resolver is not None:
@@ -225,7 +225,7 @@ class RoundRobinResolver(AbstractResolver):
     def get_stats(self) -> dict[str, Any]:
         """
         获取解析器统计信息
-        
+
         Returns:
             dict: 包含配置的域名列表和当前计数器状态
         """
@@ -239,7 +239,7 @@ class RoundRobinResolver(AbstractResolver):
 def build_ip_pools_from_channels(channels: dict[str, Any]) -> dict[str, list[str]]:
     """
     从通道配置构建 IP 池映射
-    
+
     解析每个通道的 base_url 和 ip_pool 配置，
     生成域名到 IP 列表的映射字典。
 
@@ -248,7 +248,7 @@ def build_ip_pools_from_channels(channels: dict[str, Any]) -> dict[str, list[str
 
     Returns:
         dict: 域名到 IP 列表的映射
-    
+
     配置示例:
         channels = {
             "1": {
@@ -257,7 +257,7 @@ def build_ip_pools_from_channels(channels: dict[str, Any]) -> dict[str, list[str
             }
         }
         # 返回: {"api.example.com": ["1.2.3.4", "1.2.3.5"]}
-    
+
     注意:
         - 配置了 proxy 的通道会跳过 ip_pool（代理模式下无效）
         - 无效的 IP 地址会被过滤并记录警告
@@ -323,10 +323,10 @@ def build_ip_pools_from_channels(channels: dict[str, Any]) -> dict[str, list[str
 def _is_valid_ip(ip_str: str) -> bool:
     """
     检查字符串是否为有效的 IPv4 或 IPv6 地址
-    
+
     Args:
         ip_str: 要检查的字符串
-    
+
     Returns:
         bool: 如果是有效的 IP 地址返回 True
     """

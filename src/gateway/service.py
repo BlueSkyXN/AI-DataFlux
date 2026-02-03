@@ -30,9 +30,9 @@ Flux API 核心服务模块
 使用示例:
     service = FluxApiService("config.yaml")
     await service.startup()  # 初始化异步资源
-    
+
     response = await service.chat_completion(request)
-    
+
     await service.shutdown()  # 清理资源
 
 依赖模块:
@@ -69,10 +69,10 @@ from ..models.errors import ErrorType
 class FluxApiService:
     """
     Flux API 核心服务类
-    
+
     OpenAI API 兼容的服务实现，提供多模型管理、自动故障切换、
     令牌桶限流、连接池复用等企业级功能。
-    
+
     Attributes:
         config_path (str): 配置文件路径
         config (dict): 加载的配置数据
@@ -81,7 +81,7 @@ class FluxApiService:
         rate_limiter (ModelRateLimiter): 限流器
         session_pool (SessionPool): HTTP 连接池
         start_time (float): 服务启动时间戳
-    
+
     生命周期:
         1. __init__: 加载配置，初始化同步组件
         2. startup(): 初始化异步组件（连接池）
@@ -92,13 +92,13 @@ class FluxApiService:
     def __init__(self, config_path: str):
         """
         初始化服务（同步部分）
-        
+
         加载配置文件，初始化模型配置、调度器和限流器。
         异步资源（连接池）在 startup() 中初始化。
 
         Args:
             config_path: 配置文件路径（YAML 格式）
-        
+
         Raises:
             ValueError: 配置文件无效或无可用模型
         """
@@ -109,9 +109,9 @@ class FluxApiService:
         self._load_config()
 
         # 初始化同步组件
-        self._init_models()       # 模型配置
-        self._init_dispatcher()   # 调度器
-        self._init_rate_limiter() # 限流器
+        self._init_models()  # 模型配置
+        self._init_dispatcher()  # 调度器
+        self._init_rate_limiter()  # 限流器
 
         # Session 池在 startup() 中异步初始化
         self.session_pool: SessionPool | None = None
@@ -448,7 +448,11 @@ class FluxApiService:
         payload: dict[str, Any] = {
             "model": model.model,
             "messages": [m.model_dump() for m in request.messages],
-            "temperature": request.temperature if request.temperature is not None else model.temperature,
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else model.temperature
+            ),
             "stream": request.stream or False,
         }
 

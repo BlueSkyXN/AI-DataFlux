@@ -42,7 +42,7 @@ PostgreSQL 数据源任务池实现模块
 
 使用示例:
     from src.data.postgresql import PostgreSQLTaskPool
-    
+
     pool = PostgreSQLTaskPool(
         connection_config={
             "host": "localhost",
@@ -93,14 +93,17 @@ except ImportError:
     # 定义占位符类，避免类型检查和代码引用报错
     class pool:  # type: ignore
         """连接池占位符"""
+
         pass
 
     class extras:  # type: ignore
         """扩展功能占位符"""
+
         pass
 
     class sql:  # type: ignore
         """SQL 构建器占位符"""
+
         @staticmethod
         def SQL(*args: Any, **kwargs: Any) -> Any:
             pass
@@ -113,15 +116,15 @@ except ImportError:
 class PostgreSQLConnectionPoolManager:
     """
     PostgreSQL 连接池管理器（单例模式）
-    
+
     管理全局唯一的 PostgreSQL 连接池实例。
     使用 psycopg2 的 ThreadedConnectionPool 支持多线程环境。
-    
+
     ThreadedConnectionPool 特点:
         - 线程安全的连接获取和归还
         - 支持设置最小和最大连接数
         - 连接失效时自动重建
-    
+
     Attributes:
         _instance: 单例实例引用
         _lock: 创建锁，保证线程安全
@@ -142,7 +145,7 @@ class PostgreSQLConnectionPoolManager:
     ) -> Any:
         """
         获取连接池实例（单例）
-        
+
         首次调用必须提供配置，后续调用可省略。
         使用双检锁保证线程安全的单例创建。
 
@@ -164,15 +167,13 @@ class PostgreSQLConnectionPoolManager:
             ImportError: psycopg2 未安装
             ValueError: 首次调用未提供配置
             RuntimeError: 连接池创建失败
-        
+
         连接选项:
             - connect_timeout=10: 连接超时 10 秒
             - statement_timeout=30000: 查询超时 30 秒（防止慢查询）
         """
         if not POSTGRESQL_AVAILABLE:
-            raise ImportError(
-                "psycopg2 不可用，请安装: pip install psycopg2-binary"
-            )
+            raise ImportError("psycopg2 不可用，请安装: pip install psycopg2-binary")
 
         with cls._lock:
             if cls._instance is None:
@@ -219,7 +220,7 @@ class PostgreSQLConnectionPoolManager:
     def close_pool(cls) -> None:
         """
         关闭连接池并释放所有资源
-        
+
         使用 closeall() 关闭池中所有连接。
         关闭后连接池实例会被清空，下次 get_pool() 会创建新实例。
         """
@@ -238,10 +239,10 @@ class PostgreSQLConnectionPoolManager:
 class PostgreSQLTaskPool(BaseTaskPool):
     """
     PostgreSQL 数据源任务池
-    
+
     从 PostgreSQL 数据库表读取未处理的任务数据，AI 处理后将结果写回。
     针对大规模数据和高并发场景优化。
-    
+
     与 MySQL 版本的主要差异:
         1. SQL 构建: 使用 psycopg2.sql 模块（更安全）
         2. 批量更新: 使用 execute_batch()（更高效）
@@ -254,7 +255,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
         pool: ThreadedConnectionPool 实例
         select_columns (list[str]): 查询列（id + 输入列）
         write_colnames (list[str]): 写入列名列表
-    
+
     SQL 安全:
         - 使用 sql.Identifier() 转义表名和列名
         - 使用 %s 参数化查询防止注入
@@ -295,9 +296,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
             RuntimeError: 连接池创建失败
         """
         if not POSTGRESQL_AVAILABLE:
-            raise ImportError(
-                "psycopg2 不可用，请安装: pip install psycopg2-binary"
-            )
+            raise ImportError("psycopg2 不可用，请安装: pip install psycopg2-binary")
 
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
 
@@ -331,13 +330,13 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def _get_connection(self) -> Any:
         """
         从连接池获取数据库连接
-        
+
         使用 getconn() 从池中获取可用连接。
         如果池已满，会等待其他线程归还连接。
-        
+
         Returns:
             psycopg2 连接对象
-            
+
         Raises:
             RuntimeError: 连接池未初始化
             ConnectionError: 无法获取连接
@@ -354,9 +353,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def _put_connection(self, conn: Any) -> None:
         """
         归还连接到连接池
-        
+
         使用 putconn() 将连接归还到池中供其他线程使用。
-        
+
         Args:
             conn: 要归还的连接对象
         """
@@ -369,7 +368,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def execute_with_connection(self, callback: Any, is_write: bool = False) -> Any:
         """
         使用连接池连接执行数据库操作
-        
+
         封装连接的获取、使用、归还以及事务管理。
         使用 RealDictCursor 使结果可以通过列名访问。
 
@@ -384,7 +383,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
         Raises:
             RuntimeError: 数据库操作失败
-        
+
         游标特点:
             使用 extras.RealDictCursor，查询结果为字典格式:
             {"column_name": value, ...}
@@ -527,15 +526,19 @@ class PostgreSQLTaskPool(BaseTaskPool):
             shard_tasks: list[tuple[Any, dict[str, Any]]] = []
 
             try:
-                columns_identifiers = [sql.Identifier(col) for col in self.select_columns]
+                columns_identifiers = [
+                    sql.Identifier(col) for col in self.select_columns
+                ]
                 where_clause = self._build_unprocessed_condition()
 
-                query = sql.SQL("""
+                query = sql.SQL(
+                    """
                     SELECT {}
                     FROM {}.{}
                     WHERE id BETWEEN %s AND %s AND {}
                     ORDER BY id ASC
-                """).format(
+                """
+                ).format(
                     sql.SQL(", ").join(columns_identifiers),
                     sql.Identifier(self.schema_name),
                     sql.Identifier(self.table_name),
@@ -598,16 +601,16 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
         """
         批量写回任务结果（使用 execute_batch 优化性能）
-        
+
         使用 psycopg2.extras.execute_batch() 批量执行 UPDATE 语句，
         比逐条执行快 5-10 倍（减少网络往返）。
 
         Args:
             results: 结果字典 {记录ID: {别名: 值, ...}}
-        
+
         优化参数:
             - page_size=100: 每批发送 100 条语句
-            
+
         SQL 示例:
             UPDATE schema.table SET "out1" = %s, "out2" = %s WHERE id = %s
         """
@@ -662,7 +665,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 extras.execute_batch(cursor, update_query, batch_params, page_size=100)
                 success_count = len(batch_params)
 
-                logging.info(f"PostgreSQL 批量更新完成，成功更新 {success_count} 条记录")
+                logging.info(
+                    f"PostgreSQL 批量更新完成，成功更新 {success_count} 条记录"
+                )
 
             except psycopg2.Error as err:
                 logging.error(f"批量更新失败: {err}")
@@ -713,12 +718,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def _build_unprocessed_condition(self) -> str:
         """
         构建未处理任务的 WHERE 条件
-        
+
         注意: PostgreSQL 使用双引号引用标识符，与 MySQL 的反引号不同。
-        
+
         Returns:
             str: WHERE 条件字符串
-        
+
         示例输出:
             '(("col1" IS NOT NULL AND "col1" <> '')) AND (("out1" IS NULL OR "out1" = ''))'
         """
@@ -744,9 +749,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
     def _build_processed_condition(self) -> str:
         """
         构建已处理任务的 WHERE 条件
-        
+
         已处理定义: 所有输出列都非空。
-        
+
         Returns:
             str: WHERE 条件字符串
         """
@@ -777,12 +782,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.columns_to_extract]
             where_clause = self._build_unprocessed_condition()
 
-            query = sql.SQL("""
+            query = sql.SQL(
+                """
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """).format(
+            """
+            ).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),
@@ -824,12 +831,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.write_colnames]
             where_clause = self._build_processed_condition()
 
-            query = sql.SQL("""
+            query = sql.SQL(
+                """
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """).format(
+            """
+            ).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),

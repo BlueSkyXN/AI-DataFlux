@@ -20,9 +20,9 @@
 元数据分离设计:
     传统方式: 将重试次数等信息存储在任务数据中
         问题: API 错误重试时需要重新加载数据，内部状态会丢失
-        
+
     分离方式: 元数据存储在 TaskStateManager 中
-        优势: 
+        优势:
         - 重试时可以重新加载原始数据而不丢失状态
         - 任务完成后自动清理元数据
         - 定期清理过期元数据防止内存泄漏
@@ -35,7 +35,7 @@
 
 使用示例:
     manager = TaskStateManager()
-    
+
     # 开始处理
     if manager.try_start_task(record_id):
         metadata = manager.get_metadata(record_id)
@@ -43,7 +43,7 @@
         if error:
             metadata.increment_retry(error_type)
         manager.complete_task(record_id)
-    
+
     # 定期清理
     manager.cleanup_expired(max_age_hours=24)
 """
@@ -59,19 +59,19 @@ from ...models.task import TaskMetadata
 class TaskStateManager:
     """
     任务状态管理器
-    
+
     负责线程安全地管理任务的处理状态和元数据。
-    
+
     核心职责:
         1. 正在进行的任务集合 (_tasks_in_progress)
         2. 任务元数据 (_task_metadata): 重试次数、错误历史等
-        
+
     生命周期:
         try_start_task → [处理中] → complete_task → remove_metadata
              ↓                            ↓
         get_metadata                 cleanup_expired
         (创建/获取元数据)            (定期清理过期数据)
-    
+
     Attributes:
         _tasks_in_progress: 正在处理的任务 ID 集合
         _task_metadata: 任务 ID 到元数据的映射
@@ -90,7 +90,7 @@ class TaskStateManager:
     def try_start_task(self, task_id: Any) -> bool:
         """
         尝试标记任务为处理中
-        
+
         原子操作: 检查是否已在处理中，如果不在则标记。
 
         Args:
@@ -98,7 +98,7 @@ class TaskStateManager:
 
         Returns:
             如果成功标记为处理中返回 True，如果已经在处理中返回 False
-            
+
         Note:
             这是防止重复处理的关键方法。在获取任务后、开始处理前调用。
         """
@@ -111,7 +111,7 @@ class TaskStateManager:
     def complete_task(self, task_id: Any) -> None:
         """
         标记任务处理完成
-        
+
         无论任务成功还是失败，都需要调用此方法释放处理槽位。
 
         Args:
@@ -136,7 +136,7 @@ class TaskStateManager:
     def get_active_count(self) -> int:
         """
         获取当前活动任务数
-        
+
         用于监控并发度和进度报告。
 
         Returns:
@@ -148,7 +148,7 @@ class TaskStateManager:
     def get_metadata(self, task_id: Any) -> TaskMetadata:
         """
         获取或创建任务元数据
-        
+
         如果元数据不存在，会自动创建新的 TaskMetadata 实例。
 
         Args:
@@ -165,7 +165,7 @@ class TaskStateManager:
     def remove_metadata(self, task_id: Any) -> None:
         """
         移除任务元数据
-        
+
         任务最终完成 (成功或达到重试上限) 后调用，释放内存。
 
         Args:
@@ -177,7 +177,7 @@ class TaskStateManager:
     def cleanup_expired(self, max_age_hours: int = 24) -> int:
         """
         清理过期的任务元数据
-        
+
         定期调用以清理长时间未完成的任务元数据，防止内存泄漏。
         默认清理超过 24 小时的元数据。
 

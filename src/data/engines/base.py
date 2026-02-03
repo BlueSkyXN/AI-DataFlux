@@ -44,10 +44,10 @@ DataFrame 引擎抽象基类模块
 
 使用示例:
     from src.data.engines import get_engine, BaseEngine
-    
+
     # 获取引擎（不关心具体实现）
     engine: BaseEngine = get_engine(engine_type="auto")
-    
+
     # 使用统一接口
     df = engine.read_excel("data.xlsx")
     row = engine.get_row(df, 0)
@@ -74,27 +74,27 @@ from typing import Any, Iterator
 class BaseEngine(ABC):
     """
     DataFrame 引擎抽象基类
-    
+
     定义了 DataFrame 操作的标准接口。所有具体引擎实现都必须
     继承此类并实现所有抽象方法，确保接口一致性。
-    
+
     设计目标:
         - 统一接口: 业务代码使用统一的方法操作 DataFrame
         - 引擎透明: 切换引擎不需要修改业务代码
         - 性能优化: 各引擎可以使用自己的优化手段
-    
+
     类型说明:
         - df: Any - DataFrame 类型，取决于具体引擎
             - PandasEngine: pandas.DataFrame
             - PolarsEngine: polars.DataFrame
         - series: Any - 列/Series 类型
         - value: Any - 单元格值
-    
+
     索引约定:
         - 使用整数索引（0-based）
         - 索引应与行位置一致
         - 支持索引范围操作
-    
+
     空值定义:
         - None: Python 空值
         - NaN: 浮点数空值
@@ -107,7 +107,7 @@ class BaseEngine(ABC):
     def name(self) -> str:
         """
         引擎名称标识
-        
+
         Returns:
             str: 引擎名称（如 "pandas", "polars"）
         """
@@ -121,7 +121,7 @@ class BaseEngine(ABC):
     ) -> Any:
         """
         读取 Excel 文件
-        
+
         将 Excel 文件加载为 DataFrame。支持 .xlsx 和 .xls 格式。
 
         Args:
@@ -133,7 +133,7 @@ class BaseEngine(ABC):
 
         Returns:
             DataFrame: 引擎特定的 DataFrame 类型
-        
+
         Raises:
             FileNotFoundError: 文件不存在
             IOError: 文件读取失败
@@ -146,7 +146,7 @@ class BaseEngine(ABC):
     ) -> None:
         """
         写入 Excel 文件
-        
+
         将 DataFrame 保存为 Excel 文件。
 
         Args:
@@ -156,7 +156,7 @@ class BaseEngine(ABC):
             **kwargs: 引擎特定参数
                 - Pandas: index, engine, freeze_panes 等
                 - Polars: row_format, column_formats 等
-        
+
         Raises:
             IOError: 文件写入失败
             UnicodeEncodeError: 编码问题
@@ -167,7 +167,7 @@ class BaseEngine(ABC):
     def read_csv(self, path: Path | str, **kwargs: Any) -> Any:
         """
         读取 CSV 文件
-        
+
         将 CSV 文件加载为 DataFrame。
 
         Args:
@@ -184,7 +184,7 @@ class BaseEngine(ABC):
     def write_csv(self, df: Any, path: Path | str, **kwargs: Any) -> None:
         """
         写入 CSV 文件
-        
+
         将 DataFrame 保存为 CSV 文件。
 
         Args:
@@ -200,7 +200,7 @@ class BaseEngine(ABC):
     def get_row(self, df: Any, idx: int) -> dict[str, Any]:
         """
         获取指定行数据
-        
+
         通过索引获取单行数据，返回字典格式。
 
         Args:
@@ -209,7 +209,7 @@ class BaseEngine(ABC):
 
         Returns:
             dict[str, Any]: 行数据 {列名: 值, ...}
-        
+
         Raises:
             KeyError: 索引不存在
         """
@@ -219,7 +219,7 @@ class BaseEngine(ABC):
     def get_rows_by_indices(self, df: Any, indices: list[int]) -> list[dict[str, Any]]:
         """
         批量获取多行数据
-        
+
         一次性获取多行，比循环调用 get_row() 更高效。
 
         Args:
@@ -235,7 +235,7 @@ class BaseEngine(ABC):
     def set_value(self, df: Any, idx: int, column: str, value: Any) -> Any:
         """
         设置单元格值
-        
+
         修改指定位置的单元格值。
 
         Args:
@@ -254,7 +254,7 @@ class BaseEngine(ABC):
     def set_values_batch(self, df: Any, updates: list[tuple[int, str, Any]]) -> Any:
         """
         批量设置多个单元格值
-        
+
         一次性设置多个单元格，性能优于多次调用 set_value()。
 
         Args:
@@ -272,7 +272,7 @@ class BaseEngine(ABC):
     def get_column_names(self, df: Any) -> list[str]:
         """
         获取所有列名
-        
+
         Args:
             df: DataFrame
 
@@ -285,7 +285,7 @@ class BaseEngine(ABC):
     def has_column(self, df: Any, column: str) -> bool:
         """
         检查列是否存在
-        
+
         Args:
             df: DataFrame
             column: 列名
@@ -299,7 +299,7 @@ class BaseEngine(ABC):
     def add_column(self, df: Any, column: str, default_value: Any = None) -> Any:
         """
         添加新列
-        
+
         向 DataFrame 添加新列，所有行填充相同的默认值。
 
         Args:
@@ -320,7 +320,7 @@ class BaseEngine(ABC):
     ) -> list[int]:
         """
         根据条件过滤行，返回符合条件的索引
-        
+
         单列条件过滤。
 
         Args:
@@ -353,9 +353,9 @@ class BaseEngine(ABC):
     ) -> list[int]:
         """
         向量化过滤: 查找未处理的行
-        
+
         高效的批量过滤操作，比逐行检查快 50-100 倍。
-        
+
         未处理的定义:
             - 输入列: 根据 require_all_inputs 决定是否要求全部非空
             - 输出列: 任一输出列为空
@@ -381,9 +381,9 @@ class BaseEngine(ABC):
     def is_empty(self, value: Any) -> bool:
         """
         判断值是否为空
-        
+
         统一的空值判断逻辑，处理各引擎的特殊空值类型。
-        
+
         空值定义:
             - None
             - NaN (float('nan'), numpy.nan, pandas.NA)
@@ -402,7 +402,7 @@ class BaseEngine(ABC):
     def is_empty_vectorized(self, series: Any) -> Any:
         """
         向量化判断空值
-        
+
         对整列进行空值判断，返回布尔 Series。
         性能优于逐个调用 is_empty()。
 
@@ -418,7 +418,7 @@ class BaseEngine(ABC):
     def to_string(self, value: Any) -> str:
         """
         将值转换为字符串
-        
+
         空值转换为空字符串，其他值转为字符串表示。
 
         Args:
@@ -435,7 +435,7 @@ class BaseEngine(ABC):
     def row_count(self, df: Any) -> int:
         """
         获取行数
-        
+
         Args:
             df: DataFrame
 
@@ -448,7 +448,7 @@ class BaseEngine(ABC):
     def get_index_range(self, df: Any) -> tuple[int, int]:
         """
         获取索引范围
-        
+
         返回 DataFrame 的最小和最大索引。
 
         Args:
@@ -463,7 +463,7 @@ class BaseEngine(ABC):
     def get_indices(self, df: Any) -> list[int]:
         """
         获取所有索引
-        
+
         Args:
             df: DataFrame
 
@@ -480,7 +480,7 @@ class BaseEngine(ABC):
     ) -> Iterator[tuple[int, dict[str, Any]]]:
         """
         迭代所有行
-        
+
         生成器函数，逐行返回数据。
 
         Args:
@@ -500,7 +500,7 @@ class BaseEngine(ABC):
     def slice_by_index_range(self, df: Any, min_idx: int, max_idx: int) -> Any:
         """
         按索引范围切片
-        
+
         提取指定索引范围内的行。
 
         Args:
@@ -517,7 +517,7 @@ class BaseEngine(ABC):
     def copy(self, df: Any) -> Any:
         """
         创建 DataFrame 副本
-        
+
         深拷贝 DataFrame，修改副本不影响原始数据。
 
         Args:

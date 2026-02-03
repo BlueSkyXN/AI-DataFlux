@@ -14,7 +14,7 @@ AI 客户端模块
 
 使用示例:
     from src.core.clients import FluxAIClient
-    
+
     client = FluxAIClient("http://localhost:8787/v1/chat/completions")
     response = await client.call(session, messages, model="gpt-4")
 """

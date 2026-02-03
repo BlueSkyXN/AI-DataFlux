@@ -32,7 +32,7 @@
 
 动态分片大小计算:
     分片大小 = min(内存限制, 时间限制, 配置值)
-    
+
     - 内存限制: 可用内存 × 30% / 估算记录大小
     - 时间限制: 处理速率 × 目标时长 (15分钟)
     - 配置值: optimal_shard_size (默认 10000)
@@ -43,7 +43,7 @@
 
 使用示例:
     from src.core.scheduler import ShardedTaskManager
-    
+
     manager = ShardedTaskManager(task_pool, shard_size=10000)
     if manager.initialize():
         while manager.load_next_shard():
@@ -68,14 +68,14 @@ class ShardedTaskManager:
     分片任务管理器
 
     负责将大量数据分片加载、跟踪处理进度、监控内存使用。
-    
+
     核心功能:
         1. 分片计算: 根据 ID 范围和配置计算分片边界
         2. 分片加载: 逐个加载分片到内存
         3. 进度跟踪: 记录已处理数量和成功率
         4. 内存监控: 定期检查内存使用，必要时触发 GC
         5. 统计输出: 完成后输出详细统计信息
-    
+
     生命周期:
         ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
         │ __init__ │ → │initialize│ → │load_next │ → │ finalize │
@@ -175,7 +175,7 @@ class ShardedTaskManager:
         动态计算最优分片大小
 
         基于可用内存和处理速度进行启发式计算，自动适应系统资源。
-        
+
         计算逻辑:
             1. 内存限制 = 可用内存 × 30% / 记录大小估算 (5KB/条)
             2. 时间限制 = 处理速率 × 目标时长 (15分钟)
@@ -187,7 +187,7 @@ class ShardedTaskManager:
 
         Returns:
             计算出的分片大小
-            
+
         Note:
             首次运行时 records_per_second 为 0，时间限制不生效。
             随着处理进行，指标会逐渐准确。
@@ -237,7 +237,7 @@ class ShardedTaskManager:
         初始化分片
 
         获取数据边界，计算分片大小，创建分片边界列表。
-        
+
         初始化流程:
             1. 获取待处理任务总数
             2. 获取 ID/索引边界 (min_id, max_id)
@@ -246,7 +246,7 @@ class ShardedTaskManager:
 
         Returns:
             是否成功初始化 (False 表示无任务或初始化失败)
-            
+
         Raises:
             不抛出异常，错误会被记录并返回 False
         """
@@ -316,13 +316,13 @@ class ShardedTaskManager:
     def load_next_shard(self) -> bool:
         """
         加载下一个分片
-        
+
         从数据源加载下一个分片的数据到任务池。
         如果当前分片无任务，会自动递归加载下一个分片。
 
         Returns:
             是否成功加载 (False 表示没有更多分片)
-            
+
         Note:
             如果分片加载失败，会自动跳过并尝试下一个分片，
             确保单个分片的问题不会阻塞整个处理流程。
@@ -363,7 +363,7 @@ class ShardedTaskManager:
 
         使用指数移动平均 (EMA) 更新处理速度指标，平滑因子 α=0.1。
         EMA 公式: new_value = α × current + (1 - α) × old_value
-        
+
         该算法使得:
             - 新数据占 10% 权重
             - 历史数据占 90% 权重
@@ -372,7 +372,7 @@ class ShardedTaskManager:
         Args:
             batch_success_count: 本批次成功处理数量
             batch_processing_time: 本批次处理时间 (秒)
-            
+
         Note:
             batch_success_count <= 0 或 batch_processing_time <= 0 时不更新。
         """
@@ -403,13 +403,13 @@ class ShardedTaskManager:
         监控内存使用
 
         定期检查内存使用情况，高内存使用时触发垃圾回收 (GC)。
-        
+
         检查间隔: 60 秒 (memory_tracker["check_interval"])
-        
+
         GC 触发条件 (满足任一即触发):
             - 系统内存使用率 > 85%
             - 进程内存使用量 > 40GB
-        
+
         监控指标:
             - current_memory_usage: 当前进程内存 (MB)
             - peak_memory_usage: 峰值内存使用 (MB)
@@ -459,7 +459,7 @@ class ShardedTaskManager:
     def finalize(self) -> None:
         """
         完成处理，输出统计信息并关闭资源
-        
+
         输出内容:
             - 总耗时
             - 预估任务数 vs 成功处理数
@@ -467,7 +467,7 @@ class ShardedTaskManager:
             - 重试超限任务数
             - 平均处理速率 (条/秒)
             - 峰值内存使用
-        
+
         资源清理:
             - 关闭任务池 (task_pool.close())
         """

@@ -9,25 +9,25 @@
         - 使用 mysql-connector-python 连接
         - 支持连接池复用
         - 适合大规模数据处理
-    
+
     - postgresql: PostgreSQL 数据库
         - 使用 psycopg2 连接
         - 支持 ThreadedConnectionPool
         - 使用 execute_batch() 批量更新
         - 适合企业级高性能场景
-    
+
     - sqlite: SQLite 数据库
         - Python 标准库，无需额外安装
         - 线程级连接管理
         - 支持 WAL 模式
         - 适合开发测试和中小规模数据
-    
+
     - excel: Excel 电子表格文件
         - 支持 .xlsx 和 .xls 格式
         - 可选高性能读取器 (calamine)
         - 可选高性能写入器 (xlsxwriter)
         - 支持 Pandas/Polars 引擎
-    
+
     - csv: CSV 逗号分隔值文件
         - 复用 ExcelTaskPool 实现
         - 自动检测文件类型
@@ -44,7 +44,7 @@
 
 使用示例:
     from src.data.factory import create_task_pool
-    
+
     pool = create_task_pool(
         config=config,
         columns_to_extract=["name", "content"],
@@ -76,6 +76,7 @@ EXCEL_ENABLED = False
 # 检测 MySQL 连接器
 try:
     import mysql.connector  # noqa: F401
+
     MYSQL_AVAILABLE = True
 except ImportError:
     pass
@@ -83,6 +84,7 @@ except ImportError:
 # 检测 PostgreSQL 连接器
 try:
     import psycopg2  # noqa: F401
+
     POSTGRESQL_AVAILABLE = True
 except ImportError:
     pass
@@ -91,6 +93,7 @@ except ImportError:
 try:
     import pandas  # noqa: F401
     import openpyxl  # noqa: F401
+
     EXCEL_ENABLED = True
 except ImportError:
     pass
@@ -211,17 +214,17 @@ def _create_mysql_pool(
 ) -> BaseTaskPool:
     """
     创建 MySQL 任务池
-    
+
     Args:
         config: 完整配置（需包含 mysql 配置节）
         columns_to_extract: 提取列
         columns_to_write: 写回映射
         require_all_input_fields: 是否要求所有输入字段非空
         concurrency_config: 并发配置
-    
+
     Returns:
         MySQLTaskPool 实例
-    
+
     Raises:
         ImportError: mysql-connector-python 未安装
         ValueError: 缺少必需配置字段
@@ -333,25 +336,23 @@ def _create_postgresql_pool(
 ) -> BaseTaskPool:
     """
     创建 PostgreSQL 任务池
-    
+
     Args:
         config: 完整配置（需包含 postgresql 配置节）
         columns_to_extract: 提取列
         columns_to_write: 写回映射
         require_all_input_fields: 是否要求所有输入字段非空
         concurrency_config: 并发配置
-    
+
     Returns:
         PostgreSQLTaskPool 实例
-    
+
     Raises:
         ImportError: psycopg2 未安装
         ValueError: 缺少必需配置字段
     """
     if not POSTGRESQL_AVAILABLE:
-        raise ImportError(
-            "psycopg2 不可用，请安装: pip install psycopg2-binary"
-        )
+        raise ImportError("psycopg2 不可用，请安装: pip install psycopg2-binary")
 
     from .postgresql import PostgreSQLTaskPool
 
@@ -391,16 +392,16 @@ def _create_sqlite_pool(
 ) -> BaseTaskPool:
     """
     创建 SQLite 任务池
-    
+
     Args:
         config: 完整配置（需包含 sqlite 配置节）
         columns_to_extract: 提取列
         columns_to_write: 写回映射
         require_all_input_fields: 是否要求所有输入字段非空
-    
+
     Returns:
         SQLiteTaskPool 实例
-    
+
     Raises:
         ValueError: 缺少必需配置字段
     """

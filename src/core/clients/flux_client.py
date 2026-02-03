@@ -67,16 +67,16 @@ from .base import BaseAIClient
 class FluxAIClient(BaseAIClient):
     """
     Flux API (OpenAI 兼容) 客户端
-    
+
     与 Flux Gateway 通信的具体实现。自动处理 URL 格式化、
     超时管理、错误转换等细节。
-    
+
     特性:
         - 自动补全 /v1/chat/completions 路径
         - 支持 JSON Schema 模式 (response_format)
         - 详细的请求/响应日志
         - 统一的异常处理
-    
+
     Attributes:
         api_url: 完整的 API 端点 URL
         request_timeout: aiohttp 超时配置
@@ -105,13 +105,13 @@ class FluxAIClient(BaseAIClient):
         model: str,
         temperature: float | None = 0.7,
         use_json_schema: bool = False,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         调用 Flux/OpenAI 兼容 API
-        
+
         发送 Chat Completions 请求并解析响应。
-        
+
         Args:
             session: aiohttp 客户端会话
             messages: 消息列表 [{"role": "...", "content": "..."}]
@@ -119,10 +119,10 @@ class FluxAIClient(BaseAIClient):
             temperature: 温度系数 (0.0-2.0)；None 表示不发送该参数
             use_json_schema: 是否强制 JSON 输出格式
             **kwargs: 其他 OpenAI API 参数 (如 max_tokens)
-            
+
         Returns:
             AI 生成的文本内容
-            
+
         Raises:
             aiohttp.ClientResponseError: HTTP 错误或响应格式无效
             TimeoutError: 请求超时

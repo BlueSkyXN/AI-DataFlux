@@ -20,12 +20,12 @@
 
 使用示例:
     from src.core.retry import RetryStrategy, RetryAction
-    
+
     strategy = RetryStrategy(
         max_retries={ErrorType.API: 3, ErrorType.CONTENT: 1},
         api_pause_duration=2.0
     )
-    
+
     decision = strategy.decide(ErrorType.API, task_metadata)
     if decision.action == RetryAction.PAUSE_THEN_RETRY:
         await asyncio.sleep(decision.pause_duration)

@@ -8,7 +8,7 @@ DataFrame 引擎抽象层模块
     - pandas: 默认引擎，生态丰富，兼容性最好
         - 读取器: openpyxl (默认) | calamine (10x 加速)
         - 写入器: openpyxl (默认) | xlsxwriter (3x 加速)
-    
+
     - polars: 高性能引擎，多线程并行处理
         - 内置 Rust 读写器
         - 大文件处理性能优异
@@ -33,18 +33,18 @@ DataFrame 引擎抽象层模块
 
 使用示例:
     from src.data.engines import get_engine, get_available_libraries
-    
+
     # 获取引擎实例
     engine = get_engine(
         engine_type="auto",       # 自动选择最佳引擎
         excel_reader="calamine",  # 使用高性能读取器
         excel_writer="xlsxwriter" # 使用高性能写入器
     )
-    
+
     # 使用引擎
     df = engine.read_excel("data.xlsx")
     engine.write_excel(df, "output.xlsx")
-    
+
     # 检查可用库
     libs = get_available_libraries()
     print(libs)  # {'pandas': True, 'polars': True, ...}
@@ -72,11 +72,11 @@ from .pandas_engine import PandasEngine
 def _safe_check_library(import_code: str, lib_name: str, timeout: int = 30) -> bool:
     """
     在子进程中安全检测库是否可用
-    
+
     某些库（如 polars, fastexcel）在特定平台上导入时可能导致进程崩溃
     （如 Windows ARM + Python 3.13 上的 "Fatal Python error: Illegal instruction"）。
     因此必须在子进程中测试，避免崩溃主进程。
-    
+
     实现原理:
         1. 启动一个新的 Python 子进程
         2. 在子进程中执行 import 语句
@@ -146,12 +146,12 @@ WriterType = Literal["openpyxl", "xlsxwriter", "auto"]
 def _resolve_reader(reader_type: ReaderType) -> str:
     """
     解析实际使用的 Excel 读取器
-    
+
     优先级: calamine > openpyxl（当 auto 时）
-    
+
     Args:
         reader_type: 请求的读取器类型
-        
+
     Returns:
         str: 实际使用的读取器名称
     """
@@ -170,12 +170,12 @@ def _resolve_reader(reader_type: ReaderType) -> str:
 def _resolve_writer(writer_type: WriterType) -> str:
     """
     解析实际使用的 Excel 写入器
-    
+
     优先级: xlsxwriter > openpyxl（当 auto 时）
-    
+
     Args:
         writer_type: 请求的写入器类型
-        
+
     Returns:
         str: 实际使用的写入器名称
     """
@@ -194,12 +194,12 @@ def _resolve_writer(writer_type: WriterType) -> str:
 def _resolve_engine(engine_type: EngineType) -> str:
     """
     解析实际使用的 DataFrame 引擎
-    
+
     优先级: polars > pandas（当 auto 时）
-    
+
     Args:
         engine_type: 请求的引擎类型
-        
+
     Returns:
         str: 实际使用的引擎名称
     """
@@ -222,7 +222,7 @@ def get_engine(
 ) -> BaseEngine:
     """
     获取 DataFrame 引擎实例
-    
+
     工厂函数，根据配置创建合适的引擎实例。
     支持自动选择最佳引擎和回退机制。
 
@@ -245,11 +245,11 @@ def get_engine(
 
     Raises:
         ValueError: 不支持的引擎类型
-    
+
     示例:
         # 自动选择最佳配置
         engine = get_engine(engine_type="auto")
-        
+
         # 指定使用 Pandas + 高性能读写器
         engine = get_engine(
             engine_type="pandas",
@@ -290,12 +290,12 @@ def get_engine(
 def get_available_libraries() -> dict[str, bool]:
     """
     获取所有可选库的可用状态
-    
+
     用于诊断和显示系统配置信息。
 
     Returns:
         dict[str, bool]: {库名: 是否可用}
-    
+
     示例:
         >>> get_available_libraries()
         {
@@ -320,7 +320,7 @@ def get_available_libraries() -> dict[str, bool]:
 def register_engine(name: str, engine_class: type[BaseEngine]) -> None:
     """
     注册新的引擎实现（预留扩展接口）
-    
+
     此接口为未来扩展预留，允许注册自定义引擎实现。
     目前引擎通过 get_engine() 动态选择。
 

@@ -12,7 +12,7 @@ JSON 字段验证器
 使用场景:
     当配置了 validation.field_rules 时，ContentProcessor 会在解析
     AI 响应后调用此验证器，检查返回的分类/枚举字段是否有效。
-    
+
     例如: 情感分析任务要求返回 "positive", "neutral", "negative" 之一，
     但 AI 返回了 "good"，验证器会标记为无效。
 
@@ -45,12 +45,12 @@ class JsonValidator:
     JSON 字段验证器
 
     根据配置的字段规则验证 JSON 数据中的字段值是否合法。
-    
+
     验证逻辑:
         - 仅验证配置了规则的字段
         - 数据中不存在的字段不会触发验证失败
         - 值必须精确匹配（类型和值都要匹配）
-    
+
     Attributes:
         enabled: 是否启用验证
         field_rules: 字段规则 {field: [allowed_values]}

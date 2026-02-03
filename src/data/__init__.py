@@ -38,15 +38,15 @@
 
 使用示例:
     from src.data import create_task_pool
-    
+
     pool = create_task_pool(config, columns_to_extract, columns_to_write)
     pool.initialize_shard(0, min_id, max_id)
-    
+
     while pool.has_tasks():
         batch = pool.get_task_batch(100)
         # 处理任务...
         pool.update_task_results(results)
-    
+
     pool.close()
 
 依赖模块:

@@ -42,15 +42,15 @@ Unicode 检测逻辑:
 
 使用示例:
     from src.utils.console import console, print_status
-    
+
     # 使用全局 console 实例
     console.print_ok("操作成功")
     console.print_error("操作失败")
     console.print_info("正在处理...")
-    
+
     # 获取符号
     print(f"{console.check} 测试通过")
-    
+
     # 打印状态行
     print_status(True, "pandas", "已安装", "未安装")
 """
@@ -63,7 +63,7 @@ import locale
 def _safe_print(text: str):
     """
     安全打印，优雅处理编码错误
-    
+
     在 Windows cp1252 环境下，Unicode 字符会被替换为 ASCII 替代符。
 
     Args:
@@ -80,7 +80,7 @@ def _safe_print(text: str):
 def _configure_windows_console():
     """
     配置 Windows 控制台以获得更好的 Unicode 支持
-    
+
     尝试:
     1. 将 stdout/stderr 重新配置为 UTF-8
     2. 设置控制台代码页为 65001 (UTF-8)
@@ -110,7 +110,7 @@ def supports_unicode() -> bool:
 
     Returns:
         True 如果支持 Unicode，否则 False
-        
+
     环境变量覆盖:
         - FORCE_ASCII=1: 强制使用 ASCII
         - FORCE_UNICODE=1: 强制使用 Unicode
@@ -176,7 +176,7 @@ def supports_unicode() -> bool:
 class Console:
     """
     跨平台控制台输出类
-    
+
     自动检测 Unicode 支持并提供合适的输出方法。
     使用惰性求值缓存检测结果。
 
@@ -289,13 +289,13 @@ def print_status(
 ):
     """
     打印状态行，带复选图标
-    
+
     Args:
         available: 状态是否为真
         name: 项目名称
         state_true: 状态为真时的文本
         state_false: 状态为假时的文本
-        
+
     Example:
         print_status(True, "pandas")    # ✅ pandas: installed
         print_status(False, "polars")   # ❌ polars: not installed

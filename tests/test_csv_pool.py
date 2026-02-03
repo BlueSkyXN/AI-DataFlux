@@ -233,12 +233,12 @@ class TestCSVEncodingHandling:
     def test_special_characters(self, tmp_path):
         """测试特殊字符"""
         csv_path = tmp_path / "special.csv"
-        csv_content = '''id,text
+        csv_content = """id,text
 1,"包含,逗号"
 2,"包含""引号"
 3,"多行
 文本"
-'''
+"""
         csv_path.write_text(csv_content, encoding="utf-8")
 
         pool = ExcelTaskPool(

@@ -12,11 +12,11 @@
 
 使用示例:
     from src.utils import console, print_status
-    
+
     # 打印带图标的状态
     console.print_ok("操作成功")     # ✓ 操作成功
     console.print_error("操作失败")  # ✗ 操作失败
-    
+
     # 打印依赖检查状态
     print_status(True, "pandas")     # ✅ pandas: installed
     print_status(False, "polars")    # ❌ polars: not installed

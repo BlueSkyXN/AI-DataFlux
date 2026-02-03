@@ -10,17 +10,17 @@ JSON 提取和验证等功能。
 使用示例:
     from src.core.content import ContentProcessor
     from src.core.validator import JsonValidator
-    
+
     validator = JsonValidator()
     processor = ContentProcessor(
         prompt_template="分析以下数据: {record_json}",
         required_fields=["category", "sentiment"],
         validator=validator
     )
-    
+
     # 生成 Prompt
     prompt = processor.create_prompt({"title": "Test", "content": "..."})
-    
+
     # 解析响应
     result = processor.parse_response(ai_response)
 """

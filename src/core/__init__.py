@@ -32,7 +32,7 @@
 
 使用示例:
     from src.core import UniversalAIProcessor
-    
+
     processor = UniversalAIProcessor("config.yaml")
     await processor.process_shard_async_continuous()
 """

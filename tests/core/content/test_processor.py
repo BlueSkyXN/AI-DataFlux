@@ -14,6 +14,7 @@ from src.core.content.processor import ContentProcessor
 from src.core.validator import JsonValidator
 from src.models.errors import ErrorType
 
+
 class TestContentProcessor:
 
     @pytest.fixture
@@ -30,7 +31,7 @@ class TestContentProcessor:
             prompt_template="Analyze this: {record_json}",
             required_fields=["name", "status"],
             validator=mock_validator,
-            use_json_schema=True
+            use_json_schema=True,
         )
 
     def test_create_prompt(self, processor):
@@ -74,7 +75,9 @@ class TestContentProcessor:
         assert result["name"] == "Charlie"
 
     def test_parse_response_regex_extraction(self, processor):
-        response = "Some text before { \"name\": \"Dave\", \"status\": \"active\" } some text after"
+        response = (
+            'Some text before { "name": "Dave", "status": "active" } some text after'
+        )
         result = processor.parse_response(response)
         assert result["name"] == "Dave"
 
@@ -117,7 +120,7 @@ class TestContentProcessor:
             "name": "Alice",
             "BGBU": "type_a",  # 路由字段，应当被排除
             "category": "test",  # 另一个排除字段
-            "description": "Some text"
+            "description": "Some text",
         }
 
         prompt = processor.create_prompt(record)
@@ -160,7 +163,7 @@ class TestContentProcessor:
         record = {
             "name": "Alice",
             "BGBU": "type_a",  # 路由字段，显式声明，应当包含
-            "content": "Some text"
+            "content": "Some text",
         }
 
         prompt = processor.create_prompt(record)
@@ -185,7 +188,7 @@ class TestContentProcessor:
         record = {
             "name": "Bob",
             "BGBU": "type_b",  # 路由字段，隐式追加，应当排除
-            "content": "Some text"
+            "content": "Some text",
         }
 
         prompt = processor.create_prompt(record)

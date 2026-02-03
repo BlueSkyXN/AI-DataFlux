@@ -14,17 +14,17 @@
        - get_total_task_count(): 未处理任务数
        - get_processed_task_count(): 已处理任务数
        - get_id_boundaries(): ID 范围（用于分片）
-    
+
     2. 分片加载:
        - initialize_shard(): 将分片数据加载到内存队列
-    
+
     3. 任务获取:
        - get_task_batch(): 获取一批任务
        - reload_task_data(): 重新加载单个任务数据
-    
+
     4. 结果写回:
        - update_task_results(): 批量写回处理结果
-    
+
     5. 队列操作:
        - add_task_to_front(): 重试时放回队头
        - add_task_to_back(): 延迟处理时放回队尾
@@ -42,7 +42,7 @@
         def get_total_task_count(self) -> int:
             # 实现具体逻辑
             pass
-        
+
         # 实现其他抽象方法...
 """
 
@@ -55,17 +55,17 @@ from typing import Any
 class BaseTaskPool(ABC):
     """
     数据源任务池抽象基类
-    
+
     定义了数据源操作的标准接口，所有具体数据源实现必须继承此类
     并实现所有抽象方法。
-    
+
     Attributes:
         columns_to_extract (list[str]): 需要从数据源提取的列名列表
         columns_to_write (dict[str, str]): 结果写回映射 {别名: 实际列名}
         require_all_input_fields (bool): 是否要求所有输入字段都非空
         tasks (list): 当前分片的内存任务队列 [(task_id, data_dict), ...]
         lock (threading.Lock): 线程锁，保护 tasks 队列的并发访问
-    
+
     线程安全:
         tasks 队列的所有操作都通过 self.lock 保护，支持多线程并发访问。
     """
@@ -78,7 +78,7 @@ class BaseTaskPool(ABC):
     ):
         """
         初始化任务池基类
-        
+
         Args:
             columns_to_extract: 需要提取的列名列表，用于构建任务数据
             columns_to_write: 写回映射 {别名: 实际列名}，将处理结果写入对应列
@@ -96,9 +96,9 @@ class BaseTaskPool(ABC):
     def get_total_task_count(self) -> int:
         """
         获取未处理任务总数
-        
+
         扫描数据源，统计所有输出列为空的记录数量。
-        
+
         Returns:
             int: 未处理任务数量
         """
@@ -108,9 +108,9 @@ class BaseTaskPool(ABC):
     def get_processed_task_count(self) -> int:
         """
         获取已处理任务总数
-        
+
         扫描数据源，统计所有输出列非空的记录数量。
-        
+
         Returns:
             int: 已处理任务数量
         """
@@ -120,7 +120,7 @@ class BaseTaskPool(ABC):
     def get_id_boundaries(self) -> tuple[Any, Any]:
         """
         获取任务 ID 边界
-        
+
         返回数据源中未处理任务的 ID 范围，用于分片处理。
         对于 Excel 类数据源，ID 通常是行索引；
         对于数据库，ID 通常是主键。
@@ -134,7 +134,7 @@ class BaseTaskPool(ABC):
     def initialize_shard(self, shard_id: int, min_id: Any, max_id: Any) -> int:
         """
         初始化分片并加载到内存队列
-        
+
         将指定 ID 范围内的未处理任务加载到 self.tasks 队列。
         这是分片处理的核心方法。
 
@@ -152,7 +152,7 @@ class BaseTaskPool(ABC):
     def get_task_batch(self, batch_size: int) -> list[tuple[Any, dict[str, Any]]]:
         """
         从内存队列获取一批任务
-        
+
         获取的任务会从队列中移除，确保不会重复处理。
         如果队列中任务不足，返回所有剩余任务。
 
@@ -168,7 +168,7 @@ class BaseTaskPool(ABC):
     def update_task_results(self, results: dict[Any, dict[str, Any]]) -> None:
         """
         批量写回任务结果
-        
+
         将处理结果写入数据源对应位置。
         对于 Excel 类数据源，可能需要定时保存文件；
         对于数据库，通常立即提交事务。
@@ -183,7 +183,7 @@ class BaseTaskPool(ABC):
     def reload_task_data(self, task_id: Any) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
-        
+
         从数据源重新读取任务数据，用于重试场景。
         这样可以避免使用可能被污染的内存缓存数据。
 
@@ -200,7 +200,7 @@ class BaseTaskPool(ABC):
     def close(self) -> None:
         """
         关闭资源并清理
-        
+
         释放数据库连接、保存文件、清空缓存等清理操作。
         调用后任务池不应再被使用。
         """
@@ -213,7 +213,7 @@ class BaseTaskPool(ABC):
     ) -> None:
         """
         将任务放回队列头部（用于优先重试）
-        
+
         当任务需要立即重试时使用，例如遇到可恢复错误后。
 
         Args:
@@ -233,7 +233,7 @@ class BaseTaskPool(ABC):
     ) -> None:
         """
         将任务放到队列尾部（用于延迟处理）
-        
+
         当任务需要稍后重试时使用，例如遇到限流后。
 
         Args:
@@ -251,7 +251,7 @@ class BaseTaskPool(ABC):
     def has_tasks(self) -> bool:
         """
         检查内存队列是否还有任务
-        
+
         Returns:
             bool: True 表示还有任务待处理
         """
@@ -261,7 +261,7 @@ class BaseTaskPool(ABC):
     def get_remaining_count(self) -> int:
         """
         获取内存队列中剩余的任务数量
-        
+
         Returns:
             int: 剩余任务数
         """
@@ -271,7 +271,7 @@ class BaseTaskPool(ABC):
     def clear_tasks(self) -> None:
         """
         清空内存队列
-        
+
         用于切换分片或重置状态时调用。
         """
         with self.lock:
@@ -282,7 +282,7 @@ class BaseTaskPool(ABC):
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """
         采样未处理的行（用于输入 Token 估算）
-        
+
         默认实现：初始化第一个分片并返回采样数据。
         子类可以覆盖以提供更高效的实现。
 
@@ -308,7 +308,7 @@ class BaseTaskPool(ABC):
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """
         采样已处理的行（用于输出 Token 估算）
-        
+
         默认实现返回空列表，子类需要覆盖以提供实际实现。
 
         Args:
@@ -325,7 +325,7 @@ class BaseTaskPool(ABC):
     def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
         """
         获取所有行（忽略处理状态）
-        
+
         用于导出或统计等场景。
 
         Args:
@@ -340,7 +340,7 @@ class BaseTaskPool(ABC):
     def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
         """
         获取所有已处理行
-        
+
         仅返回输出已完成的记录。
 
         Args:

@@ -33,11 +33,11 @@
 
 使用示例:
     metadata = TaskMetadata(record_id=123)
-    
+
     # 记录错误
     metadata.add_error(ErrorType.API, "连接超时")
     metadata.increment_retry(ErrorType.API)
-    
+
     # 查询状态
     print(metadata.get_retry_count(ErrorType.API))  # 1
     print(metadata.has_errors)  # True

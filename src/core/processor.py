@@ -24,7 +24,7 @@
 核心处理模式 - 连续任务流 (Continuous Task Flow):
     传统批处理: 加载批次 → 并发处理 → 等待全部完成 → 写入结果 → 下一批次
     连续任务流: 动态填充任务池 → 任一完成即处理 → 实时写入 → 持续补充新任务
-    
+
     优势:
     - 无需等待整批完成，响应更快
     - 更灵活的错误处理和重试机制
@@ -43,7 +43,7 @@
     # 基本使用
     processor = UniversalAIProcessor("config.yaml")
     processor.run()  # 同步运行
-    
+
     # 异步使用
     await processor.process_shard_async_continuous()
 
@@ -89,12 +89,12 @@ class UniversalAIProcessor:
     4. FluxAIClient: API 通信
     5. TaskStateManager: 状态管理
     6. RetryStrategy: 错误重试决策
-    
+
     组件职责分离:
         - 本类只负责编排协调，不直接实现具体逻辑
         - 各组件独立可测试，便于单元测试和功能扩展
         - 组件之间通过明确接口通信，降低耦合度
-    
+
     生命周期:
         __init__ → run() → process_shard_async_continuous() → finalize()
               ↓           ↓
@@ -102,7 +102,7 @@ class UniversalAIProcessor:
          组件初始化   分片轮转
                      任务处理
                      结果写入
-    
+
     Attributes:
         config: 配置字典
         flux_api_url: API 网关 URL
@@ -151,10 +151,14 @@ class UniversalAIProcessor:
         concurrency_cfg = datasource_cfg.get("concurrency", {})
         self.batch_size = concurrency_cfg.get("batch_size", 100)
         self.max_connections = concurrency_cfg.get("max_connections", 1000)
-        self.max_connections_per_host = concurrency_cfg.get("max_connections_per_host", 0)
+        self.max_connections_per_host = concurrency_cfg.get(
+            "max_connections_per_host", 0
+        )
 
         api_pause_duration = float(concurrency_cfg.get("api_pause_duration", 2.0))
-        api_error_trigger_window = float(concurrency_cfg.get("api_error_trigger_window", 2.0))
+        api_error_trigger_window = float(
+            concurrency_cfg.get("api_error_trigger_window", 2.0)
+        )
 
         # 重试限制
         retry_limits_cfg = concurrency_cfg.get("retry_limits", {})
@@ -181,7 +185,7 @@ class UniversalAIProcessor:
         self.retry_strategy = RetryStrategy(
             max_retries=max_retry_counts,
             api_pause_duration=api_pause_duration,
-            api_error_trigger_window=api_error_trigger_window
+            api_error_trigger_window=api_error_trigger_window,
         )
 
         # 4. 初始化数据源和分片管理器
@@ -209,12 +213,16 @@ class UniversalAIProcessor:
 
                 if routing_field not in self.columns_to_extract:
                     # 隐式路由字段：自动追加，标记为排除
-                    logging.info(f"路由字段 '{routing_field}' 自动追加到 columns_to_extract（不发给 AI）")
+                    logging.info(
+                        f"路由字段 '{routing_field}' 自动追加到 columns_to_extract（不发给 AI）"
+                    )
                     self.columns_to_extract.append(routing_field)
                     self.routing_field_is_implicit = True
                 else:
                     # 显式路由字段：用户明确声明，作为业务字段
-                    logging.info(f"路由字段 '{routing_field}' 为显式声明的业务字段（会发给 AI）")
+                    logging.info(
+                        f"路由字段 '{routing_field}' 为显式声明的业务字段（会发给 AI）"
+                    )
                     self.routing_field_is_implicit = False
 
         # 提前读取 prompt 配置（_init_routing_contexts 需要这些属性）
@@ -231,7 +239,11 @@ class UniversalAIProcessor:
         # 创建默认内容处理器（需要在路由初始化后创建，以确定 exclude_fields）
         # 只有隐式路由字段才排除（用户未显式声明的字段）
         exclude_fields = []
-        if self.routing_enabled and self.routing_field and self.routing_field_is_implicit:
+        if (
+            self.routing_enabled
+            and self.routing_field
+            and self.routing_field_is_implicit
+        ):
             exclude_fields = [self.routing_field]
 
         self.content_processor = ContentProcessor(
@@ -329,7 +341,9 @@ class UniversalAIProcessor:
                     "temperature_override", self.ai_temperature_override
                 ),
                 "system_prompt": prompt_cfg.get("system_prompt"),
-                "use_json_schema": prompt_cfg.get("use_json_schema", self.ai_use_json_schema),
+                "use_json_schema": prompt_cfg.get(
+                    "use_json_schema", self.ai_use_json_schema
+                ),
             }
 
     def _load_routing_profile(self, profile_path: str) -> dict[str, Any]:
@@ -353,18 +367,18 @@ class UniversalAIProcessor:
     def _get_routing_context(self, row_data: Dict[str, Any]) -> dict[str, Any] | None:
         """
         根据记录数据获取路由上下文
-        
+
         根据 routing.field 指定的字段值，查找匹配的路由上下文。
-        
+
         行为说明:
             - 路由未启用时返回 None（使用默认配置）
             - 路由字段不存在于记录中时返回 None（使用默认配置）
             - 路由字段值没有匹配规则时返回 None（使用默认配置）
             - 匹配成功时返回对应的路由上下文
-        
+
         Args:
             row_data: 记录数据字典
-            
+
         Returns:
             匹配的路由上下文或 None
         """
@@ -373,36 +387,40 @@ class UniversalAIProcessor:
 
         # 字段不存在时使用默认配置
         if self.routing_field not in row_data:
-            logging.debug(f"routing.field '{self.routing_field}' 不存在于记录中，使用默认配置")
+            logging.debug(
+                f"routing.field '{self.routing_field}' 不存在于记录中，使用默认配置"
+            )
             return None
 
         match_value = str(row_data.get(self.routing_field))
         context = self.routing_contexts.get(match_value)
-        
+
         if context is None:
-            logging.debug(f"routing 未找到匹配规则: {self.routing_field}='{match_value}'，使用默认配置")
-        
+            logging.debug(
+                f"routing 未找到匹配规则: {self.routing_field}='{match_value}'，使用默认配置"
+            )
+
         return context
 
     async def process_shard_async_continuous(self) -> None:
         """
         连续任务流模式的异步处理
-        
+
         核心处理入口，实现连续任务流 (Continuous Task Flow) 模式:
         1. 初始化分片管理器
         2. 创建 HTTP 连接池
         3. 进入主处理循环
         4. 完成后关闭资源
-        
+
         连续任务流的关键特性:
             - 动态任务填充: 任务完成后立即补充新任务，保持并发度
             - 实时结果处理: 无需等待整批完成，单个任务完成即处理结果
             - 灵活错误处理: 可针对单个任务进行重试，不影响其他任务
-        
+
         HTTP 连接池配置:
             - limit: 总连接数上限 (max_connections)
             - limit_per_host: 单主机连接数 (max_connections_per_host)
-        
+
         Raises:
             Exception: 处理过程中的异常会被记录，但不会中断整体流程
         """
@@ -413,8 +431,7 @@ class UniversalAIProcessor:
         try:
             # 创建连接池
             connector = aiohttp.TCPConnector(
-                limit=self.max_connections,
-                limit_per_host=self.max_connections_per_host
+                limit=self.max_connections, limit_per_host=self.max_connections_per_host
             )
             async with aiohttp.ClientSession(connector=connector) as session:
                 await self._process_loop(session)
@@ -424,9 +441,9 @@ class UniversalAIProcessor:
     async def _process_loop(self, session: aiohttp.ClientSession) -> None:
         """
         主处理循环
-        
+
         实现连续任务流的核心循环逻辑，包含以下 8 个阶段:
-        
+
         处理流程:
             ┌─────────────────────────────────────────────────────────┐
             │                      主循环开始                          │
@@ -467,7 +484,7 @@ class UniversalAIProcessor:
             └───────┬───────┘   清理过期元数据
                     │
                     └─────────────────→ 返回循环开始
-        
+
         Args:
             session: aiohttp 客户端会话
         """
@@ -485,7 +502,9 @@ class UniversalAIProcessor:
                     logging.info("所有分片加载完毕")
                     break
                 current_shard_num += 1
-                logging.info(f"--- 开始处理分片 {current_shard_num}/{self.task_manager.total_shards} ---")
+                logging.info(
+                    f"--- 开始处理分片 {current_shard_num}/{self.task_manager.total_shards} ---"
+                )
 
             # 2. 填充任务池 (Backpressure 控制)
             space_available = self.batch_size - len(active_tasks)
@@ -540,7 +559,10 @@ class UniversalAIProcessor:
                         # 决策
                         decision = self.retry_strategy.decide(error_type, metadata)
 
-                        if decision.action in [RetryAction.RETRY, RetryAction.PAUSE_THEN_RETRY]:
+                        if decision.action in [
+                            RetryAction.RETRY,
+                            RetryAction.PAUSE_THEN_RETRY,
+                        ]:
                             self.task_manager.retried_tasks_count[error_type] += 1
                             logging.warning(
                                 f"记录[{record_id}] {error_type.value}: {result.get('_error')} -> 重试"
@@ -555,7 +577,9 @@ class UniversalAIProcessor:
                                 tasks_to_retry.append((record_id, retry_data))
                             else:
                                 # 重新加载失败，算作系统错误或重试失败
-                                logging.error(f"记录[{record_id}] 重新加载数据失败，放弃任务")
+                                logging.error(
+                                    f"记录[{record_id}] 重新加载数据失败，放弃任务"
+                                )
                                 self.task_manager.max_retries_exceeded_count += 1
                                 self.state_manager.remove_metadata(record_id)
 
@@ -565,8 +589,10 @@ class UniversalAIProcessor:
                                 pause_duration = decision.pause_duration
                                 self.retry_strategy.record_pause()
 
-                        else: # FAIL
-                            logging.error(f"记录[{record_id}] {error_type.value} 超过最大重试次数")
+                        else:  # FAIL
+                            logging.error(
+                                f"记录[{record_id}] {error_type.value} 超过最大重试次数"
+                            )
                             self.task_manager.max_retries_exceeded_count += 1
 
                             # 将错误信息写回数据源
@@ -621,33 +647,33 @@ class UniversalAIProcessor:
     ) -> Dict[str, Any]:
         """
         处理单条记录
-        
+
         完成单条数据的完整处理流程:
         1. 生成 Prompt - 使用 ContentProcessor 将原始数据转换为 AI 输入
         2. 调用 API - 通过 FluxAIClient 发送请求并获取响应
         3. 解析结果 - 提取 AI 返回的结构化数据
-        
+
         异常处理策略:
             - aiohttp 异常 (连接失败、超时): 返回 API_ERROR
             - Prompt 生成失败: 返回 SYSTEM_ERROR
             - 其他未知异常: 返回 SYSTEM_ERROR 并记录详情
-        
+
         Args:
             session: aiohttp 客户端会话
             record_id: 记录唯一标识符
             row_data: 原始记录数据字典
-            
+
         Returns:
             处理结果字典:
             - 成功: 包含解析后的 AI 响应字段
             - 失败: 包含 _error, _error_type, _details 字段
-        
+
         Example:
             # 成功返回
             {"field1": "value1", "field2": "value2"}
-            
+
             # 失败返回
-            {"_error": "api_call_failed: TimeoutError", 
+            {"_error": "api_call_failed: TimeoutError",
              "_error_type": ErrorType.API,
              "_details": "Connection timeout after 30s"}
         """
@@ -687,7 +713,7 @@ class UniversalAIProcessor:
                 messages,
                 model=model,
                 temperature=temperature if temperature_override else None,
-                use_json_schema=use_schema
+                use_json_schema=use_schema,
             )
 
             # 3. 解析结果
@@ -710,10 +736,10 @@ class UniversalAIProcessor:
     def run(self) -> None:
         """
         运行处理器（同步入口）
-        
+
         为异步处理提供同步包装，适用于命令行直接调用。
         内部使用 asyncio.run() 启动事件循环。
-        
+
         使用示例:
             processor = UniversalAIProcessor("config.yaml")
             processor.run()  # 阻塞直到处理完成

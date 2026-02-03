@@ -63,8 +63,13 @@ def _check_rlimit():
         print(f"Current limits: ({soft}, {hard})")
         if soft <= 256:
             from src.utils.console import console
-            print(f"{console.warn} File descriptor limit is too low ({soft}). This triggers crashes on macOS.")
-            print(f"{console.tip} Run 'ulimit -n 10240' or higher before running this program.")
+
+            print(
+                f"{console.warn} File descriptor limit is too low ({soft}). This triggers crashes on macOS."
+            )
+            print(
+                f"{console.tip} Run 'ulimit -n 10240' or higher before running this program."
+            )
     except Exception:
         pass
 
@@ -72,15 +77,15 @@ def _check_rlimit():
 def cmd_process(args):
     """
     执行数据处理子命令
-    
+
     Args:
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
             - validate (bool): 是否仅验证配置
-    
+
     Returns:
         int: 退出码，0 表示成功
-    
+
     工作流程:
         1. 验证模式：加载配置并显示关键信息（数据源、引擎、列配置）
         2. 处理模式：创建处理器并执行完整的数据处理流程
@@ -104,7 +109,9 @@ def cmd_process(args):
         routing = config.get("routing", {})
         if routing.get("enabled"):
             subtasks = routing.get("subtasks", [])
-            print(f"  - Routing: enabled on '{routing.get('field', 'N/A')}' ({len(subtasks)} rules)")
+            print(
+                f"  - Routing: enabled on '{routing.get('field', 'N/A')}' ({len(subtasks)} rules)"
+            )
         return 0
 
     # 创建处理器并执行（使用配置文件路径）
@@ -116,10 +123,10 @@ def cmd_process(args):
 def cmd_gateway(args):
     """
     启动 API 网关子命令
-    
+
     启动 OpenAI 兼容的 API 网关服务，提供多模型负载均衡、
     自动故障切换、令牌桶限流等功能。
-    
+
     Args:
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
@@ -127,10 +134,10 @@ def cmd_gateway(args):
             - port (int): 监听端口，默认 8787
             - workers (int): 工作进程数，默认 1
             - reload (bool): 是否启用热重载（开发模式）
-    
+
     Returns:
         int: 退出码，0 表示成功
-    
+
     网关功能:
         - OpenAI 兼容的 /v1/chat/completions 端点
         - 加权随机模型选择
@@ -154,12 +161,12 @@ def cmd_gateway(args):
 def cmd_version(args):
     """
     显示版本信息子命令
-    
+
     从 src 包的 __version__ 变量读取并显示当前版本号。
-    
+
     Args:
         args: argparse 解析后的命令行参数对象（本命令不使用）
-    
+
     Returns:
         int: 退出码，0 表示成功
     """
@@ -172,21 +179,21 @@ def cmd_version(args):
 def cmd_check(args):
     """
     检查库安装状态子命令
-    
+
     检测高性能可选库（Polars、calamine、xlsxwriter 等）的安装状态，
     并提供缺失库的安装建议。
-    
+
     Args:
         args: argparse 解析后的命令行参数对象（本命令不使用）
-    
+
     Returns:
         int: 退出码，0 表示成功
-    
+
     检查的库:
         - polars: 高性能 DataFrame 库（多线程，比 Pandas 快）
         - calamine: 高性能 Excel 读取器（比 openpyxl 快 10 倍）
         - xlsxwriter: 高性能 Excel 写入器（比 openpyxl 快 3 倍）
-    
+
     输出格式:
         显示每个库的安装状态（✓ 或 ✗），并在最后给出缺失库的安装命令
     """
@@ -217,10 +224,10 @@ def cmd_check(args):
 def cmd_token(args):
     """
     Token 用量估算子命令
-    
+
     基于配置文件和数据源，估算处理任务所需的 Token 数量，
     用于 API 成本预估和预算规划。
-    
+
     Args:
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
@@ -228,14 +235,14 @@ def cmd_token(args):
                 - 'in': 仅估算输入 Token（从未处理数据）
                 - 'out': 仅估算输出 Token（从已处理数据）
                 - 'io' 或 None: 同时估算输入和输出 Token
-    
+
     Returns:
         int: 退出码，0 表示成功，1 表示失败
-    
+
     依赖:
         需要安装 tiktoken 库用于 Token 计数
         pip install tiktoken
-    
+
     输出内容:
         - 总行数和采样行数
         - 预估请求数
@@ -327,19 +334,19 @@ def cmd_token(args):
 def main():
     """
     CLI 主入口函数
-    
+
     创建命令行参数解析器，注册所有子命令，解析参数并分发到对应的命令处理函数。
-    
+
     Returns:
         int: 退出码，0 表示成功，1 表示失败
-    
+
     子命令:
         process     - 运行数据处理
         gateway     - 启动 API 网关
         version     - 显示版本信息
         check       - 检查库安装状态
         token       - 估算 Token 用量
-    
+
     异常处理:
         - KeyboardInterrupt: 用户中断，返回 1
         - Exception: 打印错误信息和堆栈，返回 1
@@ -358,7 +365,7 @@ def main():
     p_process = subparsers.add_parser(
         "process",
         help="Run data processing",
-        description="Run data processing with config file (supports rule routing)"
+        description="Run data processing with config file (supports rule routing)",
     )
     p_process.add_argument(
         "-c", "--config", default="config.yaml", help="Config file path"

@@ -29,15 +29,15 @@
 
 使用示例:
     from src.models.errors import ErrorType, APIError, ConfigError
-    
+
     # 使用错误类型进行分类
     if error_type == ErrorType.API:
         # API 错误重试逻辑...
         pass
-    
+
     # 抛出自定义异常
     raise APIError("连接超时", status_code=504, details={"url": "..."})
-    
+
     # 捕获异常
     try:
         ...
@@ -60,7 +60,7 @@ class ErrorType(str, Enum):
         API: API调用错误 (超时、HTTP错误、网络问题)
         CONTENT: 内容错误 (JSON解析失败、字段验证失败)
         SYSTEM: 系统错误 (内部异常、数据加载失败)
-        
+
     重试策略映射:
         - API: 最多重试 3 次，触发 API 熔断暂停
         - CONTENT: 最多重试 1 次，不暂停
@@ -84,7 +84,7 @@ class AIDataFluxError(Exception):
     Attributes:
         message: 错误消息文本
         details: 附加的错误详情字典 (可选)
-        
+
     使用示例:
         raise AIDataFluxError("操作失败", details={"reason": "..."})
     """
@@ -108,7 +108,7 @@ class ConfigError(AIDataFluxError):
     配置错误
 
     当配置文件无效、缺少必要字段或值不合法时抛出。
-    
+
     常见场景:
         - 配置文件不存在
         - YAML 语法错误
@@ -124,7 +124,7 @@ class DataSourceError(AIDataFluxError):
     数据源错误
 
     当数据源连接失败、读写操作失败时抛出。
-    
+
     常见场景:
         - 数据库连接失败
         - 文件读取/写入失败
@@ -144,7 +144,7 @@ class APIError(AIDataFluxError):
     Attributes:
         status_code: HTTP 状态码 (如适用)
         error_type: 对应的 ErrorType (固定为 API)
-        
+
     常见场景:
         - HTTP 非 200 响应
         - 连接超时
@@ -169,7 +169,7 @@ class ContentError(AIDataFluxError):
     内容处理错误
 
     当 AI 响应内容解析或验证失败时抛出。
-    
+
     常见场景:
         - JSON 解析失败
         - 必需字段缺失
@@ -184,7 +184,7 @@ class ValidationError(ContentError):
     验证错误
 
     当字段值验证失败时抛出，是 ContentError 的子类。
-    
+
     常见场景:
         - 字段值不在允许的枚举范围内
         - 数据类型不匹配

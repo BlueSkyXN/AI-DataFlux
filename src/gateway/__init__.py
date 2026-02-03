@@ -37,10 +37,10 @@ API 端点:
 
 使用示例:
     from src.gateway import create_app, run_server
-    
+
     # 方式一：直接运行服务器
     run_server(config_path="config.yaml", port=8787)
-    
+
     # 方式二：获取 FastAPI 应用实例（用于测试等）
     app = create_app("config.yaml")
 """

@@ -17,7 +17,7 @@
 
 使用示例:
     from src.config import load_config, init_logging
-    
+
     config = load_config("config.yaml")
     init_logging(config.get("global", {}).get("log"))
 """

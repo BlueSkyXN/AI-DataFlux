@@ -18,11 +18,11 @@ AI-DataFlux 数据处理引擎主入口模块
 运行方式:
     # 使用默认配置文件 config.yaml
     python main.py
-    
+
     # 指定自定义配置文件
     python main.py --config my_config.yaml
     python main.py -c my_config.yaml
-    
+
     # 仅验证配置文件有效性
     python main.py --config config.yaml --validate
 
@@ -47,18 +47,18 @@ from src.core import UniversalAIProcessor
 def main() -> int:
     """
     数据处理引擎主入口函数
-    
+
     解析命令行参数，根据用户选择执行配置验证或完整的数据处理流程。
-    
+
     工作流程:
         1. 解析命令行参数（配置文件路径、验证模式）
         2. 如果是验证模式，仅加载并显示配置信息
         3. 否则创建处理器实例并运行完整处理流程
         4. 捕获并处理用户中断和异常
-    
+
     Returns:
         int: 退出码，0 表示成功，1 表示失败
-    
+
     Raises:
         不直接抛出异常，所有异常在内部捕获并转换为退出码
     """

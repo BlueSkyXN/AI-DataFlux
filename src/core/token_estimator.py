@@ -29,7 +29,7 @@ Token 估算器
 
 使用示例:
     from src.core.token_estimator import run_token_estimation
-    
+
     # 估算输入+输出 token
     result = run_token_estimation("config.yaml", mode="io")
     print(f"预估输入 token: {result['input_tokens']['total_estimated']}")
@@ -59,7 +59,7 @@ except ImportError:
 def normalize_mode(mode: str) -> str:
     """
     规范化模式值
-    
+
     将用户输入的各种模式表示统一转换为内部使用的标准形式。
 
     Args:
@@ -67,7 +67,7 @@ def normalize_mode(mode: str) -> str:
 
     Returns:
         规范化后的模式: "in", "out", 或 "io"
-        
+
     Example:
         >>> normalize_mode("input")
         "in"
@@ -94,7 +94,7 @@ class TokenEstimator:
     计算 AI 数据处理任务的预估 token 用量:
     - 输入 token: 系统提示词 + 用户提示词 (含 {record_json} 替换)
     - 输出 token: 基于已处理数据采样，假设纯 JSON 响应
-    
+
     计算流程:
         1. 从数据源采样/获取记录
         2. 构建完整的 API 请求消息 (system + user)

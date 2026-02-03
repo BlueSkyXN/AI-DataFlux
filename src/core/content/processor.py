@@ -37,11 +37,11 @@ JSON 预处理:
         validator=validator,
         use_json_schema=True
     )
-    
+
     # 生成 Prompt
     prompt = processor.create_prompt({"title": "文章标题", "content": "..."})
     # => "请分析: {\"title\":\"文章标题\",\"content\":\"...\"}"
-    
+
     # 解析响应
     result = processor.parse_response('```json\\n{"category": "tech", "score": 85}\\n```')
     # => {"category": "tech", "score": 85}
@@ -59,16 +59,16 @@ from ...models.errors import ErrorType
 class ContentProcessor:
     """
     内容处理器
-    
+
     负责 Prompt 生成、AI 响应解析、JSON 提取和字段验证。
     作为数据处理流程中的核心转换组件。
-    
+
     职责:
         1. 将行数据渲染为 Prompt (create_prompt)
         2. 从 AI 响应中提取 JSON (parse_response)
         3. 构建 JSON Schema (build_schema)
         4. 验证内容合法性 (通过 validator)
-    
+
     Attributes:
         prompt_template: Prompt 模板，使用 {record_json} 占位符
         required_fields: AI 响应中必须包含的字段列表
@@ -103,7 +103,7 @@ class ContentProcessor:
     def create_prompt(self, record_data: Dict[str, Any]) -> str:
         """
         创建提示词
-        
+
         将原始记录数据转换为发送给 AI 的 Prompt 文本。
         数据会被序列化为紧凑格式的 JSON 字符串，
         然后替换模板中的 {record_json} 占位符。
@@ -113,7 +113,7 @@ class ContentProcessor:
 
         Returns:
             渲染后的 Prompt 字符串
-            
+
         Note:
             - 以 _ 开头的内部字段会被过滤
             - None 值会被过滤
@@ -127,7 +127,9 @@ class ContentProcessor:
             filtered_data = {
                 k: v
                 for k, v in record_data.items()
-                if v is not None and not k.startswith("_") and k not in self.exclude_fields
+                if v is not None
+                and not k.startswith("_")
+                and k not in self.exclude_fields
             }
             # 使用 compact 格式序列化 (节省 token)
             record_json_str = json.dumps(
@@ -144,7 +146,7 @@ class ContentProcessor:
     def parse_response(self, content: Optional[str]) -> Dict[str, Any]:
         """
         从 AI 响应中提取 JSON
-        
+
         使用多种策略尝试从 AI 返回的文本中提取有效的 JSON 数据。
         提取后会进行必需字段检查和枚举值验证。
 
@@ -155,12 +157,12 @@ class ContentProcessor:
             解析后的字典:
             - 成功: 包含提取的数据字段
             - 失败: 包含 _error 和 _error_type 字段
-            
+
         提取策略:
             1. 尝试提取 Markdown JSON 代码块 (```json...```)
             2. 尝试直接解析整个响应为 JSON
             3. 使用正则搜索所有 {...} 模式
-            
+
         错误类型:
             - empty_ai_response: AI 返回空内容
             - invalid_field_values: 字段值不在允许范围内
@@ -213,9 +215,9 @@ class ContentProcessor:
 
                 if isinstance(candidate, dict):
                     if not self._check_missing_fields(candidate):
-                         is_valid, _ = self.validator.validate(candidate)
-                         if is_valid:
-                             return candidate
+                        is_valid, _ = self.validator.validate(candidate)
+                        if is_valid:
+                            return candidate
             except json.JSONDecodeError:
                 continue
 
@@ -225,10 +227,10 @@ class ContentProcessor:
     def _check_missing_fields(self, data: Dict[str, Any]) -> List[str]:
         """
         检查缺失字段
-        
+
         Args:
             data: 待检查的数据字典
-            
+
         Returns:
             缺失字段名列表 (空列表表示字段完整)
         """
@@ -239,14 +241,14 @@ class ContentProcessor:
     def build_schema(self) -> Optional[Dict[str, Any]]:
         """
         构建 JSON Schema
-        
+
         根据 required_fields 和 validator.field_rules 构建
         符合 JSON Schema 规范的约束对象。用于 API 的
         response_format.json_schema 参数。
 
         Returns:
             JSON Schema 字典或 None (未启用时)
-            
+
         Schema 结构示例:
             {
                 "type": "object",

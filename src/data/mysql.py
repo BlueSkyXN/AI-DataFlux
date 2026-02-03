@@ -40,13 +40,13 @@ SQL 查询示例:
       AND (out1 IS NULL OR out1 = '')         -- 输出条件
       AND id BETWEEN ? AND ?                   -- 分片范围
     ORDER BY id ASC
-    
+
     # 结果写回
     UPDATE table SET out1 = ?, out2 = ? WHERE id = ?
 
 使用示例:
     from src.data.mysql import MySQLTaskPool
-    
+
     pool = MySQLTaskPool(
         connection_config={
             "host": "localhost",
@@ -60,17 +60,17 @@ SQL 查询示例:
         table_name="tasks",
         pool_size=10,
     )
-    
+
     # 初始化分片
     count = pool.initialize_shard(0, 1, 1000)
-    
+
     # 获取任务批次
     batch = pool.get_task_batch(100)
-    
+
     # 处理后更新结果
     results = {1: {"result": "分析结果"}, 2: {"result": "另一个结果"}}
     pool.update_task_results(results)
-    
+
     # 关闭连接池
     pool.close()
 
@@ -109,38 +109,40 @@ except ImportError:
     # 定义占位符类，避免类型检查和代码引用报错
     class errorcode:  # type: ignore
         """MySQL 错误码占位符"""
+
         ER_ACCESS_DENIED_ERROR = 1045  # 访问被拒绝
-        ER_BAD_DB_ERROR = 1049         # 数据库不存在
+        ER_BAD_DB_ERROR = 1049  # 数据库不存在
 
     class pooling:  # type: ignore
         """连接池占位符"""
+
         pass
 
 
 class MySQLConnectionPoolManager:
     """
     MySQL 连接池管理器（单例模式）
-    
+
     管理全局唯一的 MySQL 连接池实例，确保整个应用共享同一组数据库连接。
     使用双检锁（Double-Checked Locking）保证线程安全的单例创建。
-    
+
     设计原因:
         - 数据库连接创建开销大，需要复用
         - 多个 MySQLTaskPool 实例应共享同一连接池
         - 应用结束时需要统一释放所有连接
-    
+
     Attributes:
         _instance: 单例实例引用
         _lock: 创建锁，保证线程安全
         _pool: MySQLConnectionPool 实例
-    
+
     使用模式:
         # 首次获取（需要配置）
         pool = MySQLConnectionPoolManager.get_pool(config={...}, pool_size=10)
-        
+
         # 后续获取（无需配置）
         pool = MySQLConnectionPoolManager.get_pool()
-        
+
         # 关闭连接池
         MySQLConnectionPoolManager.close_pool()
     """
@@ -158,7 +160,7 @@ class MySQLConnectionPoolManager:
     ) -> Any:
         """
         获取连接池实例（单例）
-        
+
         首次调用必须提供配置，后续调用可省略。
         使用双检锁保证线程安全的单例创建。
 
@@ -179,14 +181,14 @@ class MySQLConnectionPoolManager:
             ImportError: mysql-connector-python 未安装
             ValueError: 首次调用未提供配置
             RuntimeError: 连接池创建失败（连接被拒、数据库不存在等）
-        
+
         示例:
             # 首次创建
             pool = MySQLConnectionPoolManager.get_pool(
                 config={"host": "localhost", "user": "root", ...},
                 pool_size=10
             )
-            
+
             # 后续获取
             pool = MySQLConnectionPoolManager.get_pool()
         """
@@ -236,10 +238,10 @@ class MySQLConnectionPoolManager:
     def close_pool(cls) -> None:
         """
         关闭连接池并释放所有资源
-        
+
         关闭后连接池实例会被清空，下次 get_pool() 会创建新实例。
         应用退出前应调用此方法确保连接正确释放。
-        
+
         注意:
             - 关闭后所有持有连接的操作都会失败
             - 多次调用是安全的（幂等操作）
@@ -256,10 +258,10 @@ class MySQLConnectionPoolManager:
 class MySQLTaskPool(BaseTaskPool):
     """
     MySQL 数据源任务池
-    
+
     从 MySQL 数据库表读取未处理的任务数据，AI 处理后将结果写回。
     使用连接池管理数据库连接，支持高并发访问。
-    
+
     工作流程:
         1. 初始化: 获取连接池 → 配置查询列和写入列
         2. 分片加载: 查询指定 ID 范围的未处理记录 → 填充任务队列
@@ -276,12 +278,12 @@ class MySQLTaskPool(BaseTaskPool):
         current_shard_id (int): 当前分片 ID
         current_min_id (int): 当前分片最小 ID
         current_max_id (int): 当前分片最大 ID
-    
+
     SQL 安全:
         - 表名和列名使用反引号转义
         - 值使用参数化查询（%s 占位符）
         - 防止 SQL 注入攻击
-    
+
     事务管理:
         - 读操作无事务
         - 写操作自动提交/回滚
@@ -298,7 +300,7 @@ class MySQLTaskPool(BaseTaskPool):
     ):
         """
         初始化 MySQL 任务池
-        
+
         创建流程:
             1. 检查 MySQL 连接器可用性
             2. 初始化基类
@@ -358,10 +360,10 @@ class MySQLTaskPool(BaseTaskPool):
     def _get_connection(self) -> Any:
         """
         从连接池获取数据库连接
-        
+
         Returns:
             MySQL 连接对象
-            
+
         Raises:
             RuntimeError: 连接池未初始化
             ConnectionError: 无法获取连接（池耗尽或连接失效）
@@ -378,7 +380,7 @@ class MySQLTaskPool(BaseTaskPool):
     def execute_with_connection(self, callback: Any, is_write: bool = False) -> Any:
         """
         使用连接池连接执行数据库操作
-        
+
         封装连接的获取、使用、归还以及事务管理。
         确保连接在任何情况下都会被正确归还到池中。
 
@@ -396,12 +398,12 @@ class MySQLTaskPool(BaseTaskPool):
         Raises:
             RuntimeError: 数据库操作失败
                 包含原始错误信息，如访问被拒绝、数据库不存在等
-        
+
         使用示例:
             def _query(conn, cursor):
                 cursor.execute("SELECT * FROM table WHERE id = %s", (1,))
                 return cursor.fetchone()
-            
+
             result = self.execute_with_connection(_query, is_write=False)
         """
         conn = None
@@ -466,10 +468,10 @@ class MySQLTaskPool(BaseTaskPool):
     def get_total_task_count(self) -> int:
         """
         获取未处理任务总数
-        
+
         执行 COUNT(*) 查询统计满足未处理条件的记录数。
         未处理条件: 输入列有值 AND 任一输出列为空。
-        
+
         Returns:
             int: 未处理任务数量，查询失败返回 0
         """
@@ -495,10 +497,10 @@ class MySQLTaskPool(BaseTaskPool):
     def get_processed_task_count(self) -> int:
         """
         获取已处理任务总数
-        
+
         统计所有输出列都非空的记录数。
         用于进度统计和 Token 估算采样。
-        
+
         Returns:
             int: 已处理任务数量，查询失败返回 0
         """
@@ -524,9 +526,9 @@ class MySQLTaskPool(BaseTaskPool):
     def get_id_boundaries(self) -> tuple[int, int]:
         """
         获取表中 ID 的边界值
-        
+
         查询 MIN(id) 和 MAX(id)，用于分片调度器划分工作区间。
-        
+
         Returns:
             tuple[int, int]: (最小ID, 最大ID)
             表为空或查询失败返回 (0, 0)
@@ -559,7 +561,7 @@ class MySQLTaskPool(BaseTaskPool):
     def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
         """
         初始化分片，从数据库加载指定 ID 范围的未处理任务
-        
+
         执行 SELECT 查询获取指定范围内的未处理记录，
         并将结果加载到内存任务队列中。
 
@@ -570,7 +572,7 @@ class MySQLTaskPool(BaseTaskPool):
 
         Returns:
             int: 实际加载的任务数量
-        
+
         SQL 示例:
             SELECT id, col1, col2 FROM table
             WHERE id BETWEEN 1 AND 1000
@@ -649,10 +651,10 @@ class MySQLTaskPool(BaseTaskPool):
     def get_task_batch(self, batch_size: int) -> list[tuple[Any, dict[str, Any]]]:
         """
         从内存任务队列获取一批任务
-        
+
         Args:
             batch_size: 请求的任务数量
-            
+
         Returns:
             list[tuple[Any, dict[str, Any]]]: 任务列表
                 - 元组第一个元素是记录 ID
@@ -666,19 +668,19 @@ class MySQLTaskPool(BaseTaskPool):
     def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
         """
         批量写回任务结果到数据库
-        
+
         为每条结果执行 UPDATE 语句。
         所有更新在同一事务中执行，全部成功才提交。
 
         Args:
             results: 结果字典 {记录ID: {别名: 值, ...}}
-        
+
         处理逻辑:
             1. 跳过包含 "_error" 键的失败结果
             2. 根据 columns_to_write 映射构建 SET 子句
             3. 执行参数化 UPDATE 语句
             4. 统一提交或回滚
-        
+
         SQL 示例:
             UPDATE table SET out1 = %s, out2 = %s WHERE id = %s
         """
@@ -747,7 +749,7 @@ class MySQLTaskPool(BaseTaskPool):
     def reload_task_data(self, record_id: int) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
-        
+
         从数据库重新查询指定记录的输入列数据。
         用于 API 错误重试时获取干净的原始数据。
 
@@ -786,9 +788,9 @@ class MySQLTaskPool(BaseTaskPool):
     def close(self) -> None:
         """
         关闭连接池
-        
+
         释放所有数据库连接。调用后不应再使用此任务池实例。
-        
+
         注意:
             连接池是全局单例，关闭后其他 MySQLTaskPool 实例也会受影响。
         """
@@ -800,18 +802,18 @@ class MySQLTaskPool(BaseTaskPool):
     def _build_unprocessed_condition(self) -> str:
         """
         构建未处理任务的 WHERE 条件
-        
+
         未处理的定义:
             - 输入列: 根据 require_all_input_fields 配置
                 - True: 所有输入列都非空（AND 连接）
                 - False: 任一输入列非空（OR 连接）
             - 输出列: 任一输出列为空（OR 连接）
-        
+
         Returns:
             str: WHERE 条件字符串（不含 WHERE 关键字）
-        
+
         示例输出:
-            "((col1 IS NOT NULL AND col1 <> '') AND (col2 IS NOT NULL AND col2 <> '')) 
+            "((col1 IS NOT NULL AND col1 <> '') AND (col2 IS NOT NULL AND col2 <> ''))
              AND ((out1 IS NULL OR out1 = '') OR (out2 IS NULL OR out2 = ''))"
         """
         # 输入条件
@@ -838,13 +840,13 @@ class MySQLTaskPool(BaseTaskPool):
     def _build_processed_condition(self) -> str:
         """
         构建已处理任务的 WHERE 条件
-        
+
         已处理的定义: 所有输出列都非空。
         用于统计已完成数量和输出 Token 采样。
-        
+
         Returns:
             str: WHERE 条件字符串
-        
+
         示例输出:
             "((out1 IS NOT NULL AND out1 <> '') AND (out2 IS NOT NULL AND out2 <> ''))"
         """
