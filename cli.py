@@ -47,11 +47,17 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 
 import argparse
 import sys
-import resource
+
+try:
+    import resource  # Unix-only
+except Exception:
+    resource = None
 
 
 def _check_rlimit():
     """检查文件描述符限制"""
+    if resource is None or sys.platform not in ("darwin", "linux"):
+        return
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         print(f"Current limits: ({soft}, {hard})")
