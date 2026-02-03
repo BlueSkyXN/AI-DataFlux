@@ -7,30 +7,20 @@ Fixtures 是 pytest 的核心概念，用于:
 3. 在多个测试间共享资源
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
 
-# 检测可选依赖可用性
+# 检测可选依赖可用性（使用 importlib 避免 F401 警告）
 try:
     import pandas as pd
 except ModuleNotFoundError:
     pd = None
 
-try:
-    import aiohttp
-
-    AIOHTTP_AVAILABLE = True
-except ModuleNotFoundError:
-    AIOHTTP_AVAILABLE = False
-
-try:
-    import psutil
-
-    PSUTIL_AVAILABLE = True
-except ModuleNotFoundError:
-    PSUTIL_AVAILABLE = False
+AIOHTTP_AVAILABLE = importlib.util.find_spec("aiohttp") is not None
+PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
 
 # 确保可以导入 src 模块
 sys.path.insert(0, str(Path(__file__).parent.parent))

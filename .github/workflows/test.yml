@@ -137,33 +137,7 @@ jobs:
           python -m pip install -r requirements-optional.txt
 
       - name: Verify dependencies availability
-        run: |
-          python -c "
-          import sys
-          missing = []
-          for lib in ['aiohttp', 'psutil', 'polars', 'fastexcel', 'xlsxwriter']:
-              try:
-                  mod = __import__(lib)
-                  print(f'✓ {lib} {getattr(mod, \"__version__\", \"N/A\")}')
-              except ModuleNotFoundError:
-                  print(f'✗ {lib} (missing)')
-                  missing.append(lib)
-          if 'aiohttp' in missing or 'psutil' in missing:
-              print('⚠️  WARNING: Core functionality may be limited', file=sys.stderr)
-          "
-
-      - name: Mark platform capabilities
-        id: check_deps
-        run: |
-          python -c "
-          import sys
-          try:
-              import aiohttp
-              import psutil
-              print('HAS_ASYNC=true')
-          except ModuleNotFoundError:
-              print('HAS_ASYNC=false')
-          " >> \$GITHUB_ENV
+        run: python .github/scripts/check_deps.py
 
       - name: Run unit tests
         run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term
