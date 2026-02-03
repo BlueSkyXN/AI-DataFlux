@@ -221,6 +221,7 @@ class UniversalAIProcessor:
         prompt_cfg = self.config.get("prompt", {})
         self.ai_model = prompt_cfg.get("model", "auto")
         self.ai_temperature = prompt_cfg.get("temperature", 0.7)
+        self.ai_temperature_override = prompt_cfg.get("temperature_override", True)
         self.ai_system_prompt = prompt_cfg.get("system_prompt")
         self.ai_use_json_schema = prompt_cfg.get("use_json_schema", False)
 
@@ -324,6 +325,9 @@ class UniversalAIProcessor:
                 "validator": validator,
                 "model": prompt_cfg.get("model", self.ai_model),
                 "temperature": prompt_cfg.get("temperature", self.ai_temperature),
+                "temperature_override": prompt_cfg.get(
+                    "temperature_override", self.ai_temperature_override
+                ),
                 "system_prompt": prompt_cfg.get("system_prompt"),
                 "use_json_schema": prompt_cfg.get("use_json_schema", self.ai_use_json_schema),
             }
@@ -653,12 +657,14 @@ class UniversalAIProcessor:
                 content_processor = routing_context["content_processor"]
                 model = routing_context["model"]
                 temperature = routing_context["temperature"]
+                temperature_override = routing_context["temperature_override"]
                 system_prompt = routing_context["system_prompt"]
                 use_schema = routing_context["use_json_schema"]
             else:
                 content_processor = self.content_processor
                 model = self.ai_model
                 temperature = self.ai_temperature
+                temperature_override = self.ai_temperature_override
                 system_prompt = self.ai_system_prompt
                 use_schema = self.ai_use_json_schema
 
@@ -680,7 +686,7 @@ class UniversalAIProcessor:
                 session,
                 messages,
                 model=model,
-                temperature=temperature,
+                temperature=temperature if temperature_override else None,
                 use_json_schema=use_schema
             )
 

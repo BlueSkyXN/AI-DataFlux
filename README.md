@@ -307,6 +307,7 @@ prompt:
   use_json_schema: true  # 是否启用JSON Schema输出约束
   model: "auto"          # 使用的AI模型，auto表示自动选择
   temperature: 0.3       # 模型温度参数（0-1之间）
+  temperature_override: true  # 是否覆盖模型默认温度
   system_prompt: |       # 系统提示词（可选）
     你是一个专业的数据分析师...
   template: |            # 提示词模板，{record_json}为数据占位符
@@ -353,7 +354,7 @@ models:
     api_key: "your_api_key_1"    # API密钥
     timeout: 300                 # 超时时间（秒）
     weight: 10                   # 调度权重（使用加权随机算法）
-    temperature: 0.3             # 模型温度
+    temperature: 0.3             # 模型默认温度（请求未提供时生效）
     safe_rps: 5                  # 每秒安全请求数（令牌桶限流）
     supports_json_schema: true   # 是否支持JSON Schema
     supports_advanced_params: false  # 是否支持高级参数（presence_penalty等）

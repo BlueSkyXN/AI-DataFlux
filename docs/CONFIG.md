@@ -883,7 +883,7 @@ prompt:
 | `api_key` | 字符串 | ✓ | API 密钥 |
 | `timeout` | 整数 | ✓ | 超时时间（秒） |
 | `weight` | 整数 | ✓ | 调度权重（加权随机算法） |
-| `temperature` | 浮点数 | ✓ | 模型温度参数（0-1） |
+| `temperature` | 浮点数 | ✓ | 模型默认温度参数（0-1），仅在请求未提供 temperature 时生效 |
 | `safe_rps` | 整数 | ✓ | 每秒安全请求数（令牌桶容量 = safe_rps × 2） |
 | `supports_json_schema` | 布尔值 | ✓ | 是否支持 JSON Schema |
 | `supports_advanced_params` | 布尔值 | ✓ | 是否支持高级参数（presence_penalty 等） |
@@ -1058,14 +1058,26 @@ for attempt in range(3):  # 最多尝试 3 个模型
 
 - **类型**：浮点数（0-1）
 - **默认值**：`0.7`
-- **说明**：模型温度参数
+- **说明**：模型温度参数（仅在 `prompt.temperature_override=true` 时生效）
 - **代码位置**：
-  - 读取：`src/core/processor.py:129`
-  - 使用：`src/core/processor.py:192-194`
+  - 读取：`src/core/processor.py:223`
+  - 使用：`src/core/processor.py:685-690`
 - **影响**：传递给 AI 模型的 temperature 参数
 - **推荐值**：
   - 分类任务：0.1-0.3（低温度，高确定性）
   - 创作任务：0.7-0.9（高温度，高创造性）
+
+#### `prompt.temperature_override`
+
+- **类型**：布尔值
+- **默认值**：`true`
+- **说明**：是否由 `prompt.temperature` 覆盖模型默认温度
+- **代码位置**：
+  - 读取：`src/core/processor.py:224`
+  - 使用：`src/core/processor.py:685-690`、`src/core/clients/flux_client.py:141`
+- **影响**：
+  - `true`：强制发送 `prompt.temperature`
+  - `false`：不发送 temperature，让 Gateway 使用 `models.temperature`
 
 #### `prompt.system_prompt`
 

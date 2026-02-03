@@ -47,6 +47,20 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 
 import argparse
 import sys
+import resource
+
+
+def _check_rlimit():
+    """检查文件描述符限制"""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"Current limits: ({soft}, {hard})")
+        if soft <= 256:
+            from src.utils.console import console
+            print(f"{console.warn} File descriptor limit is too low ({soft}). This triggers crashes on macOS.")
+            print(f"{console.tip} Run 'ulimit -n 10240' or higher before running this program.")
+    except Exception:
+        pass
 
 
 def cmd_process(args):
@@ -69,6 +83,7 @@ def cmd_process(args):
     from src.core import UniversalAIProcessor
 
     if args.validate:
+        _check_rlimit()
         from src.config import load_config
 
         config = load_config(args.config)
@@ -117,6 +132,7 @@ def cmd_gateway(args):
         - 令牌桶限流保护
         - IP 池 DNS 轮询
     """
+    _check_rlimit()
     from src.gateway.app import run_server
 
     run_server(

@@ -46,7 +46,7 @@ class BaseAIClient(ABC):
         session: aiohttp.ClientSession,
         messages: List[Dict[str, str]],
         model: str,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         **kwargs
     ) -> str:
         """
@@ -56,7 +56,7 @@ class BaseAIClient(ABC):
             session: aiohttp Session，用于发送 HTTP 请求
             messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
             model: 模型名称 (如 "gpt-4", "claude-3-opus")
-            temperature: 温度系数，控制输出随机性 (0.0-2.0)
+            temperature: 温度系数，控制输出随机性 (0.0-2.0)；None 表示不发送该参数
             **kwargs: 其他 API 特定参数
 
         Returns:

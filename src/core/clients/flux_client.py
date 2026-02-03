@@ -103,7 +103,7 @@ class FluxAIClient(BaseAIClient):
         session: aiohttp.ClientSession,
         messages: List[Dict[str, str]],
         model: str,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         use_json_schema: bool = False,
         **kwargs
     ) -> str:
@@ -116,7 +116,7 @@ class FluxAIClient(BaseAIClient):
             session: aiohttp 客户端会话
             messages: 消息列表 [{"role": "...", "content": "..."}]
             model: 模型名称 (如 "auto", "gpt-4", "claude-3")
-            temperature: 温度系数 (0.0-2.0)
+            temperature: 温度系数 (0.0-2.0)；None 表示不发送该参数
             use_json_schema: 是否强制 JSON 输出格式
             **kwargs: 其他 OpenAI API 参数 (如 max_tokens)
             
@@ -135,9 +135,11 @@ class FluxAIClient(BaseAIClient):
         payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
             "stream": False,  # 不使用流式响应
         }
+
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         # 启用 JSON 模式
         if use_json_schema:

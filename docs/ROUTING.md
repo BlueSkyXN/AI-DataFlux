@@ -429,6 +429,7 @@ prompt:
   required_fields: ["result"]
   use_json_schema: true
   temperature: 0.1
+  temperature_override: true
   template: "默认模板"
 
 # 子配置（只覆盖 template）
@@ -440,6 +441,7 @@ prompt:
   required_fields: ["result"]      # 保留
   use_json_schema: true            # 保留
   temperature: 0.1                 # 保留
+  temperature_override: true       # 保留
   template: "type_a 专用模板"      # 被覆盖
 ```
 

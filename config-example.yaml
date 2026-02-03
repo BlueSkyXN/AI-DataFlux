@@ -172,6 +172,7 @@ prompt:
     - "sentiment"
   use_json_schema: true
   temperature: 0.3  # 较低温度确保分类准确性
+  temperature_override: true  # 是否覆盖模型默认温度
   system_prompt: |
     你是一个专业的数据分析师，擅长从复杂数据中提取有价值的信息。请根据提供的数据和上下文，给出准确、深入的分析和建议。
   template: |
