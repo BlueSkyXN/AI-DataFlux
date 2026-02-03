@@ -124,16 +124,46 @@ jobs:
           allow-prereleases: true
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-core.txt
           python -m pip install pytest pytest-asyncio pytest-cov pytest-mock
 
-      - name: Verify critical dependencies
+      - name: Install optional dependencies
+        # Windows ARM64 等平台可能缺少某些依赖的预编译 wheel，允许失败
+        continue-on-error: true
         run: |
-          python -c "import aiohttp; print(f'aiohttp {aiohttp.__version__}')"
-          python -c "import psutil; print(f'psutil {psutil.__version__}')"
+          python -m pip install -r requirements-optional.txt
+
+      - name: Verify dependencies availability
+        run: |
+          python -c "
+          import sys
+          missing = []
+          for lib in ['aiohttp', 'psutil', 'polars', 'fastexcel', 'xlsxwriter']:
+              try:
+                  mod = __import__(lib)
+                  print(f'✓ {lib} {getattr(mod, \"__version__\", \"N/A\")}')
+              except ModuleNotFoundError:
+                  print(f'✗ {lib} (missing)')
+                  missing.append(lib)
+          if 'aiohttp' in missing or 'psutil' in missing:
+              print('⚠️  WARNING: Core functionality may be limited', file=sys.stderr)
+          "
+
+      - name: Mark platform capabilities
+        id: check_deps
+        run: |
+          python -c "
+          import sys
+          try:
+              import aiohttp
+              import psutil
+              print('HAS_ASYNC=true')
+          except ModuleNotFoundError:
+              print('HAS_ASYNC=false')
+          " >> \$GITHUB_ENV
 
       - name: Run unit tests
         run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term

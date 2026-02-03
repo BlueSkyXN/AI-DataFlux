@@ -12,13 +12,36 @@ from pathlib import Path
 
 import pytest
 
+# 检测可选依赖可用性
 try:
     import pandas as pd
 except ModuleNotFoundError:
     pd = None
 
+try:
+    import aiohttp
+
+    AIOHTTP_AVAILABLE = True
+except ModuleNotFoundError:
+    AIOHTTP_AVAILABLE = False
+
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ModuleNotFoundError:
+    PSUTIL_AVAILABLE = False
+
 # 确保可以导入 src 模块
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Pytest markers for dependency-based skipping
+requires_aiohttp = pytest.mark.skipif(
+    not AIOHTTP_AVAILABLE, reason="requires aiohttp (not available on this platform)"
+)
+requires_psutil = pytest.mark.skipif(
+    not PSUTIL_AVAILABLE, reason="requires psutil (not available on this platform)"
+)
 
 
 # ==================== 配置 Fixtures ====================
