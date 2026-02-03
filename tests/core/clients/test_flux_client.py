@@ -9,14 +9,17 @@ Flux AI 客户端单元测试
 - JSON 模式支持
 """
 
-import pytest
-import aiohttp
 import asyncio
+import importlib
 from unittest.mock import AsyncMock, MagicMock
-from src.core.clients.flux_client import FluxAIClient
+
+import pytest
+
+aiohttp = pytest.importorskip("aiohttp")
+flux_client_module = importlib.import_module("src.core.clients.flux_client")
+FluxAIClient = flux_client_module.FluxAIClient
 
 
-@pytest.mark.asyncio
 class TestFluxAIClient:
 
     @pytest.fixture
@@ -28,6 +31,7 @@ class TestFluxAIClient:
         session = AsyncMock(spec=aiohttp.ClientSession)
         return session
 
+    @pytest.mark.asyncio
     async def test_call_success(self, client, mock_session):
         # 模拟成功响应
         mock_response = AsyncMock()
@@ -48,6 +52,7 @@ class TestFluxAIClient:
         assert kwargs["json"]["model"] == "gpt-4"
         assert kwargs["json"]["messages"] == messages
 
+    @pytest.mark.asyncio
     async def test_call_api_error(self, client, mock_session):
         # 模拟 500 错误
         mock_response = AsyncMock()
@@ -62,6 +67,7 @@ class TestFluxAIClient:
         with pytest.raises(aiohttp.ClientResponseError):
             await client.call(mock_session, [], model="test")
 
+    @pytest.mark.asyncio
     async def test_call_invalid_json(self, client, mock_session):
         # 模拟 200 但 JSON 无效
         mock_response = AsyncMock()
@@ -76,6 +82,7 @@ class TestFluxAIClient:
 
         assert "Invalid 200 OK response" in str(exc.value)
 
+    @pytest.mark.asyncio
     async def test_call_timeout(self, client, mock_session):
         # 模拟超时
         mock_session.post.side_effect = asyncio.TimeoutError()

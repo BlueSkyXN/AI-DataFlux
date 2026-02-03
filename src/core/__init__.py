@@ -37,12 +37,33 @@
     await processor.process_shard_async_continuous()
 """
 
-from .validator import JsonValidator
-from .scheduler import ShardedTaskManager
-from .processor import UniversalAIProcessor
+from __future__ import annotations
 
-__all__ = [
-    "JsonValidator",
-    "ShardedTaskManager",
-    "UniversalAIProcessor",
-]
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .validator import JsonValidator
+    from .scheduler import ShardedTaskManager
+    from .processor import UniversalAIProcessor
+
+__all__ = ["JsonValidator", "ShardedTaskManager", "UniversalAIProcessor"]
+
+
+def __getattr__(name: str):
+    if name == "JsonValidator":
+        from .validator import JsonValidator
+
+        return JsonValidator
+    if name == "ShardedTaskManager":
+        from .scheduler import ShardedTaskManager
+
+        return ShardedTaskManager
+    if name == "UniversalAIProcessor":
+        from .processor import UniversalAIProcessor
+
+        return UniversalAIProcessor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

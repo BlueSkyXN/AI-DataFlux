@@ -57,7 +57,10 @@ import logging
 import time
 from typing import Any
 
-import psutil
+try:
+    import psutil
+except ModuleNotFoundError:  # pragma: no cover - 环境缺少依赖时的兜底
+    psutil = None
 
 from ..models.errors import ErrorType
 from ..data.base import BaseTaskPool
@@ -162,11 +165,14 @@ class ShardedTaskManager:
         }
 
         # 获取进程信息
-        try:
-            self._process_info = psutil.Process()
-        except psutil.Error as e:
-            logging.warning(f"无法获取当前进程信息 (psutil): {e}，内存监控将不可用")
-            self._process_info = None
+        self._process_info = None
+        if psutil is None:
+            logging.warning("psutil 未安装，内存监控将不可用")
+        else:
+            try:
+                self._process_info = psutil.Process()
+            except psutil.Error as e:
+                logging.warning(f"无法获取当前进程信息 (psutil): {e}，内存监控将不可用")
 
         logging.info("ShardedTaskManager 初始化完成")
 
@@ -195,7 +201,7 @@ class ShardedTaskManager:
         # 基于内存的限制
         memory_based_limit = self.max_shard_size
 
-        if self._process_info:
+        if self._process_info and psutil is not None:
             try:
                 mem = psutil.virtual_memory()
                 available_mb = mem.available / (1024 * 1024)
@@ -205,7 +211,7 @@ class ShardedTaskManager:
                     if record_size_mb_estimate > 0
                     else self.max_shard_size
                 )
-            except psutil.Error as e:
+            except Exception as e:
                 logging.warning(f"计算内存限制时出错: {e}")
 
         # 基于处理速度的限制
@@ -414,7 +420,7 @@ class ShardedTaskManager:
             - current_memory_usage: 当前进程内存 (MB)
             - peak_memory_usage: 峰值内存使用 (MB)
         """
-        if not self._process_info:
+        if not self._process_info or psutil is None:
             return
 
         current_time = time.time()
@@ -453,7 +459,7 @@ class ShardedTaskManager:
                 logging.info(f"GC 后内存: {current_mem_after_gc:.1f}MB")
                 self.memory_tracker["current_memory_usage"] = current_mem_after_gc
 
-        except psutil.Error as e:
+        except Exception as e:
             logging.warning(f"内存监控检查失败: {e}")
 
     def finalize(self) -> None:
