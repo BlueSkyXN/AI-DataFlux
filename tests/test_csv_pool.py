@@ -13,8 +13,7 @@ CSV 数据源复用 ExcelTaskPool，通过文件扩展名自动检测。
 
 import pytest
 
-from src.data.excel import ExcelTaskPool
-from src.data.factory import create_task_pool
+pd = pytest.importorskip("pandas")
 
 
 class TestCSVAutoDetection:
@@ -35,6 +34,8 @@ class TestCSVAutoDetection:
 
     def test_csv_auto_detection(self, temp_csv):
         """测试 CSV 文件自动检测"""
+        from src.data.excel import ExcelTaskPool
+
         pool = ExcelTaskPool(
             input_path=temp_csv,
             output_path=temp_csv,
@@ -51,7 +52,7 @@ class TestCSVAutoDetection:
 
     def test_excel_not_detected_as_csv(self, tmp_path):
         """测试 Excel 文件不被误检测为 CSV"""
-        import pandas as pd
+        from src.data.excel import ExcelTaskPool
 
         excel_path = tmp_path / "test_data.xlsx"
         df = pd.DataFrame({"col1": [1, 2, 3]})
@@ -89,6 +90,8 @@ class TestCSVTaskPool:
     @pytest.fixture
     def csv_pool(self, temp_csv):
         """创建 CSV 任务池"""
+        from src.data.excel import ExcelTaskPool
+
         pool = ExcelTaskPool(
             input_path=temp_csv,
             output_path=temp_csv,
@@ -164,6 +167,8 @@ class TestCSVFactoryIntegration:
 
     def test_create_csv_pool_via_factory(self, temp_csv):
         """测试通过工厂方法创建 CSV 任务池"""
+        from src.data.factory import create_task_pool
+
         config = {
             "datasource": {
                 "type": "csv",
@@ -190,6 +195,8 @@ class TestCSVFactoryIntegration:
 
     def test_create_csv_pool_missing_path(self):
         """测试缺少路径配置时抛出异常"""
+        from src.data.factory import create_task_pool
+
         config = {
             "datasource": {"type": "csv"},
             "csv": {},  # 缺少 input_path
@@ -208,6 +215,8 @@ class TestCSVEncodingHandling:
 
     def test_utf8_encoding(self, tmp_path):
         """测试 UTF-8 编码"""
+        from src.data.excel import ExcelTaskPool
+
         csv_path = tmp_path / "utf8.csv"
         csv_content = """id,text
 1,中文文本
@@ -232,6 +241,8 @@ class TestCSVEncodingHandling:
 
     def test_special_characters(self, tmp_path):
         """测试特殊字符"""
+        from src.data.excel import ExcelTaskPool
+
         csv_path = tmp_path / "special.csv"
         csv_content = """id,text
 1,"包含,逗号"
@@ -261,6 +272,8 @@ class TestCSVLargeFile:
 
     def test_large_csv_performance(self, tmp_path):
         """测试大 CSV 文件处理性能"""
+        from src.data.excel import ExcelTaskPool
+
         csv_path = tmp_path / "large.csv"
 
         # 创建 1000 行数据

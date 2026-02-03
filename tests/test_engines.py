@@ -9,7 +9,8 @@
 """
 
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas")
 
 
 class TestEngineFactory:

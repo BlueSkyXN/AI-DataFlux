@@ -169,6 +169,16 @@ class SQLiteConnectionManager:
                 "数据库路径未设置，请先调用 set_db_path() 或传入 db_path 参数"
             )
 
+        # 如果已存在连接但路径不同，先关闭旧连接避免跨库复用与文件锁
+        existing_conn = getattr(cls._thread_local, "conn", None)
+        existing_db_path = getattr(cls._thread_local, "db_path", None)
+        if existing_conn is not None and existing_db_path != path_to_use:
+            logging.debug(
+                "检测到 SQLite 连接路径切换，关闭旧连接: "
+                f"{existing_db_path} -> {path_to_use}"
+            )
+            cls.close_connection()
+
         # 检查是否需要创建新连接
         if not hasattr(cls._thread_local, "conn") or cls._thread_local.conn is None:
             logging.debug(f"为线程 {threading.current_thread().name} 创建 SQLite 连接")
@@ -200,6 +210,11 @@ class SQLiteConnectionManager:
         """
         if hasattr(cls._thread_local, "conn") and cls._thread_local.conn:
             try:
+                # WAL 模式下先做 checkpoint，减少 Windows 下文件锁残留概率
+                try:
+                    cls._thread_local.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
                 cls._thread_local.conn.close()
                 logging.debug(
                     f"线程 {threading.current_thread().name} 的 SQLite 连接已关闭"
@@ -208,6 +223,7 @@ class SQLiteConnectionManager:
                 logging.warning(f"关闭 SQLite 连接时出错: {e}")
             finally:
                 cls._thread_local.conn = None
+                cls._thread_local.db_path = None
 
 
 class SQLiteTaskPool(BaseTaskPool):

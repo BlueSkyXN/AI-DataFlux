@@ -11,7 +11,11 @@ import sys
 from pathlib import Path
 
 import pytest
-import pandas as pd
+
+try:
+    import pandas as pd
+except ModuleNotFoundError:
+    pd = None
 
 # 确保可以导入 src 模块
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -78,8 +82,10 @@ def sample_config_file(sample_config, tmp_path) -> Path:
 
 
 @pytest.fixture
-def sample_dataframe() -> pd.DataFrame:
+def sample_dataframe() -> "pd.DataFrame":
     """提供示例 DataFrame"""
+    if pd is None:
+        pytest.skip("pandas not available on this platform")
     return pd.DataFrame(
         {
             "id": [1, 2, 3, 4, 5],
@@ -93,6 +99,8 @@ def sample_dataframe() -> pd.DataFrame:
 @pytest.fixture
 def sample_excel_file(sample_dataframe, tmp_path) -> Path:
     """创建临时 Excel 文件"""
+    if pd is None:
+        pytest.skip("pandas not available on this platform")
     excel_path = tmp_path / "test_data.xlsx"
     sample_dataframe.to_excel(excel_path, index=False, engine="openpyxl")
     return excel_path
@@ -104,6 +112,8 @@ def sample_excel_file(sample_dataframe, tmp_path) -> Path:
 @pytest.fixture
 def pandas_engine():
     """提供 PandasEngine 实例"""
+    if pd is None:
+        pytest.skip("pandas not available on this platform")
     from src.data.engines import PandasEngine
 
     return PandasEngine()

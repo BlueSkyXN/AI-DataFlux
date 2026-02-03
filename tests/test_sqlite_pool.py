@@ -10,6 +10,7 @@ SQLite 数据源任务池单元测试
 
 import pytest
 import sqlite3
+import time
 from unittest.mock import MagicMock
 from src.data.sqlite import SQLiteTaskPool, SQLiteConnectionManager
 
@@ -86,7 +87,13 @@ class TestSQLiteTaskPool:
             SQLiteConnectionManager.close_connection()
         finally:
             if db_path.exists():
-                db_path.unlink()
+                for _ in range(5):
+                    try:
+                        db_path.unlink()
+                        break
+                    except PermissionError:
+                        SQLiteConnectionManager.close_connection()
+                        time.sleep(0.1)
 
     @pytest.fixture
     def task_pool(self, temp_db):
@@ -284,7 +291,13 @@ class TestSQLiteTaskPoolWithRequireAny:
             SQLiteConnectionManager.close_connection()
         finally:
             if db_path.exists():
-                db_path.unlink()
+                for _ in range(5):
+                    try:
+                        db_path.unlink()
+                        break
+                    except PermissionError:
+                        SQLiteConnectionManager.close_connection()
+                        time.sleep(0.1)
 
     def test_require_any_input_field(self, temp_db):
         """测试 require_all_input_fields=False"""

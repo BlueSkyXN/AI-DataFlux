@@ -252,7 +252,7 @@ class TestTokenEstimatorIntegration:
     @pytest.fixture
     def sample_excel_with_data(self, tmp_path):
         """创建带数据的 Excel 文件"""
-        import pandas as pd
+        pd = pytest.importorskip("pandas")
 
         df = pd.DataFrame(
             {
