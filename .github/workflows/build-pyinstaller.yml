@@ -87,9 +87,15 @@ jobs:
           python cli.py version
           python cli.py check
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (Unix)
+        if: runner.os != 'Windows'
         run: |
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist:web/dist" cli.py
+
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist;web/dist" cli.py
 
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'

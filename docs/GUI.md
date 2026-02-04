@@ -81,6 +81,14 @@ python cli.py gui
 | `GET` | `/api/config?path=config.yaml` | 读取配置文件内容 |
 | `PUT` | `/api/config` | 写入配置文件（自动备份） |
 
+**PUT /api/config 请求体**:
+```json
+{
+  "path": "config.yaml",
+  "content": "# YAML content..."
+}
+```
+
 ### 进程管理 API
 
 | 方法 | 路径 | 说明 |
@@ -90,6 +98,22 @@ python cli.py gui
 | `POST` | `/api/process/start` | 启动 Process |
 | `POST` | `/api/process/stop` | 停止 Process |
 | `GET` | `/api/status` | 获取所有进程状态 |
+
+**POST /api/gateway/start 请求体** (可选):
+```json
+{
+  "config_path": "config.yaml",
+  "port": 8787,
+  "workers": 1
+}
+```
+
+**POST /api/process/start 请求体** (可选):
+```json
+{
+  "config_path": "config.yaml"
+}
+```
 
 ### 日志流 API
 
