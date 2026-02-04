@@ -170,6 +170,7 @@ jobs:
           python cli.py --help
           python cli.py process --help
           python cli.py gateway --help
+          python cli.py gui --help
           python cli.py process --config config-example.yaml --validate
 
   # 高性能库测试

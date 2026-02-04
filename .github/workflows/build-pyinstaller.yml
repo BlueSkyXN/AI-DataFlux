@@ -14,10 +14,12 @@ on:
       - 'main.py'
       - 'gateway.py'
       - 'requirements.txt'
+      - 'web/**'
   pull_request:
     paths:
       - 'src/**'
       - '*.py'
+      - 'web/**'
   workflow_dispatch:
     inputs:
       version:
@@ -28,6 +30,7 @@ on:
 env:
   APP_NAME: AI-DataFlux
   PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
 
 jobs:
   build:
@@ -54,6 +57,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
+
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
@@ -73,7 +89,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} cli.py
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist:web/dist" cli.py
 
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
@@ -123,6 +139,13 @@ jobs:
             ### Build Info
             - Builder: PyInstaller
             - Python: ${{ env.PYTHON_VERSION }}
+            - Node.js: ${{ env.NODE_VERSION }}
+            - Includes: Web GUI Control Panel
+            
+            ### Features
+            - Web GUI for managing Gateway and Process
+            - Configuration editor with backup
+            - Real-time log streaming
           files: |
             artifacts/**/*
           generate_release_notes: true
