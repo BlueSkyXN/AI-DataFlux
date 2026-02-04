@@ -74,6 +74,17 @@
 
 ---
 
+### [DATA_SOURCE.md](./DATA_SOURCE.md) - 数据源读写回机制
+
+**从代码逻辑出发**，说明当前支持的数据源类型（Excel/CSV/MySQL/PostgreSQL/SQLite）以及：
+
+- 任务“未处理/已处理”的判定规则
+- 分片读取方案与 `task_id` 定位方式
+- 各数据源写回策略与关键差异（如缺失字段写回语义）
+- Excel 保存与 CSV 回退策略
+
+---
+
 ### [../CLAUDE.md](../CLAUDE.md) - Claude Code 开发指南
 
 **专为 Claude Code CLI 准备的开发文档**：
@@ -118,4 +129,4 @@
 
 ---
 
-*最后更新: 2026-02-02*
+*最后更新: 2026-02-04*
