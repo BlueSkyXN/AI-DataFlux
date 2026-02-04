@@ -251,6 +251,7 @@ def create_control_app() -> FastAPI:
             try:
                 await websocket.send_text(line)
             except Exception:
+                logging.debug(f"Failed to send history log to WebSocket: {target}")
                 break
 
         try:
@@ -260,8 +261,10 @@ def create_control_app() -> FastAPI:
                 if data == "ping":
                     await websocket.send_text("pong")
         except WebSocketDisconnect:
+            logging.debug(f"WebSocket client disconnected: {target}")
             ws_manager.disconnect(websocket, target)
         except Exception:
+            logging.exception(f"WebSocket error for {target}")
             ws_manager.disconnect(websocket, target)
 
     # ========== Static Files ==========

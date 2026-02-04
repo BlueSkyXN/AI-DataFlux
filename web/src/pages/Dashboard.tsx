@@ -7,6 +7,60 @@ interface DashboardProps {
   onConfigPathChange: (path: string) => void;
 }
 
+// Loading spinner component
+function LoadingSpinner() {
+  return (
+    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+    </svg>
+  );
+}
+
+// Confirmation dialog component
+function ConfirmDialog({
+  open,
+  title,
+  message,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
+      
+      {/* Dialog */}
+      <div className="relative bg-white rounded-2xl p-6 shadow-lg max-w-md w-full mx-4">
+        <h3 className="text-lg font-semibold text-gray-800 mb-2">{title}</h3>
+        <p className="text-gray-600 mb-6">{message}</p>
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-4 py-2 text-sm font-medium text-white bg-rose-500 rounded-lg hover:bg-rose-600"
+          >
+            Stop
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StatusLight({ status }: { status: string }) {
   let colorClass = 'bg-gray-400';
   let glowClass = '';
@@ -35,6 +89,10 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [loading, setLoading] = useState<{ gateway: boolean; process: boolean }>({ gateway: false, process: false });
   const [error, setError] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean;
+    target: 'gateway' | 'process' | null;
+  }>({ open: false, target: null });
 
   // Fetch status periodically
   const refreshStatus = useCallback(async () => {
@@ -67,6 +125,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
   };
 
   const handleStopGateway = async () => {
+    setConfirmDialog({ open: false, target: null });
     setLoading(prev => ({ ...prev, gateway: true }));
     try {
       await stopGateway();
@@ -91,6 +150,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
   };
 
   const handleStopProcess = async () => {
+    setConfirmDialog({ open: false, target: null });
     setLoading(prev => ({ ...prev, process: true }));
     try {
       await stopProcess();
@@ -120,6 +180,15 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
 
   return (
     <div className="p-6 space-y-6">
+      {/* Confirmation Dialog */}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        title={`Stop ${confirmDialog.target === 'gateway' ? 'Gateway' : 'Process'}?`}
+        message={`Are you sure you want to stop the ${confirmDialog.target === 'gateway' ? 'Gateway' : 'Process'}? ${confirmDialog.target === 'process' ? 'Any ongoing processing will be interrupted.' : ''}`}
+        onConfirm={confirmDialog.target === 'gateway' ? handleStopGateway : handleStopProcess}
+        onCancel={() => setConfirmDialog({ open: false, target: null })}
+      />
+
       {/* Config Path Input */}
       <div className="bg-white rounded-2xl p-6 shadow-[0_2px_12px_rgba(0,0,0,0.04)]">
         <label className="block text-sm font-medium text-gray-600 mb-2">
@@ -160,15 +229,17 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
             <button
               onClick={handleStartGateway}
               disabled={loading.gateway || gatewayStatus === 'running'}
-              className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
+              {loading.gateway && gatewayStatus !== 'running' && <LoadingSpinner />}
               Start
             </button>
             <button
-              onClick={handleStopGateway}
+              onClick={() => setConfirmDialog({ open: true, target: 'gateway' })}
               disabled={loading.gateway || gatewayStatus !== 'running'}
-              className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
+              {loading.gateway && gatewayStatus === 'running' && <LoadingSpinner />}
               Stop
             </button>
           </div>
@@ -211,15 +282,17 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
             <button
               onClick={handleStartProcess}
               disabled={loading.process || processStatus === 'running'}
-              className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
+              {loading.process && processStatus !== 'running' && <LoadingSpinner />}
               Start
             </button>
             <button
-              onClick={handleStopProcess}
+              onClick={() => setConfirmDialog({ open: true, target: 'process' })}
               disabled={loading.process || processStatus !== 'running'}
-              className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
+              {loading.process && processStatus === 'running' && <LoadingSpinner />}
               Stop
             </button>
           </div>

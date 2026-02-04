@@ -46,12 +46,65 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 """
 
 import argparse
+import os
 import sys
 
 try:
     import resource  # Unix-only
 except Exception:
     resource = None
+
+
+def _validate_port(value: str) -> int:
+    """
+    验证端口号范围
+
+    Args:
+        value: 用户输入的端口号字符串
+
+    Returns:
+        int: 验证通过的端口号
+
+    Raises:
+        argparse.ArgumentTypeError: 端口号无效
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid port: {value!r} is not a number")
+
+    if not (1024 <= port <= 65535):
+        raise argparse.ArgumentTypeError(
+            f"Port must be between 1024 and 65535, got {port}"
+        )
+    return port
+
+
+def _validate_config_path(value: str) -> str:
+    """
+    验证配置文件路径（仅检查基本格式，不检查存在性）
+
+    验证模式时会检查文件存在性。启动服务时可能配置文件稍后创建。
+
+    Args:
+        value: 用户输入的配置文件路径
+
+    Returns:
+        str: 配置文件路径
+
+    Raises:
+        argparse.ArgumentTypeError: 路径无效
+    """
+    if not value:
+        raise argparse.ArgumentTypeError("Config path cannot be empty")
+
+    # 检查文件扩展名是否合理
+    if not value.endswith((".yaml", ".yml")):
+        raise argparse.ArgumentTypeError(
+            f"Config file should have .yaml or .yml extension, got: {value}"
+        )
+
+    return value
 
 
 def _check_rlimit():
@@ -418,7 +471,13 @@ def main():
         "-c", "--config", default="config.yaml", help="Config file path"
     )
     p_gateway.add_argument("--host", default="0.0.0.0", help="Listen address")
-    p_gateway.add_argument("-p", "--port", type=int, default=8787, help="Listen port")
+    p_gateway.add_argument(
+        "-p",
+        "--port",
+        type=_validate_port,
+        default=8787,
+        help="Listen port (1024-65535)",
+    )
     p_gateway.add_argument(
         "-w", "--workers", type=int, default=1, help="Worker processes"
     )
@@ -448,7 +507,11 @@ def main():
     # ===== gui 子命令：Web GUI 控制面板 =====
     p_gui = subparsers.add_parser("gui", help="Start GUI control panel")
     p_gui.add_argument(
-        "-p", "--port", type=int, default=8790, help="Control server port"
+        "-p",
+        "--port",
+        type=_validate_port,
+        default=8790,
+        help="Control server port (1024-65535)",
     )
     p_gui.add_argument(
         "--no-browser", action="store_true", help="Don't open browser automatically"

@@ -1,16 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { connectLogs } from '../api';
+import { AutoReconnectWebSocket } from '../api';
 import type { LogTarget } from '../types';
 
 export default function Logs() {
   const [target, setTarget] = useState<LogTarget>('gateway');
   const [logs, setLogs] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectInfo, setReconnectInfo] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const logContainerRef = useRef<HTMLPreElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<AutoReconnectWebSocket | null>(null);
 
-  // Connect to WebSocket
+  // Connect to WebSocket with auto-reconnect
   const connect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
@@ -18,10 +20,12 @@ export default function Logs() {
 
     setLogs([]);
     setConnected(false);
+    setReconnecting(false);
+    setReconnectInfo(null);
 
-    const ws = connectLogs(
+    const ws = new AutoReconnectWebSocket({
       target,
-      (line) => {
+      onMessage: (line) => {
         if (line === 'pong') return;  // Ignore ping responses
         setLogs((prev) => {
           const newLogs = [...prev, line];
@@ -32,18 +36,22 @@ export default function Logs() {
           return newLogs;
         });
       },
-      () => {
+      onConnect: () => {
+        setConnected(true);
+        setReconnecting(false);
+        setReconnectInfo(null);
+      },
+      onDisconnect: () => {
         setConnected(false);
-      }
-    );
-
-    ws.onopen = () => {
-      setConnected(true);
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-    };
+      },
+      onReconnecting: (attempt, delay) => {
+        setReconnecting(true);
+        setReconnectInfo(`Reconnecting (attempt ${attempt}, ${Math.round(delay / 1000)}s)...`);
+      },
+      maxRetries: -1,  // Infinite retries
+      initialDelay: 1000,
+      maxDelay: 30000,
+    });
 
     wsRef.current = ws;
   }, [target]);
@@ -110,11 +118,11 @@ export default function Logs() {
             <div className="flex items-center gap-2 text-sm">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  connected ? 'bg-green-400' : 'bg-gray-400'
+                  connected ? 'bg-green-400' : reconnecting ? 'bg-yellow-400 animate-pulse' : 'bg-gray-400'
                 }`}
               />
               <span className="text-gray-600">
-                {connected ? 'Connected' : 'Disconnected'}
+                {connected ? 'Connected' : reconnecting ? reconnectInfo || 'Reconnecting...' : 'Disconnected'}
               </span>
             </div>
             
@@ -129,7 +137,7 @@ export default function Logs() {
             </label>
 
             <div className="flex gap-2">
-              {!connected && (
+              {!connected && !reconnecting && (
                 <button
                   onClick={handleReconnect}
                   className="px-3 py-1.5 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
@@ -163,7 +171,7 @@ export default function Logs() {
         >
           {logs.length === 0 ? (
             <span className="text-slate-500">
-              {connected ? 'Waiting for logs...' : 'Not connected. Click Reconnect to start.'}
+              {connected ? 'Waiting for logs...' : reconnecting ? 'Reconnecting to server...' : 'Not connected. Click Reconnect to start.'}
             </span>
           ) : (
             logs.map((line, i) => (

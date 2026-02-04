@@ -456,8 +456,8 @@ class ProcessManager:
                             pass
             except asyncio.CancelledError:
                 pass
-            except Exception as e:
-                logging.debug(f"Log reader for {name} ended: {e}")
+            except Exception:
+                logging.exception(f"Log reader for {name} ended with error")
 
         # 创建任务 (需要在事件循环中)
         try:

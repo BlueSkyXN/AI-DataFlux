@@ -80,7 +80,7 @@ export async function stopProcess(): Promise<ManagedProcessStatus> {
   return response.json();
 }
 
-// WebSocket connection for logs
+// WebSocket connection for logs (basic)
 export function connectLogs(
   target: 'gateway' | 'process',
   onMessage: (line: string) => void,
@@ -112,4 +112,128 @@ export function connectLogs(
   };
   
   return ws;
+}
+
+// Auto-reconnecting WebSocket connection with exponential backoff
+export interface AutoReconnectOptions {
+  target: 'gateway' | 'process';
+  onMessage: (line: string) => void;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+  onReconnecting?: (attempt: number, delay: number) => void;
+  maxRetries?: number;  // -1 for infinite
+  initialDelay?: number;  // ms
+  maxDelay?: number;  // ms
+}
+
+export class AutoReconnectWebSocket {
+  private ws: WebSocket | null = null;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private retryCount = 0;
+  private isClosed = false;
+  private options: Required<AutoReconnectOptions>;
+
+  constructor(options: AutoReconnectOptions) {
+    this.options = {
+      maxRetries: -1,
+      initialDelay: 1000,
+      maxDelay: 30000,
+      onConnect: () => {},
+      onDisconnect: () => {},
+      onReconnecting: () => {},
+      ...options,
+    };
+    this.connect();
+  }
+
+  private connect(): void {
+    if (this.isClosed) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/api/logs?target=${this.options.target}`;
+    
+    try {
+      this.ws = new WebSocket(wsUrl);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.ws.onopen = () => {
+      this.retryCount = 0;
+      this.options.onConnect?.();
+      this.startPing();
+    };
+
+    this.ws.onmessage = (event) => {
+      if (event.data !== 'pong') {
+        this.options.onMessage(event.data);
+      }
+    };
+
+    this.ws.onerror = () => {
+      // Error will be followed by close, so we handle reconnect there
+    };
+
+    this.ws.onclose = () => {
+      this.stopPing();
+      this.options.onDisconnect?.();
+      if (!this.isClosed) {
+        this.scheduleReconnect();
+      }
+    };
+  }
+
+  private scheduleReconnect(): void {
+    if (this.isClosed) return;
+    if (this.options.maxRetries >= 0 && this.retryCount >= this.options.maxRetries) {
+      return;
+    }
+
+    // Exponential backoff with jitter
+    const delay = Math.min(
+      this.options.initialDelay * Math.pow(2, this.retryCount) + Math.random() * 1000,
+      this.options.maxDelay
+    );
+    
+    this.retryCount++;
+    this.options.onReconnecting?.(this.retryCount, delay);
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.connect();
+    }, delay);
+  }
+
+  private startPing(): void {
+    this.pingInterval = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send('ping');
+      }
+    }, 30000);
+  }
+
+  private stopPing(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  public close(): void {
+    this.isClosed = true;
+    this.stopPing();
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
+  public isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
 }
