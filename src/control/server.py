@@ -120,7 +120,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # 在事件循环中广播
         try:
             loop = asyncio.get_running_loop()
-            asyncio.ensure_future(ws_manager.broadcast(name, line))
+            task = loop.create_task(ws_manager.broadcast(name, line))
+            # 添加异常处理回调，避免未处理的异常警告
+            task.add_done_callback(
+                lambda t: t.exception() if t.done() and not t.cancelled() else None
+            )
         except RuntimeError:
             pass
 

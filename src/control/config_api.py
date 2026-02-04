@@ -39,14 +39,16 @@ def _validate_path(path: str) -> str:
     Raises:
         HTTPException: 403 - 路径在项目目录外
     """
-    # 确保 PROJECT_ROOT 以 / 结尾便于比较
-    root_with_sep = PROJECT_ROOT if PROJECT_ROOT.endswith(os.sep) else PROJECT_ROOT + os.sep
-
     # 解析符号链接和 .. 等
     real = os.path.realpath(os.path.join(PROJECT_ROOT, path))
 
-    # 检查是否在项目目录内 (或等于项目根)
-    if not (real == PROJECT_ROOT or real.startswith(root_with_sep)):
+    # 使用 commonpath 检查是否在项目目录内 (跨平台安全)
+    try:
+        common = os.path.commonpath([PROJECT_ROOT, real])
+        if common != PROJECT_ROOT:
+            raise HTTPException(403, "Path outside project directory")
+    except ValueError:
+        # Windows 上不同驱动器会抛出 ValueError
         raise HTTPException(403, "Path outside project directory")
 
     return real

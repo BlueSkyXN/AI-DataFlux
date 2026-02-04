@@ -41,6 +41,12 @@ PROJECT_ROOT = str(Path(__file__).parent.parent.parent.resolve())
 # 进度文件路径
 PROGRESS_FILE = ".dataflux_progress.json"
 
+# 进度文件超时时间（秒）- 超过此时间未更新视为过期
+PROGRESS_TIMEOUT_SECONDS = 15
+
+# 日志缓冲区大小（行数）
+LOG_BUFFER_SIZE = 1000
+
 
 @dataclass
 class ManagedProcess:
@@ -130,12 +136,12 @@ class ProcessManager:
             "gateway": [],
             "process": [],
         }
-        # 日志环形缓冲区 (最近 1000 行)
+        # 日志环形缓冲区
         self._log_buffer: Dict[str, List[str]] = {
             "gateway": [],
             "process": [],
         }
-        self._log_buffer_size = 1000
+        self._log_buffer_size = LOG_BUFFER_SIZE
         self._read_tasks: Dict[str, Optional[asyncio.Task]] = {
             "gateway": None,
             "process": None,
@@ -416,8 +422,8 @@ class ProcessManager:
             with open(progress_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # 检查时间戳，超过 15 秒视为过期
-            if time.time() - data.get("ts", 0) > 15:
+            # 检查时间戳，超时视为过期
+            if time.time() - data.get("ts", 0) > PROGRESS_TIMEOUT_SECONDS:
                 return None
 
             return data
