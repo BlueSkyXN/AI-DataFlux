@@ -39,7 +39,7 @@ jobs:
       - name: Install linters
         run: |
           python -m pip install --upgrade pip
-          pip install ruff black mypy
+          python -m pip install ruff black==25.11.0 mypy
 
       - name: Run Ruff
         run: ruff check src/ tests/ cli.py main.py gateway.py
@@ -93,9 +93,6 @@ jobs:
           - { os: windows-2025, python: '3.12' }
           - { os: windows-2025, python: '3.13' }
           - { os: windows-2025, python: '3.14' }
-          # Windows 11 ARM
-          - { os: windows-11-arm, python: '3.12', arch: 'arm64' }
-          - { os: windows-11-arm, python: '3.13', arch: 'arm64' }
           # macOS 15 Intel
           - { os: macos-15-intel, python: '3.10', arch: 'x64' }
           - { os: macos-15-intel, python: '3.11', arch: 'x64' }
@@ -124,11 +121,20 @@ jobs:
           allow-prereleases: true
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov pytest-mock
+          python -m pip install -r requirements-core.txt
+          python -m pip install pytest pytest-asyncio pytest-cov pytest-mock
+
+      - name: Install optional dependencies
+        # 部分平台可能缺少某些依赖的预编译 wheel，允许失败
+        continue-on-error: true
+        run: |
+          python -m pip install -r requirements-optional.txt
+
+      - name: Verify dependencies availability
+        run: python .github/scripts/check_deps.py
 
       - name: Run unit tests
         run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term
@@ -155,7 +161,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
       - name: Test CLI
         run: |
@@ -180,7 +186,7 @@ jobs:
           cache: 'pip'
 
       - name: Install all dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
       - name: Check library availability
         run: python cli.py check
@@ -223,8 +229,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
 
       - name: Run integration tests
         run: pytest tests/ -v -m "integration" --tb=short

@@ -1,18 +1,31 @@
-# AI-DataFlux 依赖
-# 核心依赖
+# AI-DataFlux 完整依赖（包含可选高性能库）
+# 如果在某些平台安装失败，可以尝试：
+#   pip install -r requirements-core.txt
+#   pip install -r requirements-optional.txt  # 允许部分失败
+
+# 核心依赖（必须）
 pyyaml>=6.0
-aiohttp>=3.9.0
 pandas>=2.0.0
 openpyxl>=3.1.0
-psutil>=5.9.0
-
-# API 网关依赖
 pydantic>=2.0.0
+
+# API 网关和异步支持（可选，但推荐）
+aiohttp>=3.9.0
+
 fastapi>=0.100.0
 uvicorn>=0.23.0
 
-# MySQL 数据源 (可选)
+# 系统监控（可选，但推荐）
+psutil>=5.9.0
+
+# MySQL 数据源（可选）
 mysql-connector-python>=8.0.0
+
+# PostgreSQL 数据源 (可选)
+# pip install psycopg2-binary
+psycopg2-binary>=2.9.0
+
+# SQLite 数据源 - Python 标准库自带，无需安装
 
 # 高性能引擎 (可选，推荐安装以获得最佳性能)
 # pip install numpy polars python-calamine fastexcel xlsxwriter

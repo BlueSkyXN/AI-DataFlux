@@ -5,7 +5,7 @@ global:
     format: "text"        # 日志格式: text 或 json
     output: "console"     # 日志输出: console 或 file
     file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
-  flux_api_url: http://127.0.0.1:8787    # Flux API端点URL
+  flux_api_url: http://127.0.0.1:8787    # Flux API端点URL（自动补全 /v1/chat/completions）
 
 # 网关配置
 gateway:
@@ -14,7 +14,7 @@ gateway:
 
 # 数据源类型配置
 datasource:
-  type: excel   # 数据源类型: mysql 或 excel
+  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite
   
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
@@ -53,11 +53,33 @@ mysql:
   password: "your_password"
   database: "ai_tasks"
   table_name: "tasks"
+  pool_size: 10                   # 数据库连接池大小（默认为batch_size的1/10）
 
 # Excel数据源配置（仅当type=excel时有效）
 excel:
   input_path: "./data/input.xlsx"
   output_path: "./data/output.xlsx"
+
+# PostgreSQL数据源配置（仅当type=postgresql时有效）
+postgresql:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "your_password"
+  database: "ai_tasks"
+  table_name: "tasks"
+  schema_name: "public"           # 可选，默认为 public
+  pool_size: 10                   # 连接池大小（默认为batch_size的1/10）
+
+# SQLite数据源配置（仅当type=sqlite时有效）
+sqlite:
+  db_path: "./data/tasks.db"      # 数据库文件路径
+  table_name: "tasks"
+
+# CSV数据源配置（仅当type=csv时有效）
+csv:
+  input_path: "./data/input.csv"
+  output_path: "./data/output.csv"  # 可选，默认为 input_path
 
 # 需要从表中提取的字段
 columns_to_extract:
@@ -150,6 +172,7 @@ prompt:
     - "sentiment"
   use_json_schema: true
   temperature: 0.3  # 较低温度确保分类准确性
+  temperature_override: true  # 是否覆盖模型默认温度
   system_prompt: |
     你是一个专业的数据分析师，擅长从复杂数据中提取有价值的信息。请根据提供的数据和上下文，给出准确、深入的分析和建议。
   template: |
@@ -185,3 +208,44 @@ token_estimation:
   sample_size: -1         # -1=全量计算(忽略处理状态), >0=采样数量
   encoding: o200k_base    # 固定使用最新编码器
   # tiktoken_model: gpt-4o  # 可选: 当未指定 encoding 时用于选择编码器
+
+# ============================================================
+# 规则路由配置 (可选)
+# ============================================================
+# 
+# 规则路由允许在处理单个数据文件时，根据记录中某个字段的值
+# 动态选择不同的 prompt 和 validation 配置。
+#
+# 使用场景：
+#   - 单个数据文件包含多种类型的数据（如不同部门、产品线）
+#   - 不同类型需要不同的分类标签和提示词
+#   - 希望一次处理完成，无需拆分文件
+#
+# 配置说明：
+#   - routing.enabled: 是否启用路由功能
+#   - routing.field: 用于路由判断的字段名（必须包含在 columns_to_extract 中）
+#   - routing.subtasks: 路由规则列表
+#     - match: 字段值（精确匹配）
+#     - profile: 子配置文件路径（相对于主配置文件目录）
+#
+# 子配置文件限制：
+#   - 仅允许包含 prompt 和 validation 两个顶层键
+#   - 只需写差异字段，未写字段保留主配置的值
+#
+# 行为规则：
+#   - 路由字段不存在于记录中 → 使用主配置（默认配置）
+#   - 路由字段值无匹配规则 → 使用主配置（默认配置）
+#   - 匹配成功 → 子配置深度合并到主配置
+#
+# 详细文档：docs/ROUTING.md
+#
+# routing:
+#   enabled: true
+#   field: "category"                # 用于路由的字段名（示例：按 category 字段路由）
+#   subtasks:
+#     - match: "type_a"              # 当 category="type_a" 时
+#       profile: ".config/rules/type_a.yaml"
+#     - match: "type_b"              # 当 category="type_b" 时
+#       profile: ".config/rules/type_b.yaml"
+#     - match: "type_c"              # 当 category="type_c" 时
+#       profile: ".config/rules/type_c.yaml"

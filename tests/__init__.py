@@ -14,14 +14,15 @@ AI-DataFlux 测试套件
     ├── test_models.py       # 数据模型测试
     ├── test_processor.py    # 处理器核心测试
     ├── test_scheduler.py    # 分片调度器测试
+    ├── test_token_estimator.py # Token 估算器测试
     └── test_validator.py    # JSON 验证器测试
 
 测试统计:
-    - 测试总数: 143 个 (1 个跳过)
-    - 测试文件: 9 个
-    - 测试代码行数: ~2400 行
-    - 覆盖率: 45.36% (核心模块 60-96%)
+    - 测试总数: 164（基于 def test_，不含参数化展开与跳过统计）
+    - 测试文件: 10
+    - 测试代码行数: 2636（tests 目录 .py 总行数，含 conftest 与 __init__）
+    - 覆盖率: 以最新覆盖率报告为准
 
 参考项目: SuperBatchVideoCompressor
-更新时间: 2025-12-09
+更新时间: 2026-01-12
 """

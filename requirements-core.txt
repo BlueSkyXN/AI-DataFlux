@@ -1,0 +1,9 @@
+# AI-DataFlux 核心依赖（必须安装）
+pyyaml>=6.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pydantic>=2.0.0
+
+# 数据源依赖（必须）
+mysql-connector-python>=8.0.0
+psycopg2-binary>=2.9.0
