@@ -58,10 +58,12 @@
 """
 
 import asyncio
+import json
 import logging
+import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -115,16 +117,20 @@ class UniversalAIProcessor:
         task_manager: ShardedTaskManager 实例
     """
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, progress_file: str = None):
         """
         初始化处理器
 
         Args:
             config_path: 配置文件路径
+            progress_file: 进度文件路径 (可选，用于 GUI 控制面板)
 
         Raises:
             ValueError: 配置加载失败
         """
+        # 保存进度文件路径
+        self.progress_file = progress_file
+
         # 1. 加载配置
         try:
             config_path_obj = Path(config_path)
@@ -279,6 +285,53 @@ class UniversalAIProcessor:
             raise RuntimeError(f"无法初始化分片任务管理器: {e}") from e
 
         logging.info("UniversalAIProcessor 初始化完成 (组件化版本)")
+
+    def _write_progress(self) -> None:
+        """
+        写入进度文件 (GUI 控制面板读取)
+
+        仅当 progress_file 参数被设置时才写入。
+        使用原子写入 (写临时文件后 rename) 保证数据一致性。
+        """
+        if not self.progress_file:
+            return
+
+        try:
+            # 计算当前分片
+            current_shard = min(
+                self.task_manager.current_shard_index, self.task_manager.total_shards
+            )
+
+            data = {
+                "total": self.task_manager.total_estimated,
+                "processed": self.task_manager.total_processed_successfully,
+                "active": self.state_manager.get_active_count(),
+                "shard": f"{current_shard}/{self.task_manager.total_shards}",
+                "errors": self.task_manager.max_retries_exceeded_count,
+                "ts": time.time(),
+            }
+
+            tmp_path = self.progress_file + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, self.progress_file)
+        except Exception as e:
+            logging.debug(f"写入进度文件失败: {e}")
+
+    def _cleanup_progress(self) -> None:
+        """
+        清理进度文件
+
+        在处理正常结束时调用，删除进度文件。
+        """
+        if not self.progress_file:
+            return
+
+        try:
+            if os.path.exists(self.progress_file):
+                os.remove(self.progress_file)
+        except OSError:
+            pass
 
     def _init_routing_contexts(self) -> None:
         """
@@ -641,6 +694,8 @@ class UniversalAIProcessor:
                 last_progress_time = current_time
                 # 清理过期元数据
                 self.state_manager.cleanup_expired()
+                # 写入进度文件 (GUI 控制面板读取)
+                self._write_progress()
 
     async def _process_one_record(
         self, session: aiohttp.ClientSession, record_id: Any, row_data: Dict[str, Any]
@@ -745,5 +800,9 @@ class UniversalAIProcessor:
             processor.run()  # 阻塞直到处理完成
         """
         logging.info("启动 AI 数据处理引擎...")
-        asyncio.run(self.process_shard_async_continuous())
+        try:
+            asyncio.run(self.process_shard_async_continuous())
+        finally:
+            # 清理进度文件
+            self._cleanup_progress()
         logging.info("AI 数据处理引擎已停止")

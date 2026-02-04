@@ -82,6 +82,7 @@ def cmd_process(args):
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
             - validate (bool): 是否仅验证配置
+            - progress_file (str): 进度文件路径 (可选，用于 GUI 控制面板)
 
     Returns:
         int: 退出码，0 表示成功
@@ -114,8 +115,11 @@ def cmd_process(args):
             )
         return 0
 
+    # 获取进度文件路径 (可选)
+    progress_file = getattr(args, "progress_file", None)
+
     # 创建处理器并执行（使用配置文件路径）
-    processor = UniversalAIProcessor(args.config)
+    processor = UniversalAIProcessor(args.config, progress_file=progress_file)
     processor.run()
     return 0
 
@@ -331,6 +335,35 @@ def cmd_token(args):
     return 0
 
 
+def cmd_gui(args):
+    """
+    启动 GUI 控制面板子命令
+
+    启动 Web GUI 控制面板，提供配置编辑、进程管理和日志查看功能。
+
+    Args:
+        args: argparse 解析后的命令行参数对象
+            - port (int): 控制服务器端口，默认 8790
+            - no_browser (bool): 是否禁止自动打开浏览器
+
+    Returns:
+        int: 退出码，0 表示成功
+
+    使用示例:
+        python cli.py gui              # 启动并打开浏览器
+        python cli.py gui -p 8080      # 使用自定义端口
+        python cli.py gui --no-browser # 不打开浏览器
+    """
+    from src.control.server import run_control_server
+
+    port = args.port
+    open_browser = not getattr(args, "no_browser", False)
+
+    # 启动 Control Server
+    run_control_server(host="127.0.0.1", port=port, open_browser=open_browser)
+    return 0
+
+
 def main():
     """
     CLI 主入口函数
@@ -373,6 +406,10 @@ def main():
     p_process.add_argument(
         "--validate", action="store_true", help="Only validate config"
     )
+    p_process.add_argument(
+        "--progress-file",
+        help="Progress file path (used by GUI control panel)",
+    )
     p_process.set_defaults(func=cmd_process)
 
     # ===== gateway 子命令：API 网关 =====
@@ -407,6 +444,16 @@ def main():
         help="Estimation mode: in (input from input file), out (output from output file), io (both)",
     )
     p_token.set_defaults(func=cmd_token)
+
+    # ===== gui 子命令：Web GUI 控制面板 =====
+    p_gui = subparsers.add_parser("gui", help="Start GUI control panel")
+    p_gui.add_argument(
+        "-p", "--port", type=int, default=8790, help="Control server port"
+    )
+    p_gui.add_argument(
+        "--no-browser", action="store_true", help="Don't open browser automatically"
+    )
+    p_gui.set_defaults(func=cmd_gui)
 
     # 解析命令行参数
     args = parser.parse_args()
