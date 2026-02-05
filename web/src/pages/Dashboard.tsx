@@ -191,9 +191,10 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
   const processIsExternal = processStatus !== 'running' && Boolean(processProgress);
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Confirmation Dialog */}
-      <ConfirmDialog
+    <div className="h-full flex flex-col">
+      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Confirmation Dialog */}
+        <ConfirmDialog
         open={confirmDialog.open}
         title={interpolate(t.stopConfirmTitle, { target: confirmDialog.target === 'gateway' ? t.gateway : t.process })}
         message={`${interpolate(t.stopConfirmMessage, { target: confirmDialog.target === 'gateway' ? t.gateway : t.process })} ${confirmDialog.target === 'process' ? t.stopConfirmMessageProcess : ''}`}
@@ -353,6 +354,7 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
           </div>
         )}
       </div>
+    </div>
     </div>
   );
 }
