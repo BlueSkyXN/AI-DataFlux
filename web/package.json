@@ -10,12 +10,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "js-yaml": "^4.1.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@tailwindcss/vite": "^4.1.18",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
