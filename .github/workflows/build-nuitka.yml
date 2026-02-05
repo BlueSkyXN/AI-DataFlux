@@ -14,10 +14,12 @@ on:
       - 'main.py'
       - 'gateway.py'
       - 'requirements.txt'
+      - 'web/**'
   pull_request:
     paths:
       - 'src/**'
       - '*.py'
+      - 'web/**'
   workflow_dispatch:
     inputs:
       version:
@@ -28,6 +30,7 @@ on:
 env:
   APP_NAME: AI-DataFlux
   PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
 
 jobs:
   build:
@@ -53,6 +56,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -89,6 +105,7 @@ jobs:
             --onefile \
             --standalone \
             --assume-yes-for-downloads \
+            --include-data-dir=web/dist=web/dist \
             --output-filename=${{ env.APP_NAME }} \
             --output-dir=dist \
             cli.py
@@ -96,7 +113,7 @@ jobs:
       - name: Build with Nuitka (Windows)
         if: runner.os == 'Windows'
         run: |
-          python -m nuitka --onefile --standalone --assume-yes-for-downloads --output-filename=${{ env.APP_NAME }}.exe --output-dir=dist cli.py
+          python -m nuitka --onefile --standalone --assume-yes-for-downloads --include-data-dir=web/dist=web/dist --output-filename=${{ env.APP_NAME }}.exe --output-dir=dist cli.py
 
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
@@ -146,6 +163,8 @@ jobs:
             ### Build Info
             - Builder: Nuitka (compiled to native code)
             - Python: ${{ env.PYTHON_VERSION }}
+            - Node.js: ${{ env.NODE_VERSION }}
+            - Includes: Web GUI Control Panel
             
             ### Note
             Nuitka builds are compiled to native machine code, offering better startup time and runtime performance compared to PyInstaller bundles.

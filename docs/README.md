@@ -29,6 +29,26 @@
 
 ---
 
+### [GUI.md](./GUI.md) - Web GUI 控制面板 🖥️
+
+**本地 Web GUI 控制面板使用指南**：
+
+- **功能概述** - 配置编辑、进程管理、日志查看
+- **快速开始** - 启动控制面板的命令和参数
+- **架构设计** - Control Server 与子进程的关系
+- **API 接口** - REST API 和 WebSocket 接口说明
+- **进程状态** - 三态状态机（stopped/running/exited）
+- **开发说明** - 前端和后端的开发指南
+- **跨平台支持** - Linux/macOS/Windows 兼容性
+
+**使用方式**：
+```bash
+python cli.py gui              # 启动控制面板
+python cli.py gui --port 8080  # 指定端口
+```
+
+---
+
 ### [CONFIG.md](./CONFIG.md) - 配置参数详解
 
 **配置文件完全指南**，涵盖所有配置节：
@@ -112,9 +132,10 @@
 
 1. **了解系统** → 阅读 [ARCH.md](./ARCH.md) 第1章「系统概览」
 2. **配置项目** → 参考 [CONFIG.md](./CONFIG.md) 和 `config-example.yaml`
-3. **规则路由** → 查看 [ROUTING.md](./ROUTING.md) 和 `config-example.yaml`
-4. **开发贡献** → 查看 [../CLAUDE.md](../CLAUDE.md) 了解开发流程
-5. **运行测试** → `pytest tests/` 确保代码质量
+3. **使用 GUI** → 运行 `python cli.py gui` 或参考 [GUI.md](./GUI.md)
+4. **规则路由** → 查看 [ROUTING.md](./ROUTING.md) 和 `config-example.yaml`
+5. **开发贡献** → 查看 [../CLAUDE.md](../CLAUDE.md) 了解开发流程
+6. **运行测试** → `pytest tests/` 确保代码质量
 
 ---
 
@@ -124,6 +145,7 @@
 |------|------|--------|------|
 | ARCH.md | 2048 | 13 | 系统架构完整说明 |
 | CONFIG.md | 1200+ | 11 | 配置参数详解 |
+| GUI.md | 200+ | 8 | Web GUI 控制面板 |
 | ROUTING.md | 300+ | 8 | 规则路由指南 |
 | CLAUDE.md | 600+ | 多个 | 开发指南 |
 

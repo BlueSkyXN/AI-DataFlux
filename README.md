@@ -80,6 +80,9 @@ python cli.py check
 # 查看版本
 python cli.py version
 
+# 启动 Web GUI 控制面板
+python cli.py gui
+
 # 启动 API 网关
 python cli.py gateway --port 8787
 
@@ -98,6 +101,39 @@ python cli.py token --config config.yaml --mode out
 # 估算 Token 用量 (输入+输出)
 python cli.py token --config config.yaml --mode io
 ```
+
+### Web GUI 控制面板
+
+AI-DataFlux 提供了一个本地 Web GUI 控制面板，方便管理 Gateway 和 Process 服务。
+
+```bash
+# 启动控制面板（自动打开浏览器）
+python cli.py gui
+
+# 指定端口
+python cli.py gui --port 8080
+
+# 不自动打开浏览器
+python cli.py gui --no-browser
+```
+
+控制面板功能：
+
+- **Dashboard**：启动/停止 Gateway 和 Process，查看运行状态和进度
+  - 实时状态监控（PID、端口、模型数、运行时间等）
+  - 进度条显示任务处理进度
+  - 支持外部进程检测（External标签）
+- **配置编辑**：在线编辑 YAML 配置文件，支持自动备份和语法验证
+- **日志查看**：实时查看 Gateway 和 Process 的日志输出
+  - 左右分栏同时显示 Gateway 和 Process 日志
+  - WebSocket 自动重连
+  - 支持日志复制和清空
+- **多语言支持**：界面支持中文/英文切换
+- **工作目录显示**：实时显示当前工作目录
+
+控制面板默认运行在 `http://127.0.0.1:8790`，仅监听本地地址。
+
+**详细文档**：[Web GUI 控制面板指南](./docs/GUI.md)
 
 ### 规则路由
 
@@ -408,15 +444,23 @@ AI-DataFlux/
 │   │       ├── base.py         # 引擎抽象基类
 │   │       ├── pandas_engine.py  # Pandas 实现
 │   │       └── polars_engine.py  # Polars 高性能实现
-│   └── gateway/         # API 网关
-│       ├── app.py       # FastAPI 应用
-│       ├── service.py   # 核心服务逻辑
-│       ├── dispatcher.py # 模型调度器
-│       ├── limiter.py   # 限流组件
-│       ├── session.py   # HTTP 连接池管理
-│       ├── resolver.py  # 自定义 DNS 解析器
-│       └── schemas.py   # Pydantic 模型
+│   ├── gateway/         # API 网关
+│   │   ├── app.py       # FastAPI 应用
+│   │   ├── service.py   # 核心服务逻辑
+│   │   ├── dispatcher.py # 模型调度器
+│   │   ├── limiter.py   # 限流组件
+│   │   ├── session.py   # HTTP 连接池管理
+│   │   ├── resolver.py  # 自定义 DNS 解析器
+│   │   └── schemas.py   # Pydantic 模型
+│   └── control/         # Web GUI 控制面板
+│       ├── server.py    # FastAPI 控制服务器
+│       ├── config_api.py # 配置文件 API
+│       └── process_manager.py # 进程生命周期管理
+├── web/                 # 前端代码 (React + TypeScript)
+│   ├── src/             # 源代码
+│   └── dist/            # 构建产物（需 npm run build）
 ├── docs/
+│   ├── GUI.md           # Web GUI 使用指南
 │   ├── DESIGN.md        # 详细设计文档
 │   ├── LOGIC_FRAMEWORK.md # 逻辑架构图
 │   └── architecture_diagram.md # 系统架构图
