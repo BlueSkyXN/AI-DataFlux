@@ -204,20 +204,6 @@ export default function Dashboard({ configPath, onConfigPathChange, language }: 
         confirmText={t.stop}
       />
 
-      {/* Config Path Input */}
-      <div className="bg-white rounded-2xl p-6 shadow-[0_2px_12px_rgba(0,0,0,0.04)]">
-        <label className="block text-sm font-medium text-gray-600 mb-2">
-          {t.configFilePath}
-        </label>
-        <input
-          type="text"
-          value={configPath}
-          onChange={(e) => onConfigPathChange(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent"
-          placeholder="config.yaml"
-        />
-      </div>
-
       {/* Error Message */}
       {error && (
         <div className="bg-red-50 text-red-600 px-4 py-3 rounded-lg">
