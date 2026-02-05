@@ -19,6 +19,9 @@
 - [提示词配置 (prompt)](#提示词配置-prompt)
 - [规则路由 (routing)](#规则路由-routing)
 - [Token 估算配置 (token_estimation)](#token-估算配置-token_estimation)
+- [GUI 控制面板配置](#gui-控制面板配置) ⭐ 新增
+- [常见配置场景](#常见配置场景)
+- [配置优先级](#配置优先级)
 - [配置加载机制](#配置加载机制)
 
 ---
@@ -1292,6 +1295,75 @@ datasource:
 ## 配置文件示例
 
 完整的配置文件示例请参考项目根目录的 `config-example.yaml`。
+
+---
+
+## GUI 控制面板配置
+
+虽然 GUI 控制面板不需要在 `config.yaml` 中配置，但可以通过环境变量和命令行参数进行定制。
+
+### 启动参数
+
+```bash
+python cli.py gui              # 默认配置（端口 8790，自动打开浏览器）
+python cli.py gui --port 8080  # 自定义端口
+python cli.py gui --no-browser # 不自动打开浏览器
+```
+
+### 环境变量
+
+| 变量名 | 用途 | 默认值 | 示例 |
+|--------|------|--------|------|
+| `DATAFLUX_PROJECT_ROOT` | 覆盖项目根目录 | 自动检测 | `/path/to/project` |
+| `AI_DATAFLUX_PROJECT_ROOT` | 同上（别名） | 自动检测 | `/path/to/project` |
+| `DATAFLUX_GUI_CORS_ORIGINS` | CORS 白名单（逗号分隔） | `http://127.0.0.1:5173,http://localhost:5173` | `http://127.0.0.1:5173` |
+
+**使用示例**：
+```bash
+# 覆盖项目根目录（配置读写/子进程 cwd 都基于此目录）
+DATAFLUX_PROJECT_ROOT=/path/to/project python cli.py gui
+
+# 自定义 CORS 白名单（开发调试用）
+DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
+```
+
+### 进度文件
+
+**文件路径**：`{PROJECT_ROOT}/.dataflux_progress.json`
+
+**PROJECT_ROOT 计算规则**：
+1. 环境变量 `DATAFLUX_PROJECT_ROOT` 或 `AI_DATAFLUX_PROJECT_ROOT`（最高优先级）
+2. 源码模式：仓库根目录（当前为 `/Users/sky/GitHub/AI-DataFlux`）
+3. 打包模式：
+   - 当前工作目录（如包含 `config.yaml` 或 `config-example.yaml`）
+   - 可执行文件所在目录（否则）
+
+**文件格式**：
+```json
+{
+  "total": 1000,                // 总任务数
+  "completed": 250,             // 已完成
+  "failed": 5,                  // 失败数
+  "success": 245,               // 成功数
+  "ts": 1707000000.0            // 更新时间戳
+}
+```
+
+**更新时机**：
+- `UniversalAIProcessor` 每 5 秒更新一次
+- 任务完成/失败时立即更新
+- 完成时删除文件
+
+**超时时间**：15 秒未更新视为过期（返回 None）
+
+**代码位置**：
+- 写入：`src/core/processor.py:_update_progress_file()`
+- 读取：`src/control/process_manager.py:_read_progress_file()`
+- 路径解析：`src/control/runtime.py:get_project_root()`
+
+### API 接口
+
+详细的 API 接口说明请参考 [GUI.md](./GUI.md#api-接口)。
 
 ---
 
