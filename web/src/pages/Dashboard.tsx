@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import type { StatusResponse } from '../types';
 import { fetchStatus, startGateway, stopGateway, startProcess, stopProcess } from '../api';
+import { getTranslations, interpolate, type Language } from '../i18n';
 
 interface DashboardProps {
   configPath: string;
   onConfigPathChange: (path: string) => void;
+  language: Language;
 }
 
 // Loading spinner component
@@ -24,12 +26,16 @@ function ConfirmDialog({
   message,
   onConfirm,
   onCancel,
+  cancelText,
+  confirmText,
 }: {
   open: boolean;
   title: string;
   message: string;
   onConfirm: () => void;
   onCancel: () => void;
+  cancelText: string;
+  confirmText: string;
 }) {
   if (!open) return null;
 
@@ -37,7 +43,7 @@ function ConfirmDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
-      
+
       {/* Dialog */}
       <div className="relative bg-white rounded-2xl p-6 shadow-lg max-w-md w-full mx-4">
         <h3 className="text-lg font-semibold text-gray-800 mb-2">{title}</h3>
@@ -47,13 +53,13 @@ function ConfirmDialog({
             onClick={onCancel}
             className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
           >
-            Cancel
+            {cancelText}
           </button>
           <button
             onClick={onConfirm}
             className="px-4 py-2 text-sm font-medium text-white bg-rose-500 rounded-lg hover:bg-rose-600"
           >
-            Stop
+            {confirmText}
           </button>
         </div>
       </div>
@@ -85,7 +91,8 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
-export default function Dashboard({ configPath, onConfigPathChange }: DashboardProps) {
+export default function Dashboard({ configPath, onConfigPathChange, language }: DashboardProps) {
+  const t = getTranslations(language);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [loading, setLoading] = useState<{ gateway: boolean; process: boolean }>({ gateway: false, process: false });
   const [error, setError] = useState<string | null>(null);
@@ -101,9 +108,9 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       setStatus(data);
       setError(null);
     } catch {
-      setError('Failed to connect to Control Server');
+      setError(t.failedToConnect);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     refreshStatus();
@@ -118,7 +125,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       await startGateway(configPath);
       await refreshStatus();
     } catch (err) {
-      setError(`Failed to start Gateway: ${err}`);
+      setError(`${t.failedToStartGateway}: ${err}`);
     } finally {
       setLoading(prev => ({ ...prev, gateway: false }));
     }
@@ -131,7 +138,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       await stopGateway();
       await refreshStatus();
     } catch (err) {
-      setError(`Failed to stop Gateway: ${err}`);
+      setError(`${t.failedToStopGateway}: ${err}`);
     } finally {
       setLoading(prev => ({ ...prev, gateway: false }));
     }
@@ -143,7 +150,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       await startProcess(configPath);
       await refreshStatus();
     } catch (err) {
-      setError(`Failed to start Process: ${err}`);
+      setError(`${t.failedToStartProcess}: ${err}`);
     } finally {
       setLoading(prev => ({ ...prev, process: false }));
     }
@@ -156,7 +163,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       await stopProcess();
       await refreshStatus();
     } catch (err) {
-      setError(`Failed to stop Process: ${err}`);
+      setError(`${t.failedToStopProcess}: ${err}`);
     } finally {
       setLoading(prev => ({ ...prev, process: false }));
     }
@@ -189,16 +196,18 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       {/* Confirmation Dialog */}
       <ConfirmDialog
         open={confirmDialog.open}
-        title={`Stop ${confirmDialog.target === 'gateway' ? 'Gateway' : 'Process'}?`}
-        message={`Are you sure you want to stop the ${confirmDialog.target === 'gateway' ? 'Gateway' : 'Process'}? ${confirmDialog.target === 'process' ? 'Any ongoing processing will be interrupted.' : ''}`}
+        title={interpolate(t.stopConfirmTitle, { target: confirmDialog.target === 'gateway' ? t.gateway : t.process })}
+        message={`${interpolate(t.stopConfirmMessage, { target: confirmDialog.target === 'gateway' ? t.gateway : t.process })} ${confirmDialog.target === 'process' ? t.stopConfirmMessageProcess : ''}`}
         onConfirm={confirmDialog.target === 'gateway' ? handleStopGateway : handleStopProcess}
         onCancel={() => setConfirmDialog({ open: false, target: null })}
+        cancelText={t.cancel}
+        confirmText={t.stop}
       />
 
       {/* Config Path Input */}
       <div className="bg-white rounded-2xl p-6 shadow-[0_2px_12px_rgba(0,0,0,0.04)]">
         <label className="block text-sm font-medium text-gray-600 mb-2">
-          Config File Path
+          {t.configFilePath}
         </label>
         <input
           type="text"
@@ -221,14 +230,14 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <StatusLight status={gatewayIsExternal ? 'running' : gatewayStatus} />
-            <h2 className="text-lg font-semibold text-gray-800">Gateway</h2>
+            <h2 className="text-lg font-semibold text-gray-800">{t.gateway}</h2>
             {gatewayIsExternal && (
               <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-600 rounded-full">
-                External
+                {t.external}
               </span>
             )}
             <span className="text-sm text-gray-500 capitalize">
-              {gatewayIsExternal ? 'Running (External)' : gatewayStatus}
+              {gatewayIsExternal ? `${t.running} (${t.external})` : gatewayStatus === 'running' ? t.running : gatewayStatus === 'stopped' ? t.stopped : t.exited}
             </span>
           </div>
           <div className="flex gap-2">
@@ -238,7 +247,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.gateway && gatewayStatus !== 'running' && <LoadingSpinner />}
-              Start
+              {t.start}
             </button>
             <button
               onClick={() => setConfirmDialog({ open: true, target: 'gateway' })}
@@ -246,7 +255,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
               className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.gateway && gatewayStatus === 'running' && <LoadingSpinner />}
-              Stop
+              {t.stop}
             </button>
           </div>
         </div>
@@ -254,21 +263,21 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
         {/* Gateway Info */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div>
-            <span className="text-gray-500">PID:</span>
+            <span className="text-gray-500">{t.pid}:</span>
             <span className="ml-2 text-gray-800">{status?.gateway?.managed?.pid || '-'}</span>
           </div>
           <div>
-            <span className="text-gray-500">Port:</span>
+            <span className="text-gray-500">{t.port}:</span>
             <span className="ml-2 text-gray-800">{status?.gateway?.managed?.port || '8787'}</span>
           </div>
           <div>
-            <span className="text-gray-500">Models:</span>
+            <span className="text-gray-500">{t.models}:</span>
             <span className="ml-2 text-gray-800">
               {gatewayHealth ? `${gatewayHealth.available_models}/${gatewayHealth.total_models}` : '-'}
             </span>
           </div>
           <div>
-            <span className="text-gray-500">Runtime:</span>
+            <span className="text-gray-500">{t.runtime}:</span>
             <span className="ml-2 text-gray-800">
               {gatewayRuntime > 0 ? formatDuration(gatewayRuntime) : (gatewayHealth ? formatDuration(gatewayHealth.uptime) : '-')}
             </span>
@@ -281,14 +290,14 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <StatusLight status={processIsExternal ? 'running' : processStatus} />
-            <h2 className="text-lg font-semibold text-gray-800">Process</h2>
+            <h2 className="text-lg font-semibold text-gray-800">{t.process}</h2>
             {processIsExternal && (
               <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-600 rounded-full">
-                External
+                {t.external}
               </span>
             )}
             <span className="text-sm text-gray-500 capitalize">
-              {processIsExternal ? 'Running (External)' : processStatus}
+              {processIsExternal ? `${t.running} (${t.external})` : processStatus === 'running' ? t.running : processStatus === 'stopped' ? t.stopped : t.exited}
             </span>
           </div>
           <div className="flex gap-2">
@@ -298,7 +307,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.process && processStatus !== 'running' && <LoadingSpinner />}
-              Start
+              {t.start}
             </button>
             <button
               onClick={() => setConfirmDialog({ open: true, target: 'process' })}
@@ -306,7 +315,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
               className="px-4 py-2 text-sm font-medium text-white bg-rose-400 rounded-lg hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.process && processStatus === 'running' && <LoadingSpinner />}
-              Stop
+              {t.stop}
             </button>
           </div>
         </div>
@@ -314,21 +323,21 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
         {/* Process Info */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div>
-            <span className="text-gray-500">PID:</span>
+            <span className="text-gray-500">{t.pid}:</span>
             <span className="ml-2 text-gray-800">{status?.process?.managed?.pid || '-'}</span>
           </div>
           <div>
-            <span className="text-gray-500">Progress:</span>
+            <span className="text-gray-500">{t.progress}:</span>
             <span className="ml-2 text-gray-800">
               {processProgress ? `${processProgress.processed}/${processProgress.total}` : '-'}
             </span>
           </div>
           <div>
-            <span className="text-gray-500">Shard:</span>
+            <span className="text-gray-500">{t.shard}:</span>
             <span className="ml-2 text-gray-800">{processProgress?.shard || '-'}</span>
           </div>
           <div>
-            <span className="text-gray-500">Errors:</span>
+            <span className="text-gray-500">{t.errors}:</span>
             <span className="ml-2 text-gray-800">{processProgress?.errors ?? '-'}</span>
           </div>
         </div>
@@ -344,7 +353,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
             </div>
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{Math.round((processProgress.processed / processProgress.total) * 100)}%</span>
-              <span>{processIsExternal ? 'External' : formatDuration(processRuntime)}</span>
+              <span>{processIsExternal ? t.external : formatDuration(processRuntime)}</span>
             </div>
           </div>
         )}
@@ -352,7 +361,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
         {/* Exit Code */}
         {processStatus === 'exited' && status?.process?.managed?.exit_code !== null && (
           <div className="mt-4 text-sm">
-            <span className="text-gray-500">Exit Code:</span>
+            <span className="text-gray-500">{t.exitCode}:</span>
             <span className={`ml-2 ${status?.process?.managed?.exit_code === 0 ? 'text-green-600' : 'text-red-600'}`}>
               {status?.process?.managed?.exit_code}
             </span>

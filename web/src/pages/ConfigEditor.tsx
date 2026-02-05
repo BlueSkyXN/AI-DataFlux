@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchConfig, saveConfig, validateConfig } from '../api';
+import { getTranslations, Language } from '../i18n';
 
 interface ConfigEditorProps {
   configPath: string;
   onConfigPathChange: (path: string) => void;
+  language: Language;
 }
 
-export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigEditorProps) {
+export default function ConfigEditor({ configPath, onConfigPathChange, language }: ConfigEditorProps) {
+  const t = getTranslations(language);
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -28,11 +31,11 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
       setOriginalContent(data.content);
       lastLoadedPathRef.current = path;
     } catch (err) {
-      setError(`Failed to load config: ${err}`);
+      setError(`${t.failedToLoad}: ${err}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t.failedToLoad]);
 
   useEffect(() => {
     if (!configPath) return;
@@ -44,7 +47,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
 
       if (lastLoadedPathRef.current && hasChanges) {
         const ok = window.confirm(
-          'You have unsaved changes. Discard them and load the new config?'
+          t.discardAndLoadNew
         );
         if (!ok) {
           onConfigPathChange(lastLoadedPathRef.current);
@@ -67,10 +70,10 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
     try {
       const result = await saveConfig(configPath, content);
       setOriginalContent(content);
-      setSuccess(result.backed_up ? 'Saved (backup created)' : 'Saved');
+      setSuccess(result.backed_up ? t.savedWithBackup : t.saved);
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
-      setError(`Failed to save config: ${err}`);
+      setError(`${t.failedToSave}: ${err}`);
     } finally {
       setSaving(false);
     }
@@ -78,7 +81,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
   const handleReload = async () => {
     if (!configPath) return;
     if (hasChanges) {
-      const ok = window.confirm('Discard unsaved changes and reload from disk?');
+      const ok = window.confirm(t.discardAndReload);
       if (!ok) return;
     }
     await loadConfig(configPath);
@@ -87,7 +90,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
   const validateYaml = async () => {
     // Quick check: YAML doesn't allow tabs for indentation
     if (content.includes('\t')) {
-      setError('YAML does not allow tabs. Please use spaces for indentation.');
+      setError(t.yamlNoTabs);
       setSuccess(null);
       return;
     }
@@ -97,13 +100,13 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
     try {
       const result = await validateConfig(content);
       if (result.valid) {
-        setSuccess('YAML syntax is valid');
+        setSuccess(t.yamlSyntaxValid);
         setTimeout(() => setSuccess(null), 3000);
       } else {
-        setError(result.error ? `YAML syntax error: ${result.error}` : 'Invalid YAML');
+        setError(result.error ? `${t.yamlSyntaxError}: ${result.error}` : t.yamlSyntaxError);
       }
     } catch (err) {
-      setError(`Failed to validate YAML: ${err}`);
+      setError(`${t.failedToValidate}: ${err}`);
     }
   };
 
@@ -114,7 +117,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
         <div className="flex items-center gap-4">
           <div className="flex-1">
             <label className="block text-sm font-medium text-gray-600 mb-1">
-              Config File
+              {t.configFile}
             </label>
             <input
               type="text"
@@ -130,27 +133,27 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
               disabled={loading}
               className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50"
             >
-              {loading ? 'Loading...' : 'Reload'}
+              {loading ? t.loading : t.reload}
             </button>
             <button
               onClick={validateYaml}
               disabled={loading}
               className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
             >
-              Validate
+              {t.validate}
             </button>
             <button
               onClick={handleSave}
               disabled={saving || !hasChanges}
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? t.saving : t.save}
             </button>
           </div>
         </div>
         {hasChanges && (
           <div className="mt-2 text-sm text-amber-600">
-            ● Unsaved changes
+            {t.unsavedChanges}
           </div>
         )}
       </div>
@@ -174,7 +177,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
           onChange={(e) => setContent(e.target.value)}
           className="w-full h-full p-4 font-mono text-sm resize-none focus:outline-none bg-slate-50"
           style={{ fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', monospace" }}
-          placeholder={loading ? 'Loading...' : 'Enter YAML configuration...'}
+          placeholder={loading ? t.loading : t.enterYamlConfig}
           spellCheck={false}
         />
       </div>
