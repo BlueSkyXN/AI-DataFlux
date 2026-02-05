@@ -16,14 +16,17 @@
 
 import os
 import shutil
-from pathlib import Path
-from typing import Optional
 
 from fastapi import HTTPException
 
+from . import runtime
 
-# 项目根目录 (src/control/config_api.py -> 项目根)
-PROJECT_ROOT = str(Path(__file__).parent.parent.parent.resolve())
+
+# 项目根目录：
+# - 源码：仓库根
+# - 打包：优先 cwd（看起来像项目根），否则可执行文件目录
+# - 可通过环境变量覆盖
+PROJECT_ROOT = str(runtime.get_project_root())
 
 
 def _validate_path(path: str) -> str:

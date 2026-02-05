@@ -34,30 +34,47 @@ env:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build ${{ matrix.build_type }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        build_type: [full, cli-only]
         include:
+          # Full 版本（包含 GUI）
           - os: ubuntu-24.04
-            artifact_name: AI-DataFlux-linux-amd64
-            asset_name: AI-DataFlux-linux-amd64
+            build_type: full
+            artifact_name: AI-DataFlux-linux-amd64-full
           - os: ubuntu-24.04-arm
-            artifact_name: AI-DataFlux-linux-arm64
-            asset_name: AI-DataFlux-linux-arm64
+            build_type: full
+            artifact_name: AI-DataFlux-linux-arm64-full
           - os: macos-15
-            artifact_name: AI-DataFlux-macos-arm64
-            asset_name: AI-DataFlux-macos-arm64
+            build_type: full
+            artifact_name: AI-DataFlux-macos-arm64-full
           - os: windows-2025
-            artifact_name: AI-DataFlux-windows-amd64.exe
-            asset_name: AI-DataFlux-windows-amd64.exe
+            build_type: full
+            artifact_name: AI-DataFlux-windows-amd64-full.exe
+
+          # CLI-only 版本（不含 GUI）
+          - os: ubuntu-24.04
+            build_type: cli-only
+            artifact_name: AI-DataFlux-linux-amd64-cli
+          - os: ubuntu-24.04-arm
+            build_type: cli-only
+            artifact_name: AI-DataFlux-linux-arm64-cli
+          - os: macos-15
+            build_type: cli-only
+            artifact_name: AI-DataFlux-macos-arm64-cli
+          - os: windows-2025
+            build_type: cli-only
+            artifact_name: AI-DataFlux-windows-amd64-cli.exe
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Node.js
+        if: matrix.build_type == 'full'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -65,6 +82,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Build frontend
+        if: matrix.build_type == 'full'
         run: |
           cd web
           npm ci
@@ -87,15 +105,25 @@ jobs:
           python cli.py version
           python cli.py check
 
-      - name: Build with PyInstaller (Unix)
-        if: runner.os != 'Windows'
+      - name: Build with PyInstaller (Unix - Full)
+        if: runner.os != 'Windows' && matrix.build_type == 'full'
         run: |
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist:web/dist" cli.py
 
-      - name: Build with PyInstaller (Windows)
-        if: runner.os == 'Windows'
+      - name: Build with PyInstaller (Unix - CLI-only)
+        if: runner.os != 'Windows' && matrix.build_type == 'cli-only'
+        run: |
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
+
+      - name: Build with PyInstaller (Windows - Full)
+        if: runner.os == 'Windows' && matrix.build_type == 'full'
         run: |
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist;web/dist" cli.py
+
+      - name: Build with PyInstaller (Windows - CLI-only)
+        if: runner.os == 'Windows' && matrix.build_type == 'cli-only'
+        run: |
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
 
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
@@ -135,23 +163,29 @@ jobs:
           name: ${{ env.APP_NAME }} ${{ github.ref_name }}
           body: |
             ## ${{ env.APP_NAME }} ${{ github.ref_name }}
-            
+
             ### Downloads
-            - **Linux (x64)**: `AI-DataFlux-linux-amd64`
-            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64`
-            - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64`
-            - **Windows (x64)**: `AI-DataFlux-windows-amd64.exe`
-            
+
+            **完整版（Full - 包含 Web GUI）：**
+            - **Linux (x64)**: `AI-DataFlux-linux-amd64-full`
+            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-full`
+            - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-full`
+            - **Windows (x64)**: `AI-DataFlux-windows-amd64-full.exe`
+
+            **CLI 版本（仅命令行，体积更小）：**
+            - **Linux (x64)**: `AI-DataFlux-linux-amd64-cli`
+            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-cli`
+            - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-cli`
+            - **Windows (x64)**: `AI-DataFlux-windows-amd64-cli.exe`
+
             ### Build Info
             - Builder: PyInstaller
             - Python: ${{ env.PYTHON_VERSION }}
-            - Node.js: ${{ env.NODE_VERSION }}
-            - Includes: Web GUI Control Panel
-            
-            ### Features
-            - Web GUI for managing Gateway and Process
-            - Configuration editor with backup
-            - Real-time log streaming
+            - Node.js: ${{ env.NODE_VERSION }} (Full 版)
+
+            ### 版本说明
+            - **Full 版**：包含 Web GUI 控制面板、配置编辑器、实时日志查看
+            - **CLI 版**：仅包含命令行工具（process、gateway、token 等），体积更小
           files: |
             artifacts/**/*
           generate_release_notes: true

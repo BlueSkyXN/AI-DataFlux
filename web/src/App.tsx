@@ -7,6 +7,7 @@ import Logs from './pages/Logs';
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [configPath, setConfigPath] = useState('config.yaml');
+  const host = window.location.host;
 
   const tabs: { id: TabType; label: string }[] = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -65,7 +66,7 @@ function App() {
       {/* Footer */}
       <footer className="bg-white border-t border-gray-100 py-4">
         <div className="max-w-7xl mx-auto px-6 text-center text-sm text-gray-400">
-          AI-DataFlux Control Panel • Listening on 127.0.0.1:8790
+          AI-DataFlux Control Panel • {host}
         </div>
       </footer>
     </div>
@@ -73,4 +74,3 @@ function App() {
 }
 
 export default App;
-

@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { fetchConfig, saveConfig } from '../api';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { fetchConfig, saveConfig, validateConfig } from '../api';
 
 interface ConfigEditorProps {
   configPath: string;
@@ -13,26 +13,50 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const lastLoadedPathRef = useRef<string>('');
 
-  const loadConfig = useCallback(async () => {
-    if (!configPath) return;
-    
+  const hasChanges = content !== originalContent;
+
+  const loadConfig = useCallback(async (path: string) => {
+    if (!path) return;
+
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchConfig(configPath);
+      const data = await fetchConfig(path);
       setContent(data.content);
       setOriginalContent(data.content);
+      lastLoadedPathRef.current = path;
     } catch (err) {
       setError(`Failed to load config: ${err}`);
     } finally {
       setLoading(false);
     }
-  }, [configPath]);
+  }, []);
 
   useEffect(() => {
-    loadConfig();
-  }, [loadConfig]);
+    if (!configPath) return;
+    if (configPath === lastLoadedPathRef.current) return;
+
+    // Debounce auto-load to avoid firing on every keystroke while editing path.
+    const timer = setTimeout(() => {
+      if (configPath === lastLoadedPathRef.current) return;
+
+      if (lastLoadedPathRef.current && hasChanges) {
+        const ok = window.confirm(
+          'You have unsaved changes. Discard them and load the new config?'
+        );
+        if (!ok) {
+          onConfigPathChange(lastLoadedPathRef.current);
+          return;
+        }
+      }
+
+      void loadConfig(configPath);
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [configPath, hasChanges, loadConfig, onConfigPathChange]);
 
   const handleSave = async () => {
     if (!configPath) return;
@@ -51,21 +75,35 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
       setSaving(false);
     }
   };
+  const handleReload = async () => {
+    if (!configPath) return;
+    if (hasChanges) {
+      const ok = window.confirm('Discard unsaved changes and reload from disk?');
+      if (!ok) return;
+    }
+    await loadConfig(configPath);
+  };
 
-  const hasChanges = content !== originalContent;
+  const validateYaml = async () => {
+    // Quick check: YAML doesn't allow tabs for indentation
+    if (content.includes('\t')) {
+      setError('YAML does not allow tabs. Please use spaces for indentation.');
+      setSuccess(null);
+      return;
+    }
 
-  const validateYaml = () => {
-    // Basic YAML validation (just check for obvious syntax issues)
+    setError(null);
+    setSuccess(null);
     try {
-      // Check for tabs (YAML doesn't allow tabs)
-      if (content.includes('\t')) {
-        setError('YAML does not allow tabs. Please use spaces for indentation.');
-        return;
+      const result = await validateConfig(content);
+      if (result.valid) {
+        setSuccess('YAML syntax is valid');
+        setTimeout(() => setSuccess(null), 3000);
+      } else {
+        setError(result.error ? `YAML syntax error: ${result.error}` : 'Invalid YAML');
       }
-      setSuccess('YAML syntax looks valid');
-      setTimeout(() => setSuccess(null), 3000);
-    } catch {
-      setError('Invalid YAML syntax');
+    } catch (err) {
+      setError(`Failed to validate YAML: ${err}`);
     }
   };
 
@@ -88,7 +126,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
           </div>
           <div className="flex gap-2 items-end">
             <button
-              onClick={loadConfig}
+              onClick={handleReload}
               disabled={loading}
               className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50"
             >
@@ -96,6 +134,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange }: ConfigE
             </button>
             <button
               onClick={validateYaml}
+              disabled={loading}
               className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
             >
               Validate

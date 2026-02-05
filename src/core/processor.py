@@ -802,7 +802,10 @@ class UniversalAIProcessor:
         logging.info("启动 AI 数据处理引擎...")
         try:
             asyncio.run(self.process_shard_async_continuous())
-        finally:
-            # 清理进度文件
+        except Exception:
+            # 异常退出时保留进度文件，便于 GUI 侧基于 ts 判断超时/残留
+            raise
+        else:
+            # 正常结束才清理进度文件
             self._cleanup_progress()
         logging.info("AI 数据处理引擎已停止")

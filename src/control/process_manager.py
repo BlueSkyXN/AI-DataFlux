@@ -24,8 +24,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+from .runtime import get_project_root, is_packaged
 
 try:
     import psutil
@@ -36,7 +37,7 @@ except ImportError:
 
 
 # 项目根目录
-PROJECT_ROOT = str(Path(__file__).parent.parent.parent.resolve())
+PROJECT_ROOT = str(get_project_root())
 
 # 进度文件路径
 PROGRESS_FILE = ".dataflux_progress.json"
@@ -146,6 +147,22 @@ class ProcessManager:
             "gateway": None,
             "process": None,
         }
+        self._gateway_health_cache: Optional[dict] = None
+        self._gateway_health_cache_time: float = 0.0
+        self._gateway_health_cache_ttl_ok_seconds: float = 2.0
+        self._gateway_health_cache_ttl_fail_seconds: float = 5.0
+        self._gateway_health_probe_timeout_seconds: float = 0.8
+
+    def _build_subprocess_cmd(self, subcommand: str, args: list[str]) -> list[str]:
+        """
+        构建子进程启动命令
+
+        - 源码运行：python cli.py <subcommand> ...
+        - 打包运行：<exe> <subcommand> ...
+        """
+        if is_packaged():
+            return [sys.executable, subcommand, *args]
+        return [sys.executable, "cli.py", subcommand, *args]
 
     def _check_process_status(self, name: str) -> None:
         """检查并更新进程状态"""
@@ -161,6 +178,11 @@ class ProcessManager:
             managed.status = "exited"
             managed.exit_code = ret
             self._popen[name] = None
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
 
             # 取消日志读取任务
             if self._read_tasks.get(name):
@@ -192,17 +214,17 @@ class ProcessManager:
             return managed.to_dict()
 
         # 构建命令
-        cmd = [
-            sys.executable,
-            "cli.py",
+        cmd = self._build_subprocess_cmd(
             "gateway",
-            "--config",
-            config_path,
-            "--port",
-            str(port),
-            "--workers",
-            str(workers),
-        ]
+            [
+                "--config",
+                config_path,
+                "--port",
+                str(port),
+                "--workers",
+                str(workers),
+            ],
+        )
 
         # 启动进程
         proc = subprocess.Popen(
@@ -257,15 +279,15 @@ class ProcessManager:
 
         # 构建命令 (带 --progress-file 参数)
         progress_file = os.path.join(PROJECT_ROOT, PROGRESS_FILE)
-        cmd = [
-            sys.executable,
-            "cli.py",
+        cmd = self._build_subprocess_cmd(
             "process",
-            "--config",
-            config_path,
-            "--progress-file",
-            progress_file,
-        ]
+            [
+                "--config",
+                config_path,
+                "--progress-file",
+                progress_file,
+            ],
+        )
 
         # 启动进程
         proc = subprocess.Popen(
@@ -314,10 +336,13 @@ class ProcessManager:
         managed = self.processes[name]
 
         # 幂等: 已停止则直接返回
-        if managed.status in ("stopped", "exited"):
-            managed.status = "stopped"
+        if managed.status == "stopped":
             managed.pid = None
             managed.exit_code = None
+            return managed.to_dict()
+
+        # 已退出：保留 exited + exit_code（便于前端展示）
+        if managed.status == "exited":
             return managed.to_dict()
 
         proc = self._popen.get(name)
@@ -328,6 +353,11 @@ class ProcessManager:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
                 pass
 
         self._popen[name] = None
@@ -375,8 +405,19 @@ class ProcessManager:
             },
         }
 
-        # 添加 Gateway 健康检查 (如果未 managed 但外部可能运行)
-        gateway_health = self._probe_gateway_health()
+        # 添加 Gateway 健康检查（同步版本：可能阻塞；Server 侧优先用 get_all_status_async）
+        now = time.time()
+        if self._gateway_health_cache_time and (
+            now - self._gateway_health_cache_time
+        ) < self._gateway_health_cache_ttl_seconds():
+            gateway_health = self._gateway_health_cache
+        else:
+            gateway_health = self._probe_gateway_health_sync(
+                self._gateway_health_probe_timeout_seconds
+            )
+            self._gateway_health_cache = gateway_health
+            self._gateway_health_cache_time = now
+
         if gateway_health:
             result["gateway"]["health"] = gateway_health
 
@@ -387,7 +428,36 @@ class ProcessManager:
 
         return result
 
-    def _probe_gateway_health(self) -> Optional[dict]:
+    async def get_all_status_async(self) -> dict:
+        """
+        获取所有进程状态（异步版本，避免阻塞 event loop）
+
+        Returns:
+            dict: {"gateway": ..., "process": ...}
+        """
+        self._check_process_status("gateway")
+        self._check_process_status("process")
+
+        result = {
+            "gateway": {
+                "managed": self.processes["gateway"].to_dict(),
+            },
+            "process": {
+                "managed": self.processes["process"].to_dict(),
+            },
+        }
+
+        gateway_health = await self._get_gateway_health_cached()
+        if gateway_health:
+            result["gateway"]["health"] = gateway_health
+
+        process_progress = self._read_process_progress()
+        if process_progress:
+            result["process"]["progress"] = process_progress
+
+        return result
+
+    def _probe_gateway_health_sync(self, timeout: float) -> Optional[dict]:
         """
         探测 Gateway 健康状态
 
@@ -404,11 +474,30 @@ class ProcessManager:
         try:
             url = f"http://127.0.0.1:{port}/admin/health"
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=2) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data
         except (urllib.error.URLError, json.JSONDecodeError, OSError):
             return None
+
+    def _gateway_health_cache_ttl_seconds(self) -> float:
+        if self._gateway_health_cache is None:
+            return self._gateway_health_cache_ttl_fail_seconds
+        return self._gateway_health_cache_ttl_ok_seconds
+
+    async def _get_gateway_health_cached(self) -> Optional[dict]:
+        now = time.time()
+        if self._gateway_health_cache_time and (
+            now - self._gateway_health_cache_time
+        ) < self._gateway_health_cache_ttl_seconds():
+            return self._gateway_health_cache
+
+        health = await asyncio.to_thread(
+            self._probe_gateway_health_sync, self._gateway_health_probe_timeout_seconds
+        )
+        self._gateway_health_cache = health
+        self._gateway_health_cache_time = now
+        return health
 
     def _read_process_progress(self) -> Optional[dict]:
         """
@@ -434,7 +523,7 @@ class ProcessManager:
         """启动异步日志读取任务"""
 
         async def read_logs():
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 while True:
                     line = await loop.run_in_executor(None, proc.stdout.readline)
@@ -508,14 +597,6 @@ class ProcessManager:
         logging.info("Shutting down all managed processes...")
         self.stop_gateway()
         self.stop_process()
-
-        # 清理进度文件
-        progress_path = os.path.join(PROJECT_ROOT, PROGRESS_FILE)
-        if os.path.exists(progress_path):
-            try:
-                os.remove(progress_path)
-            except OSError:
-                pass
 
 
 # 全局实例

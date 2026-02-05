@@ -165,7 +165,12 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
   const gatewayStatus = status?.gateway?.managed?.status || 'stopped';
   const processStatus = status?.process?.managed?.status || 'stopped';
   const gatewayHealth = status?.gateway?.health;
-  const processProgress = status?.process?.progress;
+  const processProgressRaw = status?.process?.progress;
+  // Keep aligned with backend PROGRESS_TIMEOUT_SECONDS (15s)
+  const processProgressIsFresh = Boolean(
+    processProgressRaw && (Date.now() / 1000) - processProgressRaw.ts <= 15
+  );
+  const processProgress = processProgressIsFresh ? processProgressRaw : undefined;
 
   // Calculate runtime
   const gatewayRuntime = status?.gateway?.managed?.start_time
@@ -176,7 +181,8 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
     : 0;
 
   // Show "External" label if not managed but health check passes
-  const gatewayIsExternal = gatewayStatus !== 'running' && gatewayHealth;
+  const gatewayIsExternal = gatewayStatus !== 'running' && Boolean(gatewayHealth);
+  const processIsExternal = processStatus !== 'running' && Boolean(processProgress);
 
   return (
     <div className="p-6 space-y-6">
@@ -228,7 +234,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
           <div className="flex gap-2">
             <button
               onClick={handleStartGateway}
-              disabled={loading.gateway || gatewayStatus === 'running'}
+              disabled={loading.gateway || gatewayStatus === 'running' || gatewayIsExternal}
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.gateway && gatewayStatus !== 'running' && <LoadingSpinner />}
@@ -274,14 +280,21 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
       <div className="bg-white rounded-2xl p-6 shadow-[0_2px_12px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
-            <StatusLight status={processStatus} />
+            <StatusLight status={processIsExternal ? 'running' : processStatus} />
             <h2 className="text-lg font-semibold text-gray-800">Process</h2>
-            <span className="text-sm text-gray-500 capitalize">{processStatus}</span>
+            {processIsExternal && (
+              <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-600 rounded-full">
+                External
+              </span>
+            )}
+            <span className="text-sm text-gray-500 capitalize">
+              {processIsExternal ? 'Running (External)' : processStatus}
+            </span>
           </div>
           <div className="flex gap-2">
             <button
               onClick={handleStartProcess}
-              disabled={loading.process || processStatus === 'running'}
+              disabled={loading.process || processStatus === 'running' || processIsExternal}
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading.process && processStatus !== 'running' && <LoadingSpinner />}
@@ -331,7 +344,7 @@ export default function Dashboard({ configPath, onConfigPathChange }: DashboardP
             </div>
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{Math.round((processProgress.processed / processProgress.total) * 100)}%</span>
-              <span>{formatDuration(processRuntime)}</span>
+              <span>{processIsExternal ? 'External' : formatDuration(processRuntime)}</span>
             </div>
           </div>
         )}

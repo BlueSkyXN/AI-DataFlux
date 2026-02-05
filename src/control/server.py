@@ -23,23 +23,24 @@ import logging
 import os
 import webbrowser
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config_api import read_config, write_config, get_project_root
-from .process_manager import get_process_manager, ProcessManager
+from .config_api import read_config, write_config
+from .process_manager import get_process_manager
+from .runtime import find_web_dist_dir, get_project_root
 
 
 # 项目根目录
-PROJECT_ROOT = get_project_root()
-WEB_DIST_DIR = os.path.join(PROJECT_ROOT, "web", "dist")
+PROJECT_ROOT = str(get_project_root())
+WEB_DIST_PATH = find_web_dist_dir(get_project_root())
+WEB_DIST_DIR = str(WEB_DIST_PATH) if WEB_DIST_PATH else ""
 
 
 # ========== Pydantic Models ==========
@@ -49,6 +50,12 @@ class ConfigWriteRequest(BaseModel):
     """配置文件写入请求"""
 
     path: str
+    content: str
+
+
+class ConfigValidateRequest(BaseModel):
+    """配置文件校验请求"""
+
     content: str
 
 
@@ -107,6 +114,35 @@ class LogConnectionManager:
 ws_manager = LogConnectionManager()
 
 
+async def _open_browser_when_ready(
+    url: str,
+    host: str,
+    port: int,
+    timeout_seconds: float = 5.0,
+    interval_seconds: float = 0.2,
+) -> None:
+    """
+    等待服务端口可连接后再打开浏览器，减少 Connection Refused 的概率。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        try:
+            _reader, writer = await asyncio.open_connection(host, port)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            break
+        except OSError:
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(interval_seconds)
+
+    await asyncio.to_thread(webbrowser.open, url)
+
+
 # ========== Lifespan ==========
 
 
@@ -131,17 +167,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     manager.add_log_callback("gateway", log_callback)
     manager.add_log_callback("process", log_callback)
 
-    # 打开浏览器 (在服务启动后)
+    # 打开浏览器 (等待端口就绪，避免偶现 Connection Refused)
     app_state = app.state
     if getattr(app_state, "open_browser", False):
         port = getattr(app_state, "port", 8790)
         url = f"http://127.0.0.1:{port}"
         logging.info(f"Opening browser: {url}")
-        webbrowser.open(url)
+        browser_task = asyncio.create_task(
+            _open_browser_when_ready(url=url, host="127.0.0.1", port=port)
+        )
+        browser_task.add_done_callback(
+            lambda t: t.exception() if t.done() and not t.cancelled() else None
+        )
+        app_state._browser_task = browser_task
 
     yield
 
     # 关闭时清理进程
+    browser_task = getattr(app_state, "_browser_task", None)
+    if browser_task and not browser_task.done():
+        browser_task.cancel()
     manager.remove_log_callback("gateway", log_callback)
     manager.remove_log_callback("process", log_callback)
     manager.shutdown()
@@ -160,14 +205,44 @@ def create_control_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS (开发态需要)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS (仅开发态需要；生产态同源不需要)
+    cors_env = os.environ.get("DATAFLUX_GUI_CORS_ORIGINS", "").strip()
+    if cors_env:
+        cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+    elif not os.path.isdir(WEB_DIST_DIR):
+        # 默认仅放开 Vite dev server 的常见 origin（可通过环境变量覆盖）
+        cors_origins = [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+    else:
+        cors_origins = []
+
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # 防止 localhost CSRF：所有写操作要求 application/json
+    @app.middleware("http")
+    async def require_json_for_api_writes(request: Request, call_next):
+        if request.url.path.startswith("/api/") and request.method in (
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        ):
+            content_type = request.headers.get("content-type", "")
+            if not content_type.startswith("application/json"):
+                return JSONResponse(
+                    status_code=415,
+                    content={"detail": "Content-Type must be application/json"},
+                )
+        return await call_next(request)
 
     # ========== Config API ==========
 
@@ -182,6 +257,17 @@ def create_control_app() -> FastAPI:
         """写入配置文件"""
         result = write_config(request.path, request.content)
         return result
+
+    @app.post("/api/config/validate")
+    async def api_validate_config(request: ConfigValidateRequest):
+        """校验 YAML 配置内容（仅语法/解析）"""
+        import yaml
+
+        try:
+            yaml.safe_load(request.content)
+            return {"valid": True}
+        except yaml.YAMLError as e:
+            return {"valid": False, "error": str(e)}
 
     # ========== Gateway API ==========
 
@@ -229,7 +315,7 @@ def create_control_app() -> FastAPI:
     async def api_status():
         """获取所有进程状态"""
         manager = get_process_manager()
-        return manager.get_all_status()
+        return await manager.get_all_status_async()
 
     # ========== WebSocket Logs ==========
 
@@ -271,12 +357,14 @@ def create_control_app() -> FastAPI:
 
     # 检查 web/dist 是否存在
     if os.path.isdir(WEB_DIST_DIR):
+        assets_dir = os.path.join(WEB_DIST_DIR, "assets")
         # 挂载静态文件
-        app.mount(
-            "/assets",
-            StaticFiles(directory=os.path.join(WEB_DIST_DIR, "assets")),
-            name="assets",
-        )
+        if os.path.isdir(assets_dir):
+            app.mount(
+                "/assets",
+                StaticFiles(directory=assets_dir),
+                name="assets",
+            )
 
         @app.get("/")
         async def serve_index():
@@ -289,7 +377,16 @@ def create_control_app() -> FastAPI:
         @app.get("/{path:path}")
         async def serve_static(path: str):
             """服务静态文件或 SPA fallback"""
-            file_path = os.path.join(WEB_DIST_DIR, path)
+            # 防止 path traversal：仅允许访问 WEB_DIST_DIR 内的文件
+            base_dir = os.path.realpath(WEB_DIST_DIR)
+            file_path = os.path.realpath(os.path.join(base_dir, path))
+            try:
+                common = os.path.commonpath([base_dir, file_path])
+                if common != base_dir:
+                    raise HTTPException(404, "Not found")
+            except ValueError:
+                # Windows 上不同驱动器会抛出 ValueError
+                raise HTTPException(404, "Not found")
             if os.path.isfile(file_path):
                 return FileResponse(file_path)
             # SPA fallback: 返回 index.html

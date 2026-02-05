@@ -1,6 +1,12 @@
 // API service for communicating with the Control Server
 
-import type { StatusResponse, ConfigResponse, ConfigWriteResponse, ManagedProcessStatus } from './types';
+import type {
+  StatusResponse,
+  ConfigResponse,
+  ConfigWriteResponse,
+  ConfigValidateResponse,
+  ManagedProcessStatus,
+} from './types';
 
 const API_BASE = '';  // Use relative URLs (proxied in dev, served by same host in prod)
 
@@ -32,6 +38,18 @@ export async function saveConfig(path: string, content: string): Promise<ConfigW
   return response.json();
 }
 
+export async function validateConfig(content: string): Promise<ConfigValidateResponse> {
+  const response = await fetch(`${API_BASE}/api/config/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to validate config: ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function startGateway(
   configPath: string = 'config.yaml',
   port: number = 8787,
@@ -51,6 +69,8 @@ export async function startGateway(
 export async function stopGateway(): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/gateway/stop`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
   });
   if (!response.ok) {
     throw new Error(`Failed to stop gateway: ${response.status}`);
@@ -73,6 +93,8 @@ export async function startProcess(configPath: string = 'config.yaml'): Promise<
 export async function stopProcess(): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/process/stop`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
   });
   if (!response.ok) {
     throw new Error(`Failed to stop process: ${response.status}`);

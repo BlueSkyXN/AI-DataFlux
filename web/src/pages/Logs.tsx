@@ -12,58 +12,71 @@ export default function Logs() {
   const logContainerRef = useRef<HTMLPreElement>(null);
   const wsRef = useRef<AutoReconnectWebSocket | null>(null);
 
-  // Connect to WebSocket with auto-reconnect
-  const connect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+  const handleMessage = useCallback((line: string) => {
+    if (line === 'pong') return;
+    setLogs((prev) => {
+      const newLogs = [...prev, line];
+      if (newLogs.length > 1000) {
+        return newLogs.slice(-1000);
+      }
+      return newLogs;
+    });
+  }, []);
 
+  const handleConnect = useCallback(() => {
+    setConnected(true);
+    setReconnecting(false);
+    setReconnectInfo(null);
+  }, []);
+
+  const handleDisconnect = useCallback(() => {
+    setConnected(false);
+  }, []);
+
+  const handleReconnecting = useCallback((attempt: number, delay: number) => {
+    setReconnecting(true);
+    setReconnectInfo(
+      `Reconnecting (attempt ${attempt}, ${Math.round(delay / 1000)}s)...`
+    );
+  }, []);
+
+  const connectWebSocket = useCallback(
+    (nextTarget: LogTarget) => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+
+      wsRef.current = new AutoReconnectWebSocket({
+        target: nextTarget,
+        onMessage: handleMessage,
+        onConnect: handleConnect,
+        onDisconnect: handleDisconnect,
+        onReconnecting: handleReconnecting,
+        maxRetries: -1,
+        initialDelay: 1000,
+        maxDelay: 30000,
+      });
+    },
+    [handleConnect, handleDisconnect, handleMessage, handleReconnecting]
+  );
+
+  const switchTarget = (nextTarget: LogTarget) => {
+    if (nextTarget === target) return;
     setLogs([]);
     setConnected(false);
     setReconnecting(false);
     setReconnectInfo(null);
-
-    const ws = new AutoReconnectWebSocket({
-      target,
-      onMessage: (line) => {
-        if (line === 'pong') return;  // Ignore ping responses
-        setLogs((prev) => {
-          const newLogs = [...prev, line];
-          // Keep last 1000 lines
-          if (newLogs.length > 1000) {
-            return newLogs.slice(-1000);
-          }
-          return newLogs;
-        });
-      },
-      onConnect: () => {
-        setConnected(true);
-        setReconnecting(false);
-        setReconnectInfo(null);
-      },
-      onDisconnect: () => {
-        setConnected(false);
-      },
-      onReconnecting: (attempt, delay) => {
-        setReconnecting(true);
-        setReconnectInfo(`Reconnecting (attempt ${attempt}, ${Math.round(delay / 1000)}s)...`);
-      },
-      maxRetries: -1,  // Infinite retries
-      initialDelay: 1000,
-      maxDelay: 30000,
-    });
-
-    wsRef.current = ws;
-  }, [target]);
+    setTarget(nextTarget);
+  };
 
   useEffect(() => {
-    connect();
+    connectWebSocket(target);
     return () => {
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
-  }, [connect]);
+  }, [connectWebSocket, target]);
 
   // Auto-scroll
   useEffect(() => {
@@ -81,7 +94,11 @@ export default function Logs() {
   };
 
   const handleReconnect = () => {
-    connect();
+    setLogs([]);
+    setConnected(false);
+    setReconnecting(false);
+    setReconnectInfo(null);
+    connectWebSocket(target);
   };
 
   return (
@@ -92,7 +109,7 @@ export default function Logs() {
           {/* Target Tabs */}
           <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
             <button
-              onClick={() => setTarget('gateway')}
+              onClick={() => switchTarget('gateway')}
               className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
                 target === 'gateway'
                   ? 'bg-white text-gray-800 shadow-sm'
@@ -102,7 +119,7 @@ export default function Logs() {
               Gateway
             </button>
             <button
-              onClick={() => setTarget('process')}
+              onClick={() => switchTarget('process')}
               className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
                 target === 'process'
                   ? 'bg-white text-gray-800 shadow-sm'

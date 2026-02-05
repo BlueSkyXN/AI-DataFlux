@@ -46,6 +46,7 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 """
 
 import argparse
+import importlib.util
 import os
 import sys
 
@@ -407,7 +408,11 @@ def cmd_gui(args):
         python cli.py gui -p 8080      # 使用自定义端口
         python cli.py gui --no-browser # 不打开浏览器
     """
-    from src.control.server import run_control_server
+    try:
+        from src.control.server import run_control_server
+    except ImportError:
+        print("❌ 此版本不包含 GUI 功能，请下载完整版")
+        return 1
 
     port = args.port
     open_browser = not getattr(args, "no_browser", False)
@@ -504,19 +509,25 @@ def main():
     )
     p_token.set_defaults(func=cmd_token)
 
-    # ===== gui 子命令：Web GUI 控制面板 =====
-    p_gui = subparsers.add_parser("gui", help="Start GUI control panel")
-    p_gui.add_argument(
-        "-p",
-        "--port",
-        type=_validate_port,
-        default=8790,
-        help="Control server port (1024-65535)",
-    )
-    p_gui.add_argument(
-        "--no-browser", action="store_true", help="Don't open browser automatically"
-    )
-    p_gui.set_defaults(func=cmd_gui)
+    # ===== gui 子命令：Web GUI 控制面板（可选特性，仅完整版包含）=====
+    try:
+        gui_available = importlib.util.find_spec("src.control.server") is not None
+    except (ModuleNotFoundError, ImportError):
+        gui_available = False
+
+    if gui_available:
+        p_gui = subparsers.add_parser("gui", help="Start GUI control panel")
+        p_gui.add_argument(
+            "-p",
+            "--port",
+            type=_validate_port,
+            default=8790,
+            help="Control server port (1024-65535)",
+        )
+        p_gui.add_argument(
+            "--no-browser", action="store_true", help="Don't open browser automatically"
+        )
+        p_gui.set_defaults(func=cmd_gui)
 
     # 解析命令行参数
     args = parser.parse_args()

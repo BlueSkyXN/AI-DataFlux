@@ -80,12 +80,37 @@ python cli.py gui
 |------|------|------|
 | `GET` | `/api/config?path=config.yaml` | 读取配置文件内容 |
 | `PUT` | `/api/config` | 写入配置文件（自动备份） |
+| `POST` | `/api/config/validate` | 校验 YAML 语法（仅解析，不做业务校验） |
 
 **PUT /api/config 请求体**:
 ```json
 {
   "path": "config.yaml",
   "content": "# YAML content..."
+}
+```
+
+**POST /api/config/validate 请求体**:
+```json
+{
+  "content": "# YAML content..."
+}
+```
+
+**POST /api/config/validate 响应**:
+
+成功：
+```json
+{
+  "valid": true
+}
+```
+
+失败：
+```json
+{
+  "valid": false,
+  "error": "..."
 }
 ```
 
@@ -98,6 +123,8 @@ python cli.py gui
 | `POST` | `/api/process/start` | 启动 Process |
 | `POST` | `/api/process/stop` | 停止 Process |
 | `GET` | `/api/status` | 获取所有进程状态 |
+
+> 说明：为缓解 localhost CSRF，所有写操作（`POST/PUT/PATCH/DELETE` 且路径为 `/api/*`）都要求 `Content-Type: application/json`（否则返回 415）。
 
 **POST /api/gateway/start 请求体** (可选):
 ```json
@@ -230,6 +257,17 @@ npm run build
 ```
 
 开发模式下，Vite 会自动将 `/api` 请求代理到 `http://127.0.0.1:8790`。
+（包含 WebSocket：`/api/logs`）
+如需指定其他后端端口，可在启动前端时设置环境变量：
+
+```bash
+VITE_CONTROL_SERVER=http://127.0.0.1:9000 npm run dev
+```
+
+Windows 下可使用 PowerShell：
+```powershell
+$env:VITE_CONTROL_SERVER="http://127.0.0.1:9000"; npm run dev
+```
 
 ### 后端开发
 
@@ -241,6 +279,25 @@ npm run build
 | `server.py` | FastAPI 应用主文件 |
 | `config_api.py` | 配置文件读写 API |
 | `process_manager.py` | 进程生命周期管理 |
+| `runtime.py` | 运行时/打包环境路径解析工具 |
+
+### 环境变量（可选）
+
+| 环境变量 | 说明 |
+|---------|------|
+| `VITE_CONTROL_SERVER` | 前端开发时，Vite 代理的 Control Server 地址 |
+| `DATAFLUX_GUI_CORS_ORIGINS` | 逗号分隔的允许跨域来源（开发调试用） |
+| `DATAFLUX_PROJECT_ROOT` / `AI_DATAFLUX_PROJECT_ROOT` | 覆盖“项目根目录”（打包运行或非仓库目录启动时有用） |
+
+示例：
+
+```bash
+# 覆盖项目根目录（配置读写 / 子进程 cwd 都基于此目录）
+DATAFLUX_PROJECT_ROOT=/path/to/project python cli.py gui
+
+# 仅当你不使用 Vite proxy、需要跨域直连后端时才需要 CORS
+DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
+```
 
 ## 跨平台支持
 
@@ -257,6 +314,7 @@ npm run build
 - 控制面板仅监听 `127.0.0.1`，不对外暴露
 - 不实现身份验证，假设本地环境是受信任的
 - 配置文件路径经过校验，防止目录穿越
+- 写操作要求 `Content-Type: application/json`，用于降低 localhost CSRF 风险
 - 建议不要在公网环境运行
 
 ## 常见问题
@@ -281,6 +339,16 @@ curl -X POST http://127.0.0.1:8790/api/gateway/start \
   -d '{"port": 8888}'
 ```
 
+### Q: 调用 API 返回 415 "Content-Type must be application/json"？
+
+A: 出于 localhost CSRF 缓解策略，所有写操作都必须带 `Content-Type: application/json`（即便没有请求体）。例如：
+
+```bash
+curl -X POST http://127.0.0.1:8790/api/gateway/stop \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
 ### Q: 日志显示"连接断开"怎么办？
 
-A: 点击"重新连接"按钮，或刷新页面重新建立 WebSocket 连接。
+A: 页面会自动重连；也可以点击“Reconnect”按钮，或刷新页面重新建立 WebSocket 连接。

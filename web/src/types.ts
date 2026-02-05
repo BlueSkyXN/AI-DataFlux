@@ -47,5 +47,10 @@ export interface ConfigWriteResponse {
   backed_up: boolean;
 }
 
+export interface ConfigValidateResponse {
+  valid: boolean;
+  error?: string;
+}
+
 export type TabType = 'dashboard' | 'config' | 'logs';
 export type LogTarget = 'gateway' | 'process';
