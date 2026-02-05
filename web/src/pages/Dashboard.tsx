@@ -5,7 +5,6 @@ import { getTranslations, interpolate, type Language } from '../i18n';
 
 interface DashboardProps {
   configPath: string;
-  onConfigPathChange: (path: string) => void;
   language: Language;
 }
 
@@ -91,7 +90,7 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
-export default function Dashboard({ configPath, onConfigPathChange, language }: DashboardProps) {
+export default function Dashboard({ configPath, language }: DashboardProps) {
   const t = getTranslations(language);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [loading, setLoading] = useState<{ gateway: boolean; process: boolean }>({ gateway: false, process: false });

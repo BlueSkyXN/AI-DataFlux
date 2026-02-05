@@ -228,7 +228,7 @@ function App() {
       {/* Main Content */}
       <main className="flex-1 max-w-7xl mx-auto w-full">
         {activeTab === 'dashboard' && (
-          <Dashboard configPath={configPath} onConfigPathChange={setConfigPath} language={language} />
+          <Dashboard configPath={configPath} language={language} />
         )}
         {activeTab === 'config' && (
           <ConfigEditor configPath={configPath} onConfigPathChange={setConfigPath} language={language} />
