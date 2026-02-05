@@ -42,30 +42,30 @@ jobs:
       matrix:
         include:
           # Full 版本（包含 GUI）
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             build_type: full
             artifact_name: AI-DataFlux-linux-amd64-full
-          - os: macos-13
+          - os: ubuntu-24.04-arm
             build_type: full
-            artifact_name: AI-DataFlux-macos-amd64-full
-          - os: macos-14
+            artifact_name: AI-DataFlux-linux-arm64-full
+          - os: macos-15
             build_type: full
             artifact_name: AI-DataFlux-macos-arm64-full
-          - os: windows-2022
+          - os: windows-2025
             build_type: full
             artifact_name: AI-DataFlux-windows-amd64-full.exe
 
           # CLI-only 版本（不含 GUI）
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             build_type: cli-only
             artifact_name: AI-DataFlux-linux-amd64-cli
-          - os: macos-13
+          - os: ubuntu-24.04-arm
             build_type: cli-only
-            artifact_name: AI-DataFlux-macos-amd64-cli
-          - os: macos-14
+            artifact_name: AI-DataFlux-linux-arm64-cli
+          - os: macos-15
             build_type: cli-only
             artifact_name: AI-DataFlux-macos-arm64-cli
-          - os: windows-2022
+          - os: windows-2025
             build_type: cli-only
             artifact_name: AI-DataFlux-windows-amd64-cli.exe
 
