@@ -113,6 +113,8 @@ jobs:
       - name: Build with PyInstaller (Unix - CLI-only)
         if: runner.os != 'Windows' && matrix.build_type == 'cli-only'
         run: |
+          # Remove web/dist if exists to ensure CLI version doesn't include any frontend assets
+          rm -rf web/dist || true
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
 
       - name: Build with PyInstaller (Windows - Full)
@@ -123,6 +125,8 @@ jobs:
       - name: Build with PyInstaller (Windows - CLI-only)
         if: runner.os == 'Windows' && matrix.build_type == 'cli-only'
         run: |
+          # Remove web/dist if exists to ensure CLI version doesn't include any frontend assets
+          if (Test-Path "web/dist") { Remove-Item -Recurse -Force "web/dist" }
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
 
       - name: Rename artifact (Unix)

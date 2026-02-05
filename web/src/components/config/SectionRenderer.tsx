@@ -8,6 +8,7 @@ import ValidationSection from './sections/ValidationSection';
 import ModelsSection from './sections/ModelsSection';
 import ChannelsSection from './sections/ChannelsSection';
 import PromptSection from './sections/PromptSection';
+import TokenSection from './sections/TokenSection';
 import RoutingSection from './sections/RoutingSection';
 
 export interface SectionProps {
@@ -39,6 +40,8 @@ export default function SectionRenderer({ section, ...props }: SectionRendererPr
       return <ChannelsSection {...props} />;
     case 'prompt':
       return <PromptSection {...props} />;
+    case 'token':
+      return <TokenSection {...props} />;
     case 'routing':
       return <RoutingSection {...props} />;
     default:
