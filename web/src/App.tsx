@@ -24,7 +24,7 @@ function App() {
   const tabs: { id: TabType; label: string }[] = [
     { id: 'dashboard', label: t.dashboard },
     { id: 'config', label: t.config },
-    { id: 'logs', label: t.logs },
+    { id: 'monitor', label: t.monitor },
   ];
 
   // Fetch working directory and absolute config path from status
@@ -303,7 +303,7 @@ function App() {
         {activeTab === 'config' && (
           <ConfigEditor configPath={configPath} onConfigPathChange={setConfigPath} language={language} />
         )}
-        {activeTab === 'logs' && <Logs language={language} />}
+        {activeTab === 'monitor' && <Logs language={language} />}
       </main>
 
       {/* Footer */}

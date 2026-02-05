@@ -53,5 +53,5 @@ export interface ConfigValidateResponse {
   error?: string;
 }
 
-export type TabType = 'dashboard' | 'config' | 'logs';
+export type TabType = 'dashboard' | 'config' | 'monitor';
 export type LogTarget = 'gateway' | 'process';

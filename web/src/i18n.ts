@@ -10,7 +10,7 @@ export interface Translations {
   // Tabs
   dashboard: string;
   config: string;
-  logs: string;
+  monitor: string;
 
   // Dashboard
   configFilePath: string;
@@ -238,7 +238,7 @@ const en: Translations = {
   // Tabs
   dashboard: 'Dashboard',
   config: 'Config',
-  logs: 'Logs',
+  monitor: 'Monitor',
 
   // Dashboard
   configFilePath: 'Config File Path',
@@ -466,7 +466,7 @@ const zh: Translations = {
   // Tabs
   dashboard: '仪表盘',
   config: '配置',
-  logs: '日志',
+  monitor: '监控',
 
   // Dashboard
   configFilePath: '配置文件路径',
