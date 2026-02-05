@@ -46,12 +46,65 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 """
 
 import argparse
+import importlib.util
 import sys
 
 try:
     import resource  # Unix-only
 except Exception:
     resource = None
+
+
+def _validate_port(value: str) -> int:
+    """
+    验证端口号范围
+
+    Args:
+        value: 用户输入的端口号字符串
+
+    Returns:
+        int: 验证通过的端口号
+
+    Raises:
+        argparse.ArgumentTypeError: 端口号无效
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid port: {value!r} is not a number")
+
+    if not (1024 <= port <= 65535):
+        raise argparse.ArgumentTypeError(
+            f"Port must be between 1024 and 65535, got {port}"
+        )
+    return port
+
+
+def _validate_config_path(value: str) -> str:
+    """
+    验证配置文件路径（仅检查基本格式，不检查存在性）
+
+    验证模式时会检查文件存在性。启动服务时可能配置文件稍后创建。
+
+    Args:
+        value: 用户输入的配置文件路径
+
+    Returns:
+        str: 配置文件路径
+
+    Raises:
+        argparse.ArgumentTypeError: 路径无效
+    """
+    if not value:
+        raise argparse.ArgumentTypeError("Config path cannot be empty")
+
+    # 检查文件扩展名是否合理
+    if not value.endswith((".yaml", ".yml")):
+        raise argparse.ArgumentTypeError(
+            f"Config file should have .yaml or .yml extension, got: {value}"
+        )
+
+    return value
 
 
 def _check_rlimit():
@@ -82,6 +135,7 @@ def cmd_process(args):
         args: argparse 解析后的命令行参数对象
             - config (str): 配置文件路径
             - validate (bool): 是否仅验证配置
+            - progress_file (str): 进度文件路径 (可选，用于 GUI 控制面板)
 
     Returns:
         int: 退出码，0 表示成功
@@ -114,8 +168,11 @@ def cmd_process(args):
             )
         return 0
 
+    # 获取进度文件路径 (可选)
+    progress_file = getattr(args, "progress_file", None)
+
     # 创建处理器并执行（使用配置文件路径）
-    processor = UniversalAIProcessor(args.config)
+    processor = UniversalAIProcessor(args.config, progress_file=progress_file)
     processor.run()
     return 0
 
@@ -331,6 +388,39 @@ def cmd_token(args):
     return 0
 
 
+def cmd_gui(args):
+    """
+    启动 GUI 控制面板子命令
+
+    启动 Web GUI 控制面板，提供配置编辑、进程管理和日志查看功能。
+
+    Args:
+        args: argparse 解析后的命令行参数对象
+            - port (int): 控制服务器端口，默认 8790
+            - no_browser (bool): 是否禁止自动打开浏览器
+
+    Returns:
+        int: 退出码，0 表示成功
+
+    使用示例:
+        python cli.py gui              # 启动并打开浏览器
+        python cli.py gui -p 8080      # 使用自定义端口
+        python cli.py gui --no-browser # 不打开浏览器
+    """
+    try:
+        from src.control.server import run_control_server
+    except ImportError:
+        print("❌ 此版本不包含 GUI 功能，请下载完整版")
+        return 1
+
+    port = args.port
+    open_browser = not getattr(args, "no_browser", False)
+
+    # 启动 Control Server
+    run_control_server(host="127.0.0.1", port=port, open_browser=open_browser)
+    return 0
+
+
 def main():
     """
     CLI 主入口函数
@@ -373,6 +463,10 @@ def main():
     p_process.add_argument(
         "--validate", action="store_true", help="Only validate config"
     )
+    p_process.add_argument(
+        "--progress-file",
+        help="Progress file path (used by GUI control panel)",
+    )
     p_process.set_defaults(func=cmd_process)
 
     # ===== gateway 子命令：API 网关 =====
@@ -381,7 +475,13 @@ def main():
         "-c", "--config", default="config.yaml", help="Config file path"
     )
     p_gateway.add_argument("--host", default="0.0.0.0", help="Listen address")
-    p_gateway.add_argument("-p", "--port", type=int, default=8787, help="Listen port")
+    p_gateway.add_argument(
+        "-p",
+        "--port",
+        type=_validate_port,
+        default=8787,
+        help="Listen port (1024-65535)",
+    )
     p_gateway.add_argument(
         "-w", "--workers", type=int, default=1, help="Worker processes"
     )
@@ -407,6 +507,26 @@ def main():
         help="Estimation mode: in (input from input file), out (output from output file), io (both)",
     )
     p_token.set_defaults(func=cmd_token)
+
+    # ===== gui 子命令：Web GUI 控制面板（可选特性，仅完整版包含）=====
+    try:
+        gui_available = importlib.util.find_spec("src.control.server") is not None
+    except (ModuleNotFoundError, ImportError):
+        gui_available = False
+
+    if gui_available:
+        p_gui = subparsers.add_parser("gui", help="Start GUI control panel")
+        p_gui.add_argument(
+            "-p",
+            "--port",
+            type=_validate_port,
+            default=8790,
+            help="Control server port (1024-65535)",
+        )
+        p_gui.add_argument(
+            "--no-browser", action="store_true", help="Don't open browser automatically"
+        )
+        p_gui.set_defaults(func=cmd_gui)
 
     # 解析命令行参数
     args = parser.parse_args()

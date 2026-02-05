@@ -7,6 +7,7 @@ CLI 入口测试
 - help: 帮助信息
 - process: 主处理流程 (配置验证)
 - token: Token 估算命令
+- gui: Web GUI 控制面板
 """
 
 import subprocess
@@ -54,6 +55,7 @@ class TestCLI:
         assert "token" in result.stdout
         assert "version" in result.stdout
         assert "check" in result.stdout
+        assert "gui" in result.stdout
 
     def test_process_help(self):
         """测试 process 子命令帮助"""
@@ -78,6 +80,18 @@ class TestCLI:
         assert result.returncode == 0
         assert "--port" in result.stdout
         assert "--host" in result.stdout
+
+    def test_gui_help(self):
+        """测试 gui 子命令帮助"""
+        result = subprocess.run(
+            [sys.executable, "cli.py", "gui", "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 0
+        assert "--port" in result.stdout
+        assert "--no-browser" in result.stdout
 
     def test_process_validate(self, sample_config_file):
         """测试配置验证"""
