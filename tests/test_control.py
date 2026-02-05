@@ -96,8 +96,11 @@ class TestProcessManager:
 
         assert "gateway" in all_status
         assert "process" in all_status
+        assert "working_directory" in all_status
         assert "managed" in all_status["gateway"]
         assert "managed" in all_status["process"]
+        # 验证工作目录路径存在
+        assert len(all_status["working_directory"]) > 0
 
     def test_log_buffer(self):
         """测试日志缓冲区"""
