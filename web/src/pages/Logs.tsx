@@ -333,11 +333,11 @@ export default function Logs({ language }: LogsProps) {
   };
 
   return (
-    <div className="p-6 h-full flex">
-      {/* Side-by-side layout */}
-      <div className="flex-1 flex gap-6" style={{ height: 'calc(100vh - 200px)' }}>
+    <div className="flex flex-col h-full">
+      {/* Side-by-side layout with proper flex container */}
+      <div className="flex-1 flex gap-4 p-4 min-h-0">
         {/* Gateway Panel */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
           <LogPanel
             target="gateway"
             logs={gatewayLogs}
@@ -356,7 +356,7 @@ export default function Logs({ language }: LogsProps) {
         </div>
 
         {/* Process Panel */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
           <LogPanel
             target="process"
             logs={processLogs}
