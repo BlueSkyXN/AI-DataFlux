@@ -34,6 +34,7 @@ export interface StatusResponse {
     managed: ManagedProcessStatus;
     progress?: ProcessProgress;
   };
+  working_directory?: string;
 }
 
 export interface ConfigResponse {

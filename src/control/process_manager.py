@@ -428,6 +428,9 @@ class ProcessManager:
         if process_progress:
             result["process"]["progress"] = process_progress
 
+        # 添加工作目录
+        result["working_directory"] = PROJECT_ROOT
+
         return result
 
     async def get_all_status_async(self) -> dict:
@@ -456,6 +459,9 @@ class ProcessManager:
         process_progress = self._read_process_progress()
         if process_progress:
             result["process"]["progress"] = process_progress
+
+        # 添加工作目录
+        result["working_directory"] = PROJECT_ROOT
 
         return result
 
