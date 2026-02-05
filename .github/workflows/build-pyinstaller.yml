@@ -39,33 +39,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [full, cli-only]
         include:
           # Full 版本（包含 GUI）
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             build_type: full
             artifact_name: AI-DataFlux-linux-amd64-full
-          - os: ubuntu-24.04-arm
+          - os: macos-13
             build_type: full
-            artifact_name: AI-DataFlux-linux-arm64-full
-          - os: macos-15
+            artifact_name: AI-DataFlux-macos-amd64-full
+          - os: macos-14
             build_type: full
             artifact_name: AI-DataFlux-macos-arm64-full
-          - os: windows-2025
+          - os: windows-2022
             build_type: full
             artifact_name: AI-DataFlux-windows-amd64-full.exe
 
           # CLI-only 版本（不含 GUI）
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             build_type: cli-only
             artifact_name: AI-DataFlux-linux-amd64-cli
-          - os: ubuntu-24.04-arm
+          - os: macos-13
             build_type: cli-only
-            artifact_name: AI-DataFlux-linux-arm64-cli
-          - os: macos-15
+            artifact_name: AI-DataFlux-macos-amd64-cli
+          - os: macos-14
             build_type: cli-only
             artifact_name: AI-DataFlux-macos-arm64-cli
-          - os: windows-2025
+          - os: windows-2022
             build_type: cli-only
             artifact_name: AI-DataFlux-windows-amd64-cli.exe
 
@@ -168,13 +167,13 @@ jobs:
 
             **完整版（Full - 包含 Web GUI）：**
             - **Linux (x64)**: `AI-DataFlux-linux-amd64-full`
-            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-full`
+            - **macOS (Intel)**: `AI-DataFlux-macos-amd64-full`
             - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-full`
             - **Windows (x64)**: `AI-DataFlux-windows-amd64-full.exe`
 
             **CLI 版本（仅命令行，体积更小）：**
             - **Linux (x64)**: `AI-DataFlux-linux-amd64-cli`
-            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-cli`
+            - **macOS (Intel)**: `AI-DataFlux-macos-amd64-cli`
             - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-cli`
             - **Windows (x64)**: `AI-DataFlux-windows-amd64-cli.exe`
 
