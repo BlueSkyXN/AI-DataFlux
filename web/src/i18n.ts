@@ -82,9 +82,12 @@ export interface Translations {
 
   // New features
   edit: string;
-  openFolder: string;
-  openFile: string;
-  absolutePath: string;
+  browse: string;
+  chooseFile: string;
+  chooseFolder: string;
+  controllerStatus: string;
+  controllerConnected: string;
+  controllerDisconnected: string;
 }
 
 const en: Translations = {
@@ -166,9 +169,12 @@ const en: Translations = {
 
   // New features
   edit: 'Edit',
-  openFolder: 'Open Folder',
-  openFile: 'Open File',
-  absolutePath: 'Absolute Path',
+  browse: 'Browse',
+  chooseFile: 'Choose File',
+  chooseFolder: 'Choose Folder',
+  controllerStatus: 'Controller',
+  controllerConnected: 'Connected',
+  controllerDisconnected: 'Disconnected',
 };
 
 const zh: Translations = {
@@ -250,9 +256,12 @@ const zh: Translations = {
 
   // New features
   edit: '编辑',
-  openFolder: '打开文件夹',
-  openFile: '打开文件',
-  absolutePath: '绝对路径',
+  browse: '浏览',
+  chooseFile: '选择文件',
+  chooseFolder: '选择文件夹',
+  controllerStatus: '控制器',
+  controllerConnected: '已连接',
+  controllerDisconnected: '未连接',
 };
 
 const translations: Record<Language, Translations> = {
