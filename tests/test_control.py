@@ -7,8 +7,6 @@ Control Server 测试
 - 路径安全验证
 """
 
-import os
-import tempfile
 from unittest.mock import patch
 
 import pytest
@@ -56,7 +54,7 @@ class TestConfigAPI:
 
     def test_write_config_creates_backup(self, tmp_path):
         """测试写入配置文件会创建备份"""
-        from src.control.config_api import write_config, PROJECT_ROOT
+        from src.control.config_api import write_config
 
         # 使用临时目录中的文件
         test_file = tmp_path / "test_config.yaml"
