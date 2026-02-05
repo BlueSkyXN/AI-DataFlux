@@ -26,7 +26,14 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator, List
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -394,6 +401,7 @@ def create_control_app() -> FastAPI:
             if os.path.isfile(index_path):
                 return FileResponse(index_path)
             raise HTTPException(404, "Not found")
+
     else:
         # 没有前端，显示 API 信息
 

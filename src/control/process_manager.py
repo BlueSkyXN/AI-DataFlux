@@ -407,9 +407,11 @@ class ProcessManager:
 
         # 添加 Gateway 健康检查（同步版本：可能阻塞；Server 侧优先用 get_all_status_async）
         now = time.time()
-        if self._gateway_health_cache_time and (
-            now - self._gateway_health_cache_time
-        ) < self._gateway_health_cache_ttl_seconds():
+        if (
+            self._gateway_health_cache_time
+            and (now - self._gateway_health_cache_time)
+            < self._gateway_health_cache_ttl_seconds()
+        ):
             gateway_health = self._gateway_health_cache
         else:
             gateway_health = self._probe_gateway_health_sync(
@@ -487,9 +489,11 @@ class ProcessManager:
 
     async def _get_gateway_health_cached(self) -> Optional[dict]:
         now = time.time()
-        if self._gateway_health_cache_time and (
-            now - self._gateway_health_cache_time
-        ) < self._gateway_health_cache_ttl_seconds():
+        if (
+            self._gateway_health_cache_time
+            and (now - self._gateway_health_cache_time)
+            < self._gateway_health_cache_ttl_seconds()
+        ):
             return self._gateway_health_cache
 
         health = await asyncio.to_thread(
