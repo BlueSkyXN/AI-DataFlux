@@ -24,7 +24,9 @@ interface LogPanelProps {
   reconnecting: boolean;
   reconnectInfo: string | null;
   autoScroll: boolean;
+  wordWrap: boolean;
   onToggleAutoScroll: (enabled: boolean) => void;
+  onToggleWordWrap: (enabled: boolean) => void;
   onClear: () => void;
   onCopy: () => void;
   onReconnect: () => void;
@@ -39,7 +41,9 @@ function LogPanel({
   reconnecting,
   reconnectInfo,
   autoScroll,
+  wordWrap,
   onToggleAutoScroll,
+  onToggleWordWrap,
   onClear,
   onCopy,
   onReconnect,
@@ -90,6 +94,16 @@ function LogPanel({
             {t.autoScroll}
           </label>
 
+          <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={wordWrap}
+              onChange={(e) => onToggleWordWrap(e.target.checked)}
+              className="rounded border-gray-300 text-cyan-500 focus:ring-cyan-400 w-3.5 h-3.5"
+            />
+            {t.wordWrap}
+          </label>
+
           <div className="flex-1" />
 
           {!connected && !reconnecting && (
@@ -119,7 +133,7 @@ function LogPanel({
       <div className="flex-1 bg-slate-800 rounded-b-2xl overflow-hidden">
         <pre
           ref={logContainerRef}
-          className="h-full p-3 overflow-auto text-xs text-slate-200 font-mono"
+          className={`h-full p-3 overflow-auto text-xs text-slate-200 font-mono ${wordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'}`}
           style={{ fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', monospace" }}
         >
           {logs.length === 0 ? (
@@ -155,6 +169,10 @@ export default function Logs({ language }: LogsProps) {
   const [processReconnecting, setProcessReconnecting] = useState(false);
   const [processReconnectInfo, setProcessReconnectInfo] = useState<string | null>(null);
   const [processAutoScroll, setProcessAutoScroll] = useState(true);
+
+  // Word wrap state
+  const [gatewayWordWrap, setGatewayWordWrap] = useState(false);
+  const [processWordWrap, setProcessWordWrap] = useState(false);
 
   const gatewayWsRef = useRef<AutoReconnectWebSocket | null>(null);
   const processWsRef = useRef<AutoReconnectWebSocket | null>(null);
@@ -327,7 +345,9 @@ export default function Logs({ language }: LogsProps) {
             reconnecting={gatewayReconnecting}
             reconnectInfo={gatewayReconnectInfo}
             autoScroll={gatewayAutoScroll}
+            wordWrap={gatewayWordWrap}
             onToggleAutoScroll={setGatewayAutoScroll}
+            onToggleWordWrap={setGatewayWordWrap}
             onClear={handleGatewayClear}
             onCopy={handleGatewayCopy}
             onReconnect={handleGatewayReconnect}
@@ -344,7 +364,9 @@ export default function Logs({ language }: LogsProps) {
             reconnecting={processReconnecting}
             reconnectInfo={processReconnectInfo}
             autoScroll={processAutoScroll}
+            wordWrap={processWordWrap}
             onToggleAutoScroll={setProcessAutoScroll}
+            onToggleWordWrap={setProcessWordWrap}
             onClear={handleProcessClear}
             onCopy={handleProcessCopy}
             onReconnect={handleProcessReconnect}

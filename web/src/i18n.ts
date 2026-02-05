@@ -68,6 +68,7 @@ export interface Translations {
   waitingForLogs: string;
   reconnectingToServer: string;
   notConnectedClickReconnect: string;
+  wordWrap: string;
 
   // Footer
   footerText: string;
@@ -78,6 +79,12 @@ export interface Translations {
   failedToStopGateway: string;
   failedToStartProcess: string;
   failedToStopProcess: string;
+
+  // New features
+  edit: string;
+  openFolder: string;
+  openFile: string;
+  absolutePath: string;
 }
 
 const en: Translations = {
@@ -145,6 +152,7 @@ const en: Translations = {
   waitingForLogs: 'Waiting for logs...',
   reconnectingToServer: 'Reconnecting to server...',
   notConnectedClickReconnect: 'Not connected. Click Reconnect to start.',
+  wordWrap: 'Word wrap',
 
   // Footer
   footerText: 'AI-DataFlux Control Panel',
@@ -155,6 +163,12 @@ const en: Translations = {
   failedToStopGateway: 'Failed to stop Gateway',
   failedToStartProcess: 'Failed to start Process',
   failedToStopProcess: 'Failed to stop Process',
+
+  // New features
+  edit: 'Edit',
+  openFolder: 'Open Folder',
+  openFile: 'Open File',
+  absolutePath: 'Absolute Path',
 };
 
 const zh: Translations = {
@@ -222,6 +236,7 @@ const zh: Translations = {
   waitingForLogs: '等待日志...',
   reconnectingToServer: '正在重新连接到服务器...',
   notConnectedClickReconnect: '未连接。点击重新连接开始。',
+  wordWrap: '自动换行',
 
   // Footer
   footerText: 'AI-DataFlux 控制面板',
@@ -232,6 +247,12 @@ const zh: Translations = {
   failedToStopGateway: '停止网关失败',
   failedToStartProcess: '启动处理器失败',
   failedToStopProcess: '停止处理器失败',
+
+  // New features
+  edit: '编辑',
+  openFolder: '打开文件夹',
+  openFile: '打开文件',
+  absolutePath: '绝对路径',
 };
 
 const translations: Record<Language, Translations> = {
