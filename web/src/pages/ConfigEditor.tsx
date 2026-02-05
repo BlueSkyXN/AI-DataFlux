@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchConfig, saveConfig, validateConfig } from '../api';
-import { getTranslations, Language } from '../i18n';
+import { getTranslations, type Language } from '../i18n';
 
 interface ConfigEditorProps {
   configPath: string;
