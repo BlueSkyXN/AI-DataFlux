@@ -9,9 +9,11 @@
 - [1. 系统概览](#1-系统概览)
   - [1.1 系统定位](#11-系统定位)
   - [1.2 设计哲学](#12-设计哲学)
-  - [1.3 架构视图](#13-架构视图)
-  - [1.4 系统依赖关系图](#14-系统依赖关系图)
-  - [1.5 使用场景](#15-使用场景)
+  - [1.3 四大组件交互架构](#13-四大组件交互架构)
+  - [1.4 数据流与通信方式](#14-数据流与通信方式)
+  - [1.5 架构视图](#15-架构视图)
+  - [1.6 系统依赖关系图](#16-系统依赖关系图)
+  - [1.7 使用场景](#17-使用场景)
 - [2. 项目结构](#2-项目结构)
   - [2.1 目录布局](#21-目录布局)
   - [2.2 关键文件说明](#22-关键文件说明)
@@ -81,6 +83,7 @@ AI-DataFlux 是一个**高性能、可扩展的 AI 批处理引擎**，专为处
 - ✅ 分类重试策略 + API 熔断机制
 - ✅ 加权负载均衡 + 自动故障转移
 - ✅ OpenAI 兼容 API 网关
+- ✅ Web GUI 控制面板（进程管理、配置编辑、实时日志）
 
 ### 1.2 设计哲学
 
@@ -93,7 +96,168 @@ AI-DataFlux 是一个**高性能、可扩展的 AI 批处理引擎**，专为处
 | **内存安全** | 元数据分离、动态分片、自动 GC |
 | **可观测性** | 完整日志、进度追踪、性能指标 |
 
-### 1.3 架构视图
+### 1.3 四大组件交互架构
+
+AI-DataFlux 采用**四组件分层架构**，各组件职责清晰、松耦合：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  GUI (Web 控制面板)                         Port: 8790          │
+│  - 前端: web/dist/ 静态文件 (React/Vite)                        │
+│  - 后端: FastAPI Server (src/control/server.py)                 │
+│  - 功能: 配置编辑、进程控制、状态监控、实时日志                 │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  │ (1) HTTP API + WebSocket
+                  │     - POST /api/gateway/start|stop
+                  │     - POST /api/process/start|stop
+                  │     - GET  /api/status
+                  │     - WS   /api/logs?target=gateway|process
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Control (进程管理层)                                           │
+│  - ProcessManager (src/control/process_manager.py)              │
+│  - 功能: 子进程启动/停止、日志采集、进度监控                   │
+└─────────────┬──────────────────────────┬────────────────────────┘
+              │                          │
+              │ (2) subprocess.Popen     │ (3) subprocess.Popen
+              │     + stdout/stderr 管道 │     + stdout/stderr 管道
+              │     + 文件通信            │     + 文件通信
+              ▼                          ▼
+┌────────────────────────┐  ┌────────────────────────────────────┐
+│  Gateway               │  │  Process                           │
+│  Port: 8787            │  │  (数据处理引擎)                    │
+│  - API 网关            │  │  - UniversalAIProcessor            │
+│  - 模型调度            │  │  - 数据源读写                      │
+│  - 负载均衡            │  │  - AI 批处理                       │
+│  - 令牌桶限流          │  │  - 重试策略                        │
+└───────────┬────────────┘  └──────────┬─────────────────────────┘
+            │                          │
+            │                          │ (4) HTTP (OpenAI 兼容)
+            │                          │     POST /v1/chat/completions
+            │         ┌────────────────┘
+            │         │
+            ▼         ▼
+      ┌─────────────────┐
+      │  External AI    │
+      │  Models         │
+      └─────────────────┘
+```
+
+**核心交互机制**：
+
+| 源 → 目标 | 通信方式 | 协议/机制 | 用途 |
+|-----------|---------|----------|------|
+| GUI → Control | 网络 | HTTP API + WebSocket | 进程控制、配置管理、日志流 |
+| Control → Gateway | 进程管理 | `subprocess.Popen` + 管道 | 启动/停止/监控 Gateway |
+| Control → Process | 进程管理 + 文件 | `subprocess.Popen` + `.dataflux_progress.json` | 启动/停止/监控 + 进度上报 |
+| Process → Gateway | 网络 | HTTP (OpenAI API) | 发送 AI 请求 |
+| Gateway → AI Models | 网络 | HTTP (各厂商 API) | 转发请求 |
+
+### 1.4 数据流与通信方式
+
+#### 1.4.1 GUI ⇄ Control Server (HTTP/WebSocket)
+
+**端点列表**：
+```python
+# 配置管理
+GET  /api/config?path=config.yaml  # 读取配置文件
+PUT  /api/config                    # 写入配置（自动备份 .bak）
+
+# Gateway 进程控制
+POST /api/gateway/start             # 启动 Gateway
+POST /api/gateway/stop              # 停止 Gateway（kill_tree）
+
+# Process 进程控制
+POST /api/process/start             # 启动 Process
+POST /api/process/stop              # 停止 Process
+
+# 状态查询
+GET  /api/status                    # 获取所有进程状态（含进度）
+
+# 实时日志流
+WS   /api/logs?target=gateway       # WebSocket 推送 Gateway 日志
+WS   /api/logs?target=process       # WebSocket 推送 Process 日志
+```
+
+#### 1.4.2 Control ⇄ Gateway/Process (子进程管理)
+
+**启动命令示例**：
+```bash
+# Gateway 启动（ProcessManager.start_gateway()）
+python -m src.gateway.app \
+  --config config.yaml \
+  --port 8787 \
+  --workers 1
+
+# Process 启动（ProcessManager.start_process()）
+python -m cli process \
+  --config config.yaml \
+  --progress-file {PROJECT_ROOT}/.dataflux_progress.json
+```
+
+**日志采集**：
+- 通过 `subprocess.Popen(stdout=PIPE, stderr=PIPE)` 捕获
+- 异步读取线程持续采集
+- 缓冲 1000 行最新日志
+- 通过 WebSocket 实时推送到 GUI
+
+#### 1.4.3 进度文件通信
+
+**文件路径**：`{PROJECT_ROOT}/.dataflux_progress.json`
+
+**PROJECT_ROOT 计算规则**：
+```python
+# 优先级顺序
+1. 环境变量: DATAFLUX_PROJECT_ROOT / AI_DATAFLUX_PROJECT_ROOT
+2. 源码模式: 仓库根目录（/Users/sky/GitHub/AI-DataFlux）
+3. 打包模式:
+   - 当前工作目录（如包含 config.yaml）
+   - 可执行文件所在目录（否则）
+```
+
+**文件格式**：
+```json
+{
+  "total": 1000,                // 总任务数
+  "completed": 250,             // 已完成
+  "failed": 5,                  // 失败数
+  "success": 245,               // 成功数
+  "ts": 1707000000.0            // 更新时间戳
+}
+```
+
+**更新时机**：
+- `UniversalAIProcessor` 每 5 秒更新一次
+- 任务完成/失败时立即更新
+- 完成时删除文件
+
+**读取者**：
+- `ProcessManager._read_progress_file()` 查询状态时读取
+- 超过 15 秒未更新视为过期（返回 None）
+
+#### 1.4.4 Process → Gateway (HTTP API)
+
+**协议**: OpenAI 兼容 Chat Completions API
+
+**示例请求**：
+```python
+# FluxAIClient 发送
+POST http://127.0.0.1:8787/v1/chat/completions
+{
+  "model": "gpt-4",
+  "messages": [
+    {"role": "user", "content": "..."}
+  ],
+  "response_format": {"type": "json_schema", "schema": {...}}
+}
+```
+
+**超时配置**：
+- 连接超时: 20s
+- 总超时: 600s
+
+### 1.5 架构视图
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -156,7 +320,7 @@ AI-DataFlux 是一个**高性能、可扩展的 AI 批处理引擎**，专为处
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.4 系统依赖关系图
+### 1.6 系统依赖关系图
 
 从内部模块依赖的角度看，AI-DataFlux 的组件关系如下：
 
@@ -274,7 +438,13 @@ flowchart TB
   Clients --> External
 ```
 
-### 1.5 使用场景
+**关键依赖说明**：
+- **GUI → Control**: Web 界面通过 HTTP/WebSocket 控制后端服务
+- **Control → Gateway/Process**: 进程管理器启动和监控子进程
+- **Process → Gateway**: 数据处理引擎通过 OpenAI 兼容 API 调用网关
+- **Gateway → External AI**: 网关转发请求到外部 AI 服务
+
+### 1.7 使用场景
 
 从用户使用的角度看，AI-DataFlux 支持两种运行模式：
 
@@ -320,11 +490,24 @@ flowchart TB
 - 适用场景：大批量数据的 AI 处理任务（Excel/CSV/数据库中的历史数据）
 - 数据流向：数据源 → 批处理引擎 → AI API → 结果写回数据源
 - 特点：高吞吐量、自动重试、进度追踪、结果持久化
+- 启动命令：`python cli.py process --config config.yaml`
 
 **API 网关模式** (在线服务):
 - 适用场景：实时 AI 请求转发、多模型负载均衡、统一 API 接口
 - 数据流向：客户端 → API 网关 → AI API → 即时响应
 - 特点：OpenAI 兼容、加权随机调度、令牌桶限流、自动故障转移
+- 启动命令：`python cli.py gateway --port 8787`
+
+**GUI 控制面板模式** (可视化管理):
+- 适用场景：无需命令行操作，可视化管理 Gateway 和 Process 进程
+- 功能特性：
+  - 配置文件在线编辑（自动备份 `.bak`）
+  - 一键启动/停止 Gateway 和 Process
+  - 实时进度监控（读取 `.dataflux_progress.json`）
+  - WebSocket 实时日志流（缓冲 1000 行）
+  - 进程状态查询（PID、运行时间、退出码）
+- 启动命令：`python cli.py gui --port 8790`
+- 访问地址：`http://127.0.0.1:8790`
 
 ---
 
@@ -387,7 +570,7 @@ AI-DataFlux/
 │   │       ├── base.py        # BaseEngine 抽象接口
 │   │       ├── pandas_engine.py # PandasEngine 实现
 │   │       └── polars_engine.py # PolarsEngine 实现
-│   └── gateway/         # API 网关
+│   ├── gateway/         # API 网关
 │       ├── __init__.py
 │       ├── app.py       # FastAPI 应用 (端点定义)
 │       ├── service.py   # FluxApiService (核心服务)
@@ -396,6 +579,19 @@ AI-DataFlux/
 │       ├── session.py   # SessionPool (连接池管理)
 │       ├── resolver.py  # RoundRobinResolver (IP 轮询)
 │       └── schemas.py   # Pydantic 数据模型
+│   ├── control/         # GUI 控制面板后端
+│       ├── __init__.py
+│       ├── server.py      # FastAPI 主应用 (HTTP API + WebSocket)
+│       ├── process_manager.py # 进程管理器 (启动/停止/监控)
+│       ├── config_api.py  # 配置文件 API (读/写/验证)
+│       └── runtime.py     # 运行时环境工具 (路径解析)
+│   └── utils/           # 工具模块
+│       └── console.py   # 控制台输出工具
+├── web/                 # GUI 前端 (可选,需单独构建)
+│   ├── src/             # React/TypeScript 源码
+│   ├── dist/            # 构建产物 (生产部署)
+│   ├── package.json
+│   └── vite.config.ts
 └── tests/               # 测试套件
     ├── conftest.py      # pytest 共享 fixtures
     ├── core/
@@ -403,6 +599,7 @@ AI-DataFlux/
     │   ├── test_content.py
     │   ├── test_state.py
     │   └── test_retry.py
+    ├── test_control.py      # Control Server 测试
     ├── test_sqlite_pool.py
     ├── test_postgresql_pool.py
     ├── test_csv_pool.py
@@ -415,7 +612,7 @@ AI-DataFlux/
 | 文件路径 | 职责 | 关键类/函数 |
 |---------|------|-----------|
 | **入口层** |
-| `cli.py` | 统一命令行工具 | `cmd_process()`, `cmd_gateway()`, `cmd_check()`, `cmd_token()` |
+| `cli.py` | 统一命令行工具 | `cmd_process()`, `cmd_gateway()`, `cmd_gui()`, `cmd_check()`, `cmd_token()` |
 | `main.py` | 批处理模式入口 | `main()` |
 | `gateway.py` | 网关模式入口 | `main()` |
 | **配置层** |
@@ -449,6 +646,11 @@ AI-DataFlux/
 | `src/gateway/limiter.py` | 限流器 | `TokenBucket`, `ModelRateLimiter` |
 | `src/gateway/session.py` | 连接池 | `SessionPool` |
 | `src/gateway/resolver.py` | DNS 解析 | `RoundRobinResolver` |
+| **Control层（GUI后端）** |
+| `src/control/server.py` | FastAPI控制面板 | `create_control_app()`, `run_control_server()` |
+| `src/control/process_manager.py` | 进程管理 | `ProcessManager`, `ManagedProcess`, `kill_tree()` |
+| `src/control/config_api.py` | 配置API | `read_config()`, `write_config()`, `_validate_path()` |
+| `src/control/runtime.py` | 运行时工具 | `get_project_root()`, `find_web_dist_dir()` |
 
 ### 2.3 文件组织原则
 

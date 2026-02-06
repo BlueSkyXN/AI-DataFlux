@@ -2,9 +2,7 @@ import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
 import FormField from '../shared/FormField';
-import TextInput from '../shared/TextInput';
 import NumberInput from '../shared/NumberInput';
-import SelectDropdown from '../shared/SelectDropdown';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import TextareaField from '../shared/TextareaField';
 import StringListEditor from '../shared/StringListEditor';
@@ -18,11 +16,6 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
   const temperatureOverride = (getConfig(['prompt', 'temperature_override']) as boolean) ?? true;
   const systemPrompt = (getConfig(['prompt', 'system_prompt']) as string) ?? '';
   const template = (getConfig(['prompt', 'template']) as string) ?? '';
-
-  // Token estimation
-  const tokenMode = (getConfig(['token_estimation', 'mode']) as string) ?? 'io';
-  const sampleSize = (getConfig(['token_estimation', 'sample_size']) as number) ?? -1;
-  const encoding = (getConfig(['token_estimation', 'encoding']) as string) ?? 'o200k_base';
 
   return (
     <div className="space-y-4">
@@ -81,38 +74,6 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
           monospace={false}
           placeholder={t.cfgTemplatePlaceholder}
         />
-      </SectionCard>
-
-      {/* Token Estimation */}
-      <SectionCard title={t.cfgTokenEstimation} description={t.cfgTokenEstimationDesc}>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <FormField label={t.cfgTokenMode}>
-            <SelectDropdown
-              value={tokenMode}
-              onChange={(v) => updateConfig(['token_estimation', 'mode'], v)}
-              options={[
-                { value: 'in', label: 'Input' },
-                { value: 'out', label: 'Output' },
-                { value: 'io', label: 'Input + Output' },
-              ]}
-            />
-          </FormField>
-          <FormField label={t.cfgSampleSize} description={t.cfgSampleSizeDesc}>
-            <NumberInput
-              value={sampleSize}
-              onChange={(v) => updateConfig(['token_estimation', 'sample_size'], v)}
-              min={-1}
-            />
-          </FormField>
-          <FormField label={t.cfgEncoding}>
-            <TextInput
-              value={encoding}
-              onChange={(v) => updateConfig(['token_estimation', 'encoding'], v)}
-              placeholder="o200k_base"
-              monospace
-            />
-          </FormField>
-        </div>
       </SectionCard>
     </div>
   );

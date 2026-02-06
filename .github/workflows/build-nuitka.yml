@@ -15,6 +15,7 @@ on:
       - 'gateway.py'
       - 'requirements.txt'
       - 'web/**'
+      - '.github/workflows/build-nuitka.yml'
   pull_request:
     paths:
       - 'src/**'
