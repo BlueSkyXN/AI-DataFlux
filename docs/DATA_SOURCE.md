@@ -6,6 +6,7 @@
 > - 数据源工厂：`src/data/factory.py`
 > - 抽象接口：`src/data/base.py`
 > - 具体实现：`src/data/{mysql,postgresql,sqlite,excel}.py`
+> - 飞书实现：`src/data/feishu/{client,bitable,sheet}.py`
 
 ---
 
@@ -20,8 +21,11 @@
 | `sqlite` | SQLite 表 | 同表 `UPDATE`（事务） | `id` 主键 | Python 标准库 `sqlite3` |
 | `excel` | Excel 文件（`.xlsx/.xls`） | 输出文件（可原地） | DataFrame 行索引 | `pandas` + `openpyxl`（工厂检测） |
 | `csv` | CSV 文件（`.csv`） | 输出文件（可原地） | DataFrame 行索引 | **复用 `ExcelTaskPool`**，同上（工厂检测） |
+| `feishu_bitable` | 飞书多维表格 | 同表 `batch_update` | 连续整数 ↔ `record_id` 映射 | `aiohttp` |
+| `feishu_sheet` | 飞书电子表格 | 同表单元格写入 | 数据行索引 ↔ 实际行号映射 | `aiohttp` |
 
 > 注：`csv` 在工厂层面同样要求 `pandas` + `openpyxl` 可用（`EXCEL_ENABLED`），即使实际读写只用到了 CSV 能力（`src/data/factory.py`）。
+> 注：飞书数据源详细文档请参考 [FEISHU.md](./FEISHU.md)。
 
 ---
 
@@ -120,6 +124,44 @@ columns_to_write:
 - 写回时对每个输出别名使用 `row_result.get(alias, "")`
   - 若结果缺少某个别名，会写入空字符串 `""`（可能覆盖已有值并导致该行继续被判定为“未处理”）
 
+### 飞书多维表格（`feishu_bitable`）
+
+实现类：`FeishuBitableTaskPool`（`src/data/feishu/bitable.py`），使用 `FeishuClient`（`src/data/feishu/client.py`）。
+
+**读取**：
+- 初始化时通过 Bitable search API 分页拉取**全部记录**到内存快照
+- 建立连续整数 `task_id` ↔ 字符串 `record_id` 的映射表
+- 分片时从内存快照中筛选“未处理行”
+
+**写回**：
+- 通过 `batch_update` API 批量更新（单次上限 500 条），自动分块
+- 按 `record_id` 覆盖写入，天然幂等
+- 仅更新“结果里提供了别名值”的列
+
+**关键差异**：
+- `record_id` 是字符串（如 `recXXXXXX`），不是连续数字
+- 需要网络请求，有延迟和失败可能
+- Token 有效期 2 小时，由客户端自动刷新
+
+### 飞书电子表格（`feishu_sheet`）
+
+实现类：`FeishuSheetTaskPool`（`src/data/feishu/sheet.py`），使用 `FeishuClient`（`src/data/feishu/client.py`）。
+
+**读取**：
+- 初始化时通过 values API 一次性读取全部工作表数据到内存二维数组
+- 第一行为表头，建立列名 → 列索引映射
+- 数据行从第 2 行开始，行索引（0-based）作为 `task_id`
+
+**写回**：
+- 串行写入各单元格（Sheet 单文档必须串行）
+- 实际行号 = `task_id + 2`（跳过表头行，1-based）
+- 列号使用 A/B/C...AA/AB 字母格式
+
+**关键差异**：
+- 飞书电子表格单文档必须串行写入，不能并发
+- 行号可能因其他用户插入/删除而偏移（快照模式避免了此问题）
+- 每次写入是独立 HTTP 请求，无事务回滚
+
 ---
 
 ## 常见坑/约束（基于现有代码行为）
@@ -129,5 +171,8 @@ columns_to_write:
   - MySQL/SQLite：缺失别名 → 不更新该列
   - PostgreSQL：缺失别名 → 可能写成 `NULL`（覆盖）
   - Excel/CSV：缺失别名 → 写成 `""`（覆盖）
+  - 飞书多维表格：缺失别名 → 不更新该列（与 MySQL/SQLite 一致）
+  - 飞书电子表格：缺失别名 → 不更新该列
 - **CSV 也要求 `pandas+openpyxl`**：当前是工厂层面的依赖检测策略，后续如要“纯 CSV + polars”需要调整 `EXCEL_ENABLED` 判定逻辑。
+- **飞书数据源是云端操作**：写入有网络延迟、频控限制和部分失败的可能，详见 [FEISHU.md](./FEISHU.md)。
 

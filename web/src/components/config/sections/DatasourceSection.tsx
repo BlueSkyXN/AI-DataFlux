@@ -30,6 +30,8 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
               { value: 'mysql', label: 'MySQL' },
               { value: 'postgresql', label: 'PostgreSQL' },
               { value: 'sqlite', label: 'SQLite' },
+              { value: 'feishu_bitable', label: t.cfgFeishuBitable },
+              { value: 'feishu_sheet', label: t.cfgFeishuSheet },
             ]}
           />
         </FormField>
@@ -90,6 +92,8 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
       {dsType === 'mysql' && <MysqlConnection getConfig={getConfig} updateConfig={updateConfig} t={t} />}
       {dsType === 'postgresql' && <PostgresqlConnection getConfig={getConfig} updateConfig={updateConfig} t={t} />}
       {dsType === 'sqlite' && <SqliteConnection getConfig={getConfig} updateConfig={updateConfig} t={t} />}
+      {dsType === 'feishu_bitable' && <FeishuBitableConnection getConfig={getConfig} updateConfig={updateConfig} t={t} />}
+      {dsType === 'feishu_sheet' && <FeishuSheetConnection getConfig={getConfig} updateConfig={updateConfig} t={t} />}
     </div>
   );
 }
@@ -289,6 +293,114 @@ function SqliteConnection({ getConfig, updateConfig, t }: ConnProps) {
           <TextInput
             value={(getConfig(['sqlite', 'table_name']) as string) ?? ''}
             onChange={(v) => updateConfig(['sqlite', 'table_name'], v)}
+          />
+        </FormField>
+      </div>
+    </SectionCard>
+  );
+}
+
+function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
+  return (
+    <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label={t.cfgFeishuAppId} required>
+          <TextInput
+            value={(getConfig(['feishu', 'app_id']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
+            placeholder="cli_xxxxxxxxxxxxx"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuAppSecret} required>
+          <TextInput
+            value={(getConfig(['feishu', 'app_secret']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
+            type="password"
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuAppToken} required>
+          <TextInput
+            value={(getConfig(['feishu', 'app_token']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'app_token'], v)}
+            placeholder="bascxxxxxxxxxxxxx"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuTableId} required>
+          <TextInput
+            value={(getConfig(['feishu', 'table_id']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'table_id'], v)}
+            placeholder="tblxxxxxxxxxxxxx"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuMaxRetries}>
+          <NumberInput
+            value={(getConfig(['feishu', 'max_retries']) as number) ?? 3}
+            onChange={(v) => updateConfig(['feishu', 'max_retries'], v)}
+            min={0} max={10}
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuQpsLimit} description={t.cfgFeishuQpsLimitDesc}>
+          <NumberInput
+            value={(getConfig(['feishu', 'qps_limit']) as number) ?? 5}
+            onChange={(v) => updateConfig(['feishu', 'qps_limit'], v)}
+            min={0}
+          />
+        </FormField>
+      </div>
+    </SectionCard>
+  );
+}
+
+function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
+  return (
+    <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label={t.cfgFeishuAppId} required>
+          <TextInput
+            value={(getConfig(['feishu', 'app_id']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
+            placeholder="cli_xxxxxxxxxxxxx"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuAppSecret} required>
+          <TextInput
+            value={(getConfig(['feishu', 'app_secret']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
+            type="password"
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuSpreadsheetToken} required>
+          <TextInput
+            value={(getConfig(['feishu', 'spreadsheet_token']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'spreadsheet_token'], v)}
+            placeholder="shtcnxxxxxxxxxxxxx"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuSheetId} required>
+          <TextInput
+            value={(getConfig(['feishu', 'sheet_id']) as string) ?? ''}
+            onChange={(v) => updateConfig(['feishu', 'sheet_id'], v)}
+            placeholder="0"
+            monospace
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuMaxRetries}>
+          <NumberInput
+            value={(getConfig(['feishu', 'max_retries']) as number) ?? 3}
+            onChange={(v) => updateConfig(['feishu', 'max_retries'], v)}
+            min={0} max={10}
+          />
+        </FormField>
+        <FormField label={t.cfgFeishuQpsLimit} description={t.cfgFeishuQpsLimitDesc}>
+          <NumberInput
+            value={(getConfig(['feishu', 'qps_limit']) as number) ?? 5}
+            onChange={(v) => updateConfig(['feishu', 'qps_limit'], v)}
+            min={0}
           />
         </FormField>
       </div>
