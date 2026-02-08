@@ -32,9 +32,19 @@
         - 复用 ExcelTaskPool 实现
         - 自动检测文件类型
 
+    - feishu_bitable: 飞书多维表格
+        - 原生异步 HTTP 客户端（基于 aiohttp）
+        - 快照读取，ID 映射，批量更新
+        - Token 自动刷新，限流重试
+
+    - feishu_sheet: 飞书电子表格
+        - 原生异步 HTTP 客户端（基于 aiohttp）
+        - 快照读取，行号映射，串行写入
+        - Token 自动刷新，限流重试
+
 配置示例:
     datasource:
-      type: mysql  # 或 postgresql、sqlite、excel、csv
+      type: mysql  # 或 postgresql、sqlite、excel、csv、feishu_bitable、feishu_sheet
       engine: auto  # pandas、polars 或 auto
       excel_reader: auto  # openpyxl、calamine 或 auto
       excel_writer: auto  # openpyxl、xlsxwriter 或 auto
@@ -72,6 +82,7 @@ MYSQL_AVAILABLE = False
 POSTGRESQL_AVAILABLE = False
 SQLITE_AVAILABLE = True  # SQLite 是 Python 标准库，始终可用
 EXCEL_ENABLED = False
+FEISHU_AVAILABLE = False
 
 # 检测 MySQL 连接器
 try:
@@ -95,6 +106,14 @@ try:
     import openpyxl  # noqa: F401
 
     EXCEL_ENABLED = True
+except ImportError:
+    pass
+
+# 检测飞书依赖（aiohttp）
+try:
+    import aiohttp  # noqa: F401
+
+    FEISHU_AVAILABLE = True
 except ImportError:
     pass
 
@@ -198,10 +217,26 @@ def create_task_pool(
             engine_type,
         )
 
+    elif datasource_type == "feishu_bitable":
+        return _create_feishu_bitable_pool(
+            config,
+            columns_to_extract,
+            columns_to_write,
+            require_all_input_fields,
+        )
+
+    elif datasource_type == "feishu_sheet":
+        return _create_feishu_sheet_pool(
+            config,
+            columns_to_extract,
+            columns_to_write,
+            require_all_input_fields,
+        )
+
     else:
         raise ValueError(
             f"不支持的数据源类型: {datasource_type}，"
-            f"可选: mysql, postgresql, sqlite, excel, csv"
+            f"可选: mysql, postgresql, sqlite, excel, csv, feishu_bitable, feishu_sheet"
         )
 
 
@@ -492,10 +527,111 @@ def _create_csv_pool(
     )
 
 
+def _create_feishu_bitable_pool(
+    config: dict[str, Any],
+    columns_to_extract: list[str],
+    columns_to_write: dict[str, str],
+    require_all_input_fields: bool,
+) -> BaseTaskPool:
+    """
+    创建飞书多维表格任务池
+
+    Args:
+        config: 完整配置（需包含 feishu 配置节）
+        columns_to_extract: 提取列
+        columns_to_write: 写回映射
+        require_all_input_fields: 是否要求所有输入字段非空
+
+    Returns:
+        FeishuBitableTaskPool 实例
+
+    Raises:
+        ImportError: aiohttp 未安装
+        ValueError: 缺少必需配置字段
+    """
+    if not FEISHU_AVAILABLE:
+        raise ImportError(
+            "aiohttp 不可用，请安装: pip install aiohttp"
+        )
+
+    from .feishu.bitable import FeishuBitableTaskPool
+
+    feishu_config = config.get("feishu", {})
+
+    # 验证必需配置字段
+    required_keys = ["app_id", "app_secret", "app_token", "table_id"]
+    missing_keys = [k for k in required_keys if not feishu_config.get(k)]
+    if missing_keys:
+        raise ValueError(f"飞书多维表格配置缺少必需字段: {missing_keys}")
+
+    return FeishuBitableTaskPool(
+        app_id=feishu_config["app_id"],
+        app_secret=feishu_config["app_secret"],
+        app_token=feishu_config["app_token"],
+        table_id=feishu_config["table_id"],
+        columns_to_extract=columns_to_extract,
+        columns_to_write=columns_to_write,
+        require_all_input_fields=require_all_input_fields,
+        max_retries=feishu_config.get("max_retries", 3),
+        qps_limit=feishu_config.get("qps_limit", 0),
+    )
+
+
+def _create_feishu_sheet_pool(
+    config: dict[str, Any],
+    columns_to_extract: list[str],
+    columns_to_write: dict[str, str],
+    require_all_input_fields: bool,
+) -> BaseTaskPool:
+    """
+    创建飞书电子表格任务池
+
+    Args:
+        config: 完整配置（需包含 feishu 配置节）
+        columns_to_extract: 提取列
+        columns_to_write: 写回映射
+        require_all_input_fields: 是否要求所有输入字段非空
+
+    Returns:
+        FeishuSheetTaskPool 实例
+
+    Raises:
+        ImportError: aiohttp 未安装
+        ValueError: 缺少必需配置字段
+    """
+    if not FEISHU_AVAILABLE:
+        raise ImportError(
+            "aiohttp 不可用，请安装: pip install aiohttp"
+        )
+
+    from .feishu.sheet import FeishuSheetTaskPool
+
+    feishu_config = config.get("feishu", {})
+
+    # 验证必需配置字段
+    required_keys = ["app_id", "app_secret", "spreadsheet_token", "sheet_id"]
+    missing_keys = [k for k in required_keys if not feishu_config.get(k)]
+    if missing_keys:
+        raise ValueError(f"飞书电子表格配置缺少必需字段: {missing_keys}")
+
+    return FeishuSheetTaskPool(
+        app_id=feishu_config["app_id"],
+        app_secret=feishu_config["app_secret"],
+        spreadsheet_token=feishu_config["spreadsheet_token"],
+        sheet_id=feishu_config["sheet_id"],
+        columns_to_extract=columns_to_extract,
+        columns_to_write=columns_to_write,
+        require_all_input_fields=require_all_input_fields,
+        max_retries=feishu_config.get("max_retries", 3),
+        qps_limit=feishu_config.get("qps_limit", 0),
+    )
+
+
 __all__ = [
     "create_task_pool",
     "MYSQL_AVAILABLE",
     "POSTGRESQL_AVAILABLE",
     "SQLITE_AVAILABLE",
     "EXCEL_ENABLED",
+    "FEISHU_AVAILABLE",
 ]

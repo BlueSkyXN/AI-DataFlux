@@ -1,0 +1,530 @@
+"""
+飞书原生异步 HTTP 客户端
+
+本模块实现 AI-DataFlux 专用的飞书 OpenAPI 客户端，不依赖飞书官方 SDK。
+参考 XTF 项目的 api/auth.py 和 api/base.py 设计，使用 aiohttp 实现异步请求。
+
+核心能力:
+    1. tenant_access_token 自动获取与刷新（有效期 2 小时，提前 5 分钟刷新）
+    2. 指数退避重试（429 限流、5xx 服务端错误、网络超时）
+    3. 速率限制（可配置 QPS 上限）
+    4. 统一错误分类与日志
+
+API 端点:
+    认证: POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal
+    多维表格: https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records
+    电子表格: https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values
+
+使用示例:
+    client = FeishuClient(app_id="cli_xxx", app_secret="xxx")
+    await client.ensure_token()
+    records = await client.bitable_list_records(app_token, table_id)
+    await client.close()
+"""
+
+import asyncio
+import logging
+import time
+from typing import Any
+
+import aiohttp
+
+# ==================== 常量 ====================
+
+FEISHU_BASE_URL = "https://open.feishu.cn/open-apis"
+TOKEN_URL = f"{FEISHU_BASE_URL}/auth/v3/tenant_access_token/internal"
+
+# Token 提前刷新裕量（秒）
+TOKEN_REFRESH_MARGIN = 300  # 5 分钟
+
+# 默认重试配置
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BASE_DELAY = 1.0  # 秒
+
+# Bitable 批量操作上限
+BITABLE_BATCH_CREATE_LIMIT = 500
+BITABLE_BATCH_UPDATE_LIMIT = 500
+BITABLE_BATCH_DELETE_LIMIT = 500
+BITABLE_LIST_PAGE_SIZE = 500
+
+# Sheet 操作常量
+SHEET_MAX_ROWS_PER_WRITE = 5000
+
+
+class FeishuAPIError(Exception):
+    """飞书 API 调用错误"""
+
+    def __init__(self, code: int, msg: str, url: str = ""):
+        self.code = code
+        self.msg = msg
+        self.url = url
+        super().__init__(f"飞书 API 错误 [{code}]: {msg} (URL: {url})")
+
+
+class FeishuRateLimitError(FeishuAPIError):
+    """飞书 429 限流错误"""
+
+    def __init__(self, msg: str, retry_after: float = 1.0, url: str = ""):
+        self.retry_after = retry_after
+        super().__init__(code=429, msg=msg, url=url)
+
+
+class FeishuPermissionError(FeishuAPIError):
+    """飞书权限不足错误"""
+
+    pass
+
+
+class FeishuClient:
+    """
+    飞书原生异步 HTTP 客户端
+
+    Attributes:
+        app_id: 飞书应用 ID
+        app_secret: 飞书应用密钥
+        max_retries: 最大重试次数
+        qps_limit: 每秒最大请求数（0 表示不限制）
+    """
+
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        qps_limit: float = 0,
+    ):
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.max_retries = max_retries
+        self.qps_limit = qps_limit
+
+        # Token 状态
+        self._token: str | None = None
+        self._token_expires_at: float = 0  # Unix 时间戳
+
+        # 速率控制
+        self._last_request_time: float = 0
+        self._min_interval = 1.0 / qps_limit if qps_limit > 0 else 0
+
+        # HTTP 会话（延迟创建）
+        self._session: aiohttp.ClientSession | None = None
+
+        self._logger = logging.getLogger("feishu.client")
+
+    # ==================== 生命周期 ====================
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建 HTTP 会话"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
+        return self._session
+
+    async def close(self) -> None:
+        """关闭 HTTP 会话"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    # ==================== Token 管理 ====================
+
+    async def ensure_token(self) -> str:
+        """
+        确保 Token 有效，必要时自动刷新
+
+        Returns:
+            有效的 tenant_access_token
+        """
+        now = time.time()
+        if self._token and now < self._token_expires_at - TOKEN_REFRESH_MARGIN:
+            return self._token
+
+        self._logger.info("正在获取/刷新飞书 tenant_access_token ...")
+        session = await self._get_session()
+
+        async with session.post(
+            TOKEN_URL,
+            json={"app_id": self.app_id, "app_secret": self.app_secret},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        ) as resp:
+            body = await resp.json()
+
+        code = body.get("code", -1)
+        if code != 0:
+            raise FeishuAPIError(
+                code=code,
+                msg=body.get("msg", "获取 Token 失败"),
+                url=TOKEN_URL,
+            )
+
+        self._token = body["tenant_access_token"]
+        expires_in = body.get("expire", 7200)
+        self._token_expires_at = time.time() + expires_in
+        self._logger.info(f"Token 获取成功，有效期 {expires_in} 秒")
+        return self._token
+
+    async def _auth_headers(self) -> dict[str, str]:
+        """构建认证请求头"""
+        token = await self.ensure_token()
+        return {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+    # ==================== 底层请求 ====================
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_data: dict | None = None,
+        params: dict | None = None,
+    ) -> dict[str, Any]:
+        """
+        发送带重试的 HTTP 请求
+
+        自动处理:
+            - Token 过期 → 刷新后重试
+            - 429 限流 → 读取 retry-after / x-ogw-ratelimit-reset 等待后重试
+            - 5xx 服务端错误 → 指数退避重试
+            - 网络超时 → 指数退避重试
+
+        Args:
+            method: HTTP 方法
+            url: 请求 URL
+            json_data: JSON 请求体
+            params: URL 查询参数
+
+        Returns:
+            飞书 API 响应的 data 字段（已去掉外层 code/msg）
+
+        Raises:
+            FeishuPermissionError: 权限不足
+            FeishuRateLimitError: 重试耗尽后仍被限流
+            FeishuAPIError: 其他 API 错误
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self.max_retries + 1):
+            # 速率控制
+            if self._min_interval > 0:
+                now = time.time()
+                elapsed = now - self._last_request_time
+                if elapsed < self._min_interval:
+                    await asyncio.sleep(self._min_interval - elapsed)
+                self._last_request_time = time.time()
+
+            try:
+                headers = await self._auth_headers()
+                session = await self._get_session()
+
+                async with session.request(
+                    method,
+                    url,
+                    json=json_data,
+                    params=params,
+                    headers=headers,
+                ) as resp:
+                    # 处理 429 限流
+                    if resp.status == 429:
+                        retry_after = float(
+                            resp.headers.get(
+                                "x-ogw-ratelimit-reset",
+                                resp.headers.get("Retry-After", "1"),
+                            )
+                        )
+                        if attempt < self.max_retries:
+                            self._logger.warning(
+                                f"飞书 429 限流，等待 {retry_after}s 后重试 "
+                                f"(第 {attempt + 1}/{self.max_retries} 次)"
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+                        raise FeishuRateLimitError(
+                            msg="重试耗尽后仍被限流",
+                            retry_after=retry_after,
+                            url=url,
+                        )
+
+                    # 处理 5xx 服务端错误
+                    if resp.status >= 500:
+                        if attempt < self.max_retries:
+                            wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                            self._logger.warning(
+                                f"飞书服务端 {resp.status}，等待 {wait}s 后重试"
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        body_text = await resp.text()
+                        raise FeishuAPIError(
+                            code=resp.status,
+                            msg=f"服务端错误: {body_text[:200]}",
+                            url=url,
+                        )
+
+                    body = await resp.json()
+
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+            ) as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                    self._logger.warning(
+                        f"网络错误: {e}，等待 {wait}s 后重试"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise FeishuAPIError(
+                    code=-1,
+                    msg=f"网络错误: {e}",
+                    url=url,
+                ) from last_error
+
+            # 解析飞书业务层 code
+            biz_code = body.get("code", 0)
+            if biz_code == 0:
+                return body.get("data", {})
+
+            # Token 失效 → 刷新后重试
+            if biz_code in (99991661, 99991668):
+                self._token = None
+                if attempt < self.max_retries:
+                    self._logger.warning("Token 失效，正在刷新 ...")
+                    continue
+                raise FeishuAPIError(code=biz_code, msg=body.get("msg", ""), url=url)
+
+            # 权限不足 → 终止
+            if biz_code in (99991400, 99991401, 99991403):
+                raise FeishuPermissionError(
+                    code=biz_code,
+                    msg=body.get("msg", "权限不足"),
+                    url=url,
+                )
+
+            # 其他错误
+            raise FeishuAPIError(
+                code=biz_code,
+                msg=body.get("msg", "未知错误"),
+                url=url,
+            )
+
+        # 理论上不会执行到此处
+        raise FeishuAPIError(
+            code=-1,
+            msg=f"重试 {self.max_retries} 次后仍然失败",
+            url=url,
+        )
+
+    # ==================== Bitable (多维表格) API ====================
+
+    async def bitable_list_records(
+        self,
+        app_token: str,
+        table_id: str,
+        *,
+        page_size: int = BITABLE_LIST_PAGE_SIZE,
+        filter_expr: str | None = None,
+        field_names: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        拉取多维表格全部记录（自动翻页）
+
+        Args:
+            app_token: 多维表格 App Token
+            table_id: 数据表 ID
+            page_size: 每页记录数（最大 500）
+            filter_expr: 可选筛选表达式
+            field_names: 可选字段名列表
+
+        Returns:
+            所有记录列表 [{"record_id": "recXXX", "fields": {...}}, ...]
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/search"
+        )
+        all_records: list[dict[str, Any]] = []
+        page_token: str | None = None
+
+        while True:
+            body: dict[str, Any] = {"page_size": page_size}
+            if page_token:
+                body["page_token"] = page_token
+            if filter_expr:
+                body["filter"] = filter_expr
+            if field_names:
+                body["field_names"] = field_names
+
+            data = await self._request("POST", url, json_data=body)
+            items = data.get("items", [])
+            all_records.extend(items)
+
+            if not data.get("has_more", False):
+                break
+            page_token = data.get("page_token")
+            if not page_token:
+                break
+
+        self._logger.info(f"Bitable 共拉取 {len(all_records)} 条记录")
+        return all_records
+
+    async def bitable_batch_update(
+        self,
+        app_token: str,
+        table_id: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        批量更新多维表格记录（单次上限 500 条）
+
+        Args:
+            app_token: 多维表格 App Token
+            table_id: 数据表 ID
+            records: 记录列表 [{"record_id": "recXXX", "fields": {...}}, ...]
+
+        Returns:
+            更新后的记录列表
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/batch_update"
+        )
+
+        all_results: list[dict[str, Any]] = []
+        for i in range(0, len(records), BITABLE_BATCH_UPDATE_LIMIT):
+            chunk = records[i : i + BITABLE_BATCH_UPDATE_LIMIT]
+            data = await self._request(
+                "POST", url, json_data={"records": chunk}
+            )
+            all_results.extend(data.get("records", []))
+
+        return all_results
+
+    async def bitable_batch_create(
+        self,
+        app_token: str,
+        table_id: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        批量创建多维表格记录（单次上限 500 条）
+
+        Args:
+            app_token: 多维表格 App Token
+            table_id: 数据表 ID
+            records: 记录列表 [{"fields": {...}}, ...]
+
+        Returns:
+            创建后的记录列表
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/batch_create"
+        )
+
+        all_results: list[dict[str, Any]] = []
+        for i in range(0, len(records), BITABLE_BATCH_CREATE_LIMIT):
+            chunk = records[i : i + BITABLE_BATCH_CREATE_LIMIT]
+            data = await self._request(
+                "POST", url, json_data={"records": chunk}
+            )
+            all_results.extend(data.get("records", []))
+
+        return all_results
+
+    async def bitable_list_fields(
+        self, app_token: str, table_id: str
+    ) -> list[dict[str, Any]]:
+        """
+        列出多维表格字段
+
+        Returns:
+            字段列表 [{"field_id": "fldXXX", "field_name": "xxx", "type": 1}, ...]
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/fields"
+        )
+        data = await self._request("GET", url, params={"page_size": "100"})
+        return data.get("items", [])
+
+    async def bitable_get_meta(self, app_token: str) -> dict[str, Any]:
+        """获取多维表格元数据"""
+        url = f"{FEISHU_BASE_URL}/bitable/v1/apps/{app_token}"
+        return await self._request("GET", url)
+
+    # ==================== Sheet (电子表格) API ====================
+
+    async def sheet_get_meta(self, spreadsheet_token: str) -> dict[str, Any]:
+        """获取电子表格元数据（包含工作表列表）"""
+        url = (
+            f"{FEISHU_BASE_URL}/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        )
+        return await self._request("GET", url)
+
+    async def sheet_read_range(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+    ) -> list[list[Any]]:
+        """
+        读取电子表格指定范围的数据
+
+        Args:
+            spreadsheet_token: 电子表格 Token
+            range_str: 范围字符串，如 "Sheet1!A1:Z1000"
+
+        Returns:
+            二维数组 [[cell, cell, ...], ...]
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets"
+            f"/{spreadsheet_token}/values/{range_str}"
+        )
+        data = await self._request(
+            "GET",
+            url,
+            params={
+                "valueRenderOption": "ToString",
+                "dateTimeRenderOption": "FormattedString",
+            },
+        )
+        return data.get("valueRange", {}).get("values", [])
+
+    async def sheet_write_range(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+        values: list[list[Any]],
+    ) -> dict[str, Any]:
+        """
+        向电子表格指定范围写入数据
+
+        Args:
+            spreadsheet_token: 电子表格 Token
+            range_str: 范围字符串
+            values: 二维数组
+
+        Returns:
+            写入结果
+        """
+        url = (
+            f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets"
+            f"/{spreadsheet_token}/values"
+        )
+        body = {
+            "valueRange": {
+                "range": range_str,
+                "values": values,
+            }
+        }
+        return await self._request("PUT", url, json_data=body)
+
+    async def sheet_get_info(self, spreadsheet_token: str) -> dict[str, Any]:
+        """获取电子表格基本信息"""
+        url = f"{FEISHU_BASE_URL}/sheets/v3/spreadsheets/{spreadsheet_token}"
+        return await self._request("GET", url)

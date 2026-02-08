@@ -14,7 +14,7 @@ gateway:
 
 # 数据源类型配置
 datasource:
-  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite
+  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite, feishu_bitable, feishu_sheet
   
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
@@ -80,6 +80,24 @@ sqlite:
 csv:
   input_path: "./data/input.csv"
   output_path: "./data/output.csv"  # 可选，默认为 input_path
+
+# 飞书数据源配置（当type=feishu_bitable或feishu_sheet时有效）
+# 需要在飞书开放平台创建自建应用并获取 app_id 和 app_secret
+# 应用需要开通以下权限：
+#   - 多维表格: bitable:app:readonly, bitable:app
+#   - 电子表格: sheets:spreadsheet:readonly, sheets:spreadsheet
+feishu:
+  app_id: "cli_xxxxxxxxxxxxx"           # 飞书自建应用 App ID
+  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxx" # 飞书自建应用 App Secret
+  # === 多维表格专用（type=feishu_bitable）===
+  app_token: "bascxxxxxxxxxxxxx"         # 多维表格 App Token（URL 中获取）
+  table_id: "tblxxxxxxxxxxxxx"           # 数据表 ID
+  # === 电子表格专用（type=feishu_sheet）===
+  spreadsheet_token: "shtcnxxxxxxxxxxxxx"  # 电子表格 Token（URL 中获取）
+  sheet_id: "0"                          # 工作表 ID 或名称
+  # === 通用配置 ===
+  max_retries: 3                         # API 最大重试次数
+  qps_limit: 5                           # 每秒最大请求数（0=不限制）
 
 # 需要从表中提取的字段
 columns_to_extract:
