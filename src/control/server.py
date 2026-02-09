@@ -80,6 +80,13 @@ class ProcessStartRequest(BaseModel):
     config_path: str = "config.yaml"
 
 
+class FeishuTestConnectionRequest(BaseModel):
+    """飞书连接测试请求"""
+
+    app_id: str
+    app_secret: str
+
+
 # ========== WebSocket Manager ==========
 
 
@@ -275,6 +282,42 @@ def create_control_app() -> FastAPI:
             return {"valid": True}
         except yaml.YAMLError as e:
             return {"valid": False, "error": str(e)}
+
+    @app.post("/api/feishu/test_connection")
+    async def api_feishu_test_connection(request: FeishuTestConnectionRequest):
+        """测试飞书连接（获取 tenant_access_token）"""
+        # 懒加载以避免循环导入或不必要的依赖加载
+        from src.data.feishu.client import FeishuClient, FeishuAPIError
+
+        try:
+            # 创建临时客户端
+            client = FeishuClient(
+                app_id=request.app_id,
+                app_secret=request.app_secret,
+                max_retries=0,  # 测试连接不需要重试
+            )
+
+            # 尝试获取 Token
+            token = await client.ensure_token()
+
+            # 关闭 Session
+            await client.close()
+
+            return {
+                "success": True,
+                "message": "Connected successfully",
+                "token_preview": f"{token[:5]}...{token[-5:]}" if token else ""
+            }
+        except FeishuAPIError as e:
+            return {
+                "success": False,
+                "message": f"Feishu API Error: {e.msg} (Code: {e.code})"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Connection failed: {str(e)}"
+            }
 
     # ========== Gateway API ==========
 

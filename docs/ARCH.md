@@ -77,7 +77,7 @@
 AI-DataFlux 是一个**高性能、可扩展的 AI 批处理引擎**，专为处理大规模数据集与 AI 模型交互而设计。
 
 **核心特性**：
-- ✅ 支持 5 种数据源（Excel/CSV/MySQL/PostgreSQL/SQLite）
+- ✅ 支持 7 种数据源（Excel/CSV/MySQL/PostgreSQL/SQLite/飞书多维表格/飞书电子表格）
 - ✅ 双引擎支持（Pandas/Polars），100万+ 行数据优化
 - ✅ 连续任务流模式，恒定并发度
 - ✅ 分类重试策略 + API 熔断机制
@@ -294,11 +294,11 @@ POST http://127.0.0.1:8787/v1/chat/completions
 │  │  │  MySQL   │  │ Postgres │  │  SQLite  │  │  Excel  │ │   │
 │  │  │ TaskPool │  │ TaskPool │  │ TaskPool │  │TaskPool │ │   │
 │  │  └──────────┘  └──────────┘  └──────────┘  └────┬────┘ │   │
-│  │                                                   │      │   │
-│  │                                     ┌─────────────▼────┐ │   │
-│  │                                     │  BaseEngine      │ │   │
-│  │                                     │  (Pandas/Polars) │ │   │
-│  │                                     └──────────────────┘ │   │
+│  │  ┌──────────┐  ┌──────────┐                      │      │   │
+│  │  │  Feishu  │  │  Feishu  │      ┌─────────────▼────┐ │   │
+│  │  │ Bitable  │  │  Sheet   │      │  BaseEngine      │ │   │
+│  │  │ TaskPool │  │ TaskPool │      │  (Pandas/Polars) │ │   │
+│  │  └──────────┘  └──────────┘      └──────────────────┘ │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                          │                                     │
 │                          ▼                                     │
@@ -365,6 +365,7 @@ flowchart TB
     MySQL[data/mysql.py]
     PostgreSQL[data/postgresql.py]
     SQLite[data/sqlite.py]
+    Feishu[data/feishu/*<br/>多维表格/电子表格]
     Engines[data/engines/*]
   end
 
@@ -565,6 +566,11 @@ AI-DataFlux/
 │   │   ├── postgresql.py # PostgreSQLTaskPool (psycopg2)
 │   │   ├── sqlite.py    # SQLiteTaskPool (sqlite3)
 │   │   ├── factory.py   # 任务池工厂 (create_task_pool)
+│   │   ├── feishu/      # 飞书云端数据源
+│   │   │   ├── __init__.py    # 模块入口, run_async() 工具
+│   │   │   ├── client.py      # FeishuClient (原生异步 HTTP)
+│   │   │   ├── bitable.py     # FeishuBitableTaskPool
+│   │   │   └── sheet.py       # FeishuSheetTaskPool
 │   │   └── engines/     # 可插拔数据引擎
 │   │       ├── __init__.py
 │   │       ├── base.py        # BaseEngine 抽象接口
@@ -636,6 +642,9 @@ AI-DataFlux/
 | `src/data/mysql.py` | MySQL 实现 | `MySQLTaskPool`, `MySQLConnectionPoolManager` |
 | `src/data/postgresql.py` | PostgreSQL 实现 | `PostgreSQLTaskPool` |
 | `src/data/sqlite.py` | SQLite 实现 | `SQLiteTaskPool` |
+| `src/data/feishu/client.py` | 飞书 HTTP 客户端 | `FeishuClient` |
+| `src/data/feishu/bitable.py` | 飞书多维表格 | `FeishuBitableTaskPool` |
+| `src/data/feishu/sheet.py` | 飞书电子表格 | `FeishuSheetTaskPool` |
 | `src/data/engines/base.py` | 引擎抽象 | `BaseEngine(ABC)` |
 | `src/data/engines/pandas_engine.py` | Pandas 引擎 | `PandasEngine` |
 | `src/data/engines/polars_engine.py` | Polars 引擎 | `PolarsEngine` |
@@ -687,7 +696,7 @@ AI-DataFlux 采用**经典的四层架构**，从上到下依次为：
 ┌─────────────────────────────────────────┐
 │  3. 数据层 (Data Layer)                 │
 │     - BaseTaskPool (抽象)               │
-│     - 5 种数据源实现                    │
+│     - 7 种数据源实现                    │
 │     - BaseEngine (DataFrame 抽象)       │
 └─────────────┬───────────────────────────┘
               │
@@ -826,6 +835,11 @@ graph TB
         Excel[ExcelTaskPool<br/>✅ 已实现<br/>支持 CSV 自动识别]
     end
 
+    subgraph "云端类型"
+        Bitable[FeishuBitableTaskPool<br/>✅ 已实现<br/>快照 + batch_update<br/>自动二分回退]
+        Sheet[FeishuSheetTaskPool<br/>✅ 已实现<br/>快照 + 范围写入<br/>自动二分回退]
+    end
+
     subgraph "数据引擎层<br/>(仅文件类型)"
         BaseEngine[BaseEngine<br/>抽象接口]
         Pandas[PandasEngine<br/>✅ 已实现<br/>读取器: openpyxl/calamine 10x<br/>写入器: xlsxwriter 3x]
@@ -836,6 +850,8 @@ graph TB
     BaseTaskPool --> PostgreSQL
     BaseTaskPool --> SQLite
     BaseTaskPool --> Excel
+    BaseTaskPool --> Bitable
+    BaseTaskPool --> Sheet
 
     Excel --> BaseEngine
     BaseEngine --> Pandas
@@ -844,6 +860,8 @@ graph TB
     style PostgreSQL fill:#e1f5ff,stroke:#0066cc
     style SQLite fill:#e1f5ff,stroke:#0066cc
     style Polars fill:#fff3cd,stroke:#ff9800
+    style Bitable fill:#d4edda,stroke:#28a745
+    style Sheet fill:#d4edda,stroke:#28a745
 ```
 
 **详细特性**：
@@ -866,16 +884,30 @@ BaseTaskPool
     │    ├─ WAL 模式: 自动启用
     │    └─ 特点: 无服务器、零配置
     │
-    └─── ExcelTaskPool (含 CSV)
-         ├─ 引擎抽象: BaseEngine
-         │  ├─ PandasEngine
-         │  │  ├─ 读取器: openpyxl / calamine (10x)
-         │  │  └─ 写入器: openpyxl / xlsxwriter (3x)
-         │  └─ PolarsEngine
-         │     ├─ 读取器: fastexcel (原生)
-         │     └─ 写入器: xlsxwriter (原生)
-         ├─ 向量化过滤: filter_indices_vectorized (50-100x)
-         └─ 自动保存: 定时 flush (save_interval)
+    ├─── ExcelTaskPool (含 CSV)
+    │    ├─ 引擎抽象: BaseEngine
+    │    │  ├─ PandasEngine
+    │    │  │  ├─ 读取器: openpyxl / calamine (10x)
+    │    │  │  └─ 写入器: openpyxl / xlsxwriter (3x)
+    │    │  └─ PolarsEngine
+    │    │     ├─ 读取器: fastexcel (原生)
+    │    │     └─ 写入器: xlsxwriter (原生)
+    │    ├─ 向量化过滤: filter_indices_vectorized (50-100x)
+    │    └─ 自动保存: 定时 flush (save_interval)
+    │
+    ├─── FeishuBitableTaskPool (飞书多维表格)
+    │    ├─ 客户端: FeishuClient (原生 aiohttp)
+    │    ├─ 快照读取: search API 分页拉取全部记录
+    │    ├─ ID 映射: 连续 task_id ↔ record_id (字符串)
+    │    ├─ 批量写入: batch_update (1000 条/次)
+    │    └─ 自动回退: 栈式二分 (90221/90227)
+    │
+    └─── FeishuSheetTaskPool (飞书电子表格)
+         ├─ 客户端: FeishuClient (原生 aiohttp)
+         ├─ 快照读取: values API 范围读取 (过大自动行二分)
+         ├─ 行号映射: task_id + 2 = 实际行号
+         ├─ 范围写入: 连续行合并 (过大自动二分)
+         └─ 串行写入: 单文档须串行
 ```
 
 ### 5.3 引擎层抽象
@@ -949,6 +981,10 @@ def create_task_pool(config, columns_to_extract, columns_to_write):
         return _create_excel_pool(...)
     elif datasource_type == "csv":
         return _create_csv_pool(...)
+    elif datasource_type == "feishu_bitable":
+        return _create_feishu_bitable_pool(...)
+    elif datasource_type == "feishu_sheet":
+        return _create_feishu_sheet_pool(...)
     else:
         raise ValueError(f"不支持的数据源类型: {datasource_type}")
 ```
@@ -1299,7 +1335,9 @@ GET /                          # 根路径
         │           ├─ postgresql → PostgreSQLTaskPool
         │           ├─ sqlite → SQLiteTaskPool
         │           ├─ excel → ExcelTaskPool(PandasEngine/PolarsEngine)
-        │           └─ csv → ExcelTaskPool (CSV 模式)
+        │           ├─ csv → ExcelTaskPool (CSV 模式)
+        │           ├─ feishu_bitable → FeishuBitableTaskPool
+        │           └─ feishu_sheet → FeishuSheetTaskPool
         │
         └─▶ UniversalAIProcessor(config)
                 │
@@ -2129,6 +2167,8 @@ class UniversalAIProcessor:
 | **SQLite** | `sqlite3` (stdlib) | - |
 | **Excel** | `pandas` + `openpyxl` | 2.0.0+ / 3.1.0+ |
 | **CSV** | `pandas` | 2.0.0+ |
+| **飞书多维表格** | `aiohttp` | 3.9.0+ |
+| **飞书电子表格** | `aiohttp` | 3.9.0+ |
 
 ### 13.3 性能优化依赖
 

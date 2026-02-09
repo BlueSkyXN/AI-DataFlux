@@ -35,6 +35,7 @@ datasource:                  # 数据源类型和引擎配置
   concurrency:               # 并发和性能配置
     retry_limits:            # 重试限制配置
 mysql/postgresql/sqlite/excel/csv:  # 数据源特定配置
+feishu:                          # 飞书数据源配置
 columns_to_extract:          # 输入字段列表
 columns_to_write:            # 输出字段映射
 validation:                  # 字段验证规则
@@ -304,7 +305,7 @@ prompt:
 
 - **类型**：字符串
 - **默认值**：`"excel"`
-- **可选值**：`excel`, `csv`, `mysql`, `postgresql`, `sqlite`
+- **可选值**：`excel`, `csv`, `mysql`, `postgresql`, `sqlite`, `feishu_bitable`, `feishu_sheet`
 - **说明**：数据源类型
 - **代码位置**：
   - 读取：`src/data/factory.py:69`
@@ -316,6 +317,8 @@ prompt:
   - `src/data/mysql.py` - MySQLTaskPool
   - `src/data/postgresql.py` - PostgreSQLTaskPool
   - `src/data/sqlite.py` - SQLiteTaskPool
+  - `src/data/feishu/bitable.py` - FeishuBitableTaskPool
+  - `src/data/feishu/sheet.py` - FeishuSheetTaskPool
 
 #### `datasource.engine`
 
@@ -771,6 +774,76 @@ prompt:
 
 **相关文件**：
 - `src/data/excel.py` - CSV 自动检测逻辑（第 86-98 行）
+
+### 飞书多维表格配置 (feishu)
+
+**生效条件**：`datasource.type: feishu_bitable`
+
+#### 必需字段
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | 字符串 | - | 飞书自建应用 App ID |
+| `app_secret` | 字符串 | - | 飞书自建应用 App Secret |
+| `app_token` | 字符串 | - | 多维表格 App Token（从 URL 中获取） |
+| `table_id` | 字符串 | - | 多维表格数据表 ID |
+
+#### 可选字段
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_retries` | 整数 | `3` | API 最大重试次数 |
+| `qps_limit` | 浮点数 | `0` | 每秒最大请求数，0 表示不限制 |
+
+**代码位置**：
+- 读取：`src/data/factory.py`（`_create_feishu_bitable_pool`）
+- 使用：`src/data/feishu/bitable.py:FeishuBitableTaskPool`
+
+**特殊特性**：
+- 原生异步 HTTP 客户端（`aiohttp`），不依赖飞书官方 SDK
+- 快照读取：初始化时通过 search API 分页拉取全部记录到内存
+- 批量写入：`batch_update`（1000 条/次），请求过大自动栈式二分回退
+- Token 自动刷新：`tenant_access_token` 有效期 2 小时，提前 5 分钟刷新
+
+**相关文件**：
+- `src/data/feishu/client.py` - 飞书异步 HTTP 客户端
+- `src/data/feishu/bitable.py` - 多维表格 TaskPool 实现
+- 详细说明：[FEISHU.md](./FEISHU.md)
+
+### 飞书电子表格配置 (feishu)
+
+**生效条件**：`datasource.type: feishu_sheet`
+
+#### 必需字段
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | 字符串 | - | 飞书自建应用 App ID |
+| `app_secret` | 字符串 | - | 飞书自建应用 App Secret |
+| `spreadsheet_token` | 字符串 | - | 电子表格 Token（从 URL 中获取） |
+| `sheet_id` | 字符串 | - | 工作表 ID 或名称 |
+
+#### 可选字段
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_retries` | 整数 | `3` | API 最大重试次数 |
+| `qps_limit` | 浮点数 | `0` | 每秒最大请求数，0 表示不限制 |
+
+**代码位置**：
+- 读取：`src/data/factory.py`（`_create_feishu_sheet_pool`）
+- 使用：`src/data/feishu/sheet.py:FeishuSheetTaskPool`
+
+**特殊特性**：
+- 快照读取：初始化时通过 values API 一次性读取全部数据到内存
+- 范围写入：连续行合并为一次 API 调用，请求过大自动栈式二分回退
+- 行号映射：`task_id + 2 = 实际行号`（跳过表头，1-based）
+- 串行写入：单文档须串行写入
+
+**相关文件**：
+- `src/data/feishu/client.py` - 飞书异步 HTTP 客户端
+- `src/data/feishu/sheet.py` - 电子表格 TaskPool 实现
+- 详细说明：[FEISHU.md](./FEISHU.md)
 
 ---
 
@@ -1289,6 +1362,8 @@ datasource:
 | PostgreSQLTaskPool | host/user/password/database/table_name 必需 | `src/data/factory.py:243-245` |
 | SQLiteTaskPool | db_path/table_name 必需 | `src/data/factory.py:279-284` |
 | ExcelTaskPool | input_path 必需且存在 | `src/data/excel.py:62-66` |
+| FeishuBitableTaskPool | app_id/app_secret/app_token/table_id 必需 | `src/data/factory.py` |
+| FeishuSheetTaskPool | app_id/app_secret/spreadsheet_token/sheet_id 必需 | `src/data/factory.py` |
 
 ---
 
@@ -1416,4 +1491,4 @@ models:
 
 ---
 
-*文档版本: 1.0 | 最后更新: 2026-01-23*
+*文档版本: 1.1 | 最后更新: 2026-02-09*

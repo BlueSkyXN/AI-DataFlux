@@ -103,6 +103,18 @@ export interface Translations {
   cfgTableName: string;
   cfgPoolSize: string;
   cfgDbPath: string;
+  cfgFeishuBitable: string;
+  cfgFeishuSheet: string;
+  cfgFeishuDesc: string;
+  cfgFeishuAppId: string;
+  cfgFeishuAppSecret: string;
+  cfgFeishuAppToken: string;
+  cfgFeishuTableId: string;
+  cfgFeishuSpreadsheetToken: string;
+  cfgFeishuSheetId: string;
+  cfgFeishuMaxRetries: string;
+  cfgFeishuQpsLimit: string;
+  cfgFeishuQpsLimitDesc: string;
 
   // Concurrency Section
   cfgBasicConcurrency: string;
@@ -331,6 +343,18 @@ const en: Translations = {
   cfgTableName: 'Table Name',
   cfgPoolSize: 'Pool Size',
   cfgDbPath: 'DB Path',
+  cfgFeishuBitable: 'Feishu Bitable',
+  cfgFeishuSheet: 'Feishu Sheet',
+  cfgFeishuDesc: 'Feishu (Lark) cloud spreadsheet. Requires app_id and app_secret from Feishu Open Platform.',
+  cfgFeishuAppId: 'App ID',
+  cfgFeishuAppSecret: 'App Secret',
+  cfgFeishuAppToken: 'App Token',
+  cfgFeishuTableId: 'Table ID',
+  cfgFeishuSpreadsheetToken: 'Spreadsheet Token',
+  cfgFeishuSheetId: 'Sheet ID',
+  cfgFeishuMaxRetries: 'Max Retries',
+  cfgFeishuQpsLimit: 'QPS Limit',
+  cfgFeishuQpsLimitDesc: '0 = unlimited',
 
   // Concurrency Section
   cfgBasicConcurrency: 'Basic Concurrency',
@@ -559,6 +583,18 @@ const zh: Translations = {
   cfgTableName: '表名',
   cfgPoolSize: '连接池大小',
   cfgDbPath: '数据库路径',
+  cfgFeishuBitable: '飞书多维表格',
+  cfgFeishuSheet: '飞书电子表格',
+  cfgFeishuDesc: '飞书云端表格数据源，需要在飞书开放平台创建自建应用获取 App ID 和 App Secret。',
+  cfgFeishuAppId: '应用 ID',
+  cfgFeishuAppSecret: '应用密钥',
+  cfgFeishuAppToken: '多维表格 Token',
+  cfgFeishuTableId: '数据表 ID',
+  cfgFeishuSpreadsheetToken: '电子表格 Token',
+  cfgFeishuSheetId: '工作表 ID',
+  cfgFeishuMaxRetries: '最大重试次数',
+  cfgFeishuQpsLimit: 'QPS 限制',
+  cfgFeishuQpsLimitDesc: '0 = 不限制',
 
   // Concurrency Section
   cfgBasicConcurrency: '基本并发',
