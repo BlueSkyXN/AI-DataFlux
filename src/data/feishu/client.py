@@ -54,7 +54,13 @@ SHEET_MAX_ROWS_PER_WRITE = 5000
 
 # 请求/响应过大错误码（Sheet API 常见）
 FEISHU_TOO_LARGE_CODES = (90221, 90227)
-_TOO_LARGE_KEYWORDS = ("90221", "90227", "TooLargeResponse", "TooLargeRequest", "data exceeded")
+_TOO_LARGE_KEYWORDS = (
+    "90221",
+    "90227",
+    "TooLargeResponse",
+    "TooLargeRequest",
+    "data exceeded",
+)
 
 # 范围字符串解析正则: "Sheet1!A1:Z1000"
 _RANGE_RE = re.compile(r"^(.+?)!([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)$")
@@ -282,9 +288,7 @@ class FeishuClient:
                 last_error = e
                 if attempt < self.max_retries:
                     wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
-                    self._logger.warning(
-                        f"网络错误: {e}，等待 {wait}s 后重试"
-                    )
+                    self._logger.warning(f"网络错误: {e}，等待 {wait}s 后重试")
                     await asyncio.sleep(wait)
                     continue
                 raise FeishuAPIError(
@@ -472,9 +476,7 @@ class FeishuClient:
         while stack:
             chunk = stack.pop()
             try:
-                data = await self._request(
-                    "POST", url, json_data={"records": chunk}
-                )
+                data = await self._request("POST", url, json_data={"records": chunk})
                 all_results.extend(data.get("records", []))
             except FeishuAPIError as e:
                 if _is_too_large_error(e) and len(chunk) > 1:
@@ -578,9 +580,7 @@ class FeishuClient:
         """
         parsed = _parse_range(range_str)
         if parsed is None:
-            raise FeishuAPIError(
-                code=-1, msg=f"无法解析范围用于分块: {range_str}"
-            )
+            raise FeishuAPIError(code=-1, msg=f"无法解析范围用于分块: {range_str}")
 
         sheet_id, start_col, start_row, end_col, end_row = parsed
         chunk_size = max(1, (end_row - start_row + 1) // 2)
@@ -589,14 +589,10 @@ class FeishuClient:
 
         while row_cursor <= end_row:
             current_end = min(row_cursor + chunk_size - 1, end_row)
-            sub_range = (
-                f"{sheet_id}!{start_col}{row_cursor}:{end_col}{current_end}"
-            )
+            sub_range = f"{sheet_id}!{start_col}{row_cursor}:{end_col}{current_end}"
 
             try:
-                rows = await self._sheet_read_single(
-                    spreadsheet_token, sub_range
-                )
+                rows = await self._sheet_read_single(spreadsheet_token, sub_range)
                 all_rows.extend(rows)
                 row_cursor = current_end + 1
             except FeishuAPIError as e:
@@ -636,23 +632,18 @@ class FeishuClient:
 
         # 尝试直接写入
         try:
-            return await self._sheet_write_single(
-                spreadsheet_token, range_str, values
-            )
+            return await self._sheet_write_single(spreadsheet_token, range_str, values)
         except FeishuAPIError as e:
             if not _is_too_large_error(e) or len(values) <= 1:
                 raise
             self._logger.warning(
-                f"Sheet 写入过大 (code={e.code})，启用自动二分: "
-                f"{len(values)} 行"
+                f"Sheet 写入过大 (code={e.code})，启用自动二分: " f"{len(values)} 行"
             )
 
         # 栈式二分写入
         parsed = _parse_range(range_str)
         if parsed is None:
-            raise FeishuAPIError(
-                code=-1, msg=f"无法解析范围用于分块写入: {range_str}"
-            )
+            raise FeishuAPIError(code=-1, msg=f"无法解析范围用于分块写入: {range_str}")
 
         sheet_id, start_col, start_row, end_col, _end_row = parsed
         stack = [(start_row, values)]
@@ -661,9 +652,7 @@ class FeishuClient:
         while stack:
             row_start, chunk_values = stack.pop()
             row_end = row_start + len(chunk_values) - 1
-            sub_range = (
-                f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
-            )
+            sub_range = f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
             try:
                 last_result = await self._sheet_write_single(
                     spreadsheet_token, sub_range, chunk_values
@@ -691,10 +680,7 @@ class FeishuClient:
         values: list[list[Any]],
     ) -> dict[str, Any]:
         """写入单个范围（无回退）"""
-        url = (
-            f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets"
-            f"/{spreadsheet_token}/values"
-        )
+        url = f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets" f"/{spreadsheet_token}/values"
         body = {
             "valueRange": {
                 "range": range_str,

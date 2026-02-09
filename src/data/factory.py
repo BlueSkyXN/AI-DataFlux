@@ -550,9 +550,7 @@ def _create_feishu_bitable_pool(
         ValueError: 缺少必需配置字段
     """
     if not FEISHU_AVAILABLE:
-        raise ImportError(
-            "aiohttp 不可用，请安装: pip install aiohttp"
-        )
+        raise ImportError("aiohttp 不可用，请安装: pip install aiohttp")
 
     from .feishu.bitable import FeishuBitableTaskPool
 
@@ -600,9 +598,7 @@ def _create_feishu_sheet_pool(
         ValueError: 缺少必需配置字段
     """
     if not FEISHU_AVAILABLE:
-        raise ImportError(
-            "aiohttp 不可用，请安装: pip install aiohttp"
-        )
+        raise ImportError("aiohttp 不可用，请安装: pip install aiohttp")
 
     from .feishu.sheet import FeishuSheetTaskPool
 

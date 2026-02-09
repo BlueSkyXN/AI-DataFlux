@@ -80,8 +80,8 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
         # 快照与映射
         self._snapshot: list[dict[str, Any]] = []
-        self._id_map: dict[int, str] = {}       # task_id → record_id
-        self._reverse_map: dict[str, int] = {}   # record_id → task_id
+        self._id_map: dict[int, str] = {}  # task_id → record_id
+        self._reverse_map: dict[str, int] = {}  # record_id → task_id
         self._snapshot_loaded = False
 
         # 写回列名
@@ -116,9 +116,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
             f"开始拉取多维表格快照: app_token={self.app_token}, table_id={self.table_id}"
         )
 
-        records = await self.client.bitable_list_records(
-            self.app_token, self.table_id
-        )
+        records = await self.client.bitable_list_records(self.app_token, self.table_id)
 
         self._snapshot = records
         self._id_map = {}
@@ -156,15 +154,13 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
         # 输出列任一为空 → 未处理
         return any(
-            not self._field_not_empty(fields.get(col))
-            for col in self.write_colnames
+            not self._field_not_empty(fields.get(col)) for col in self.write_colnames
         )
 
     def _is_processed(self, fields: dict[str, Any]) -> bool:
         """判断记录是否已处理（所有输出列非空）"""
         return all(
-            self._field_not_empty(fields.get(col))
-            for col in self.write_colnames
+            self._field_not_empty(fields.get(col)) for col in self.write_colnames
         )
 
     @staticmethod
@@ -184,8 +180,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
         """获取未处理任务总数"""
         self._load_snapshot_sync()
         count = sum(
-            1 for rec in self._snapshot
-            if self._is_unprocessed(self._get_fields(rec))
+            1 for rec in self._snapshot if self._is_unprocessed(self._get_fields(rec))
         )
         self._logger.info(f"多维表格未处理任务数: {count}")
         return count
@@ -194,8 +189,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
         """获取已处理任务总数"""
         self._load_snapshot_sync()
         count = sum(
-            1 for rec in self._snapshot
-            if self._is_processed(self._get_fields(rec))
+            1 for rec in self._snapshot if self._is_processed(self._get_fields(rec))
         )
         self._logger.info(f"多维表格已处理任务数: {count}")
         return count
@@ -289,10 +283,12 @@ class FeishuBitableTaskPool(BaseTaskPool):
                     fields[col_name] = row_result[alias]
 
             if fields:
-                update_records.append({
-                    "record_id": record_id,
-                    "fields": fields,
-                })
+                update_records.append(
+                    {
+                        "record_id": record_id,
+                        "fields": fields,
+                    }
+                )
 
         if not update_records:
             return
@@ -305,9 +301,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
         result = await self.client.bitable_batch_update(
             self.app_token, self.table_id, records
         )
-        self._logger.info(
-            f"Bitable 批量更新完成，成功 {len(result)} 条"
-        )
+        self._logger.info(f"Bitable 批量更新完成，成功 {len(result)} 条")
 
         # 同步更新内存快照，防止多 shard 重复处理
         for rec in records:
@@ -370,10 +364,12 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 break
             fields = self._get_fields(rec)
             if self._is_unprocessed(fields):
-                samples.append({
-                    col: self._convert_field_value(fields.get(col, ""))
-                    for col in self.columns_to_extract
-                })
+                samples.append(
+                    {
+                        col: self._convert_field_value(fields.get(col, ""))
+                        for col in self.columns_to_extract
+                    }
+                )
         return samples
 
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
@@ -385,8 +381,10 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 break
             fields = self._get_fields(rec)
             if self._is_processed(fields):
-                samples.append({
-                    col: self._convert_field_value(fields.get(col, ""))
-                    for col in self.write_colnames
-                })
+                samples.append(
+                    {
+                        col: self._convert_field_value(fields.get(col, ""))
+                        for col in self.write_colnames
+                    }
+                )
         return samples

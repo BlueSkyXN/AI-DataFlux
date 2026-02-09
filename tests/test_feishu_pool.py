@@ -314,7 +314,10 @@ class TestFeishuBitableTaskPool:
         assert FeishuBitableTaskPool._convert_field_value("hello") == "hello"
         assert FeishuBitableTaskPool._convert_field_value(42) == "42"
         assert FeishuBitableTaskPool._convert_field_value(3.14) == "3.14"
-        assert FeishuBitableTaskPool._convert_field_value([{"text": "A"}, {"text": "B"}]) == "A, B"
+        assert (
+            FeishuBitableTaskPool._convert_field_value([{"text": "A"}, {"text": "B"}])
+            == "A, B"
+        )
         assert FeishuBitableTaskPool._convert_field_value({"text": "link"}) == "link"
 
     def test_sample_unprocessed_rows(self, bitable_pool):

@@ -160,9 +160,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
         range_str = f"{self.sheet_id}!A1:{last_col}{row_count}"
 
         self._logger.info(f"读取范围: {range_str}")
-        all_rows = await self.client.sheet_read_range(
-            self.spreadsheet_token, range_str
-        )
+        all_rows = await self.client.sheet_read_range(self.spreadsheet_token, range_str)
 
         if not all_rows:
             self._logger.warning("电子表格数据为空")
@@ -172,7 +170,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
             return
 
         # 第一行为表头
-        self._header_row = [str(cell) if cell is not None else "" for cell in all_rows[0]]
+        self._header_row = [
+            str(cell) if cell is not None else "" for cell in all_rows[0]
+        ]
         self._data_rows = all_rows[1:]
 
         # 建立列名映射
@@ -215,15 +215,13 @@ class FeishuSheetTaskPool(BaseTaskPool):
 
         # 输出列任一为空 → 未处理
         return any(
-            self._get_cell(row, col).strip() == ""
-            for col in self.write_colnames
+            self._get_cell(row, col).strip() == "" for col in self.write_colnames
         )
 
     def _is_processed(self, row: list[Any]) -> bool:
         """判断行是否已处理"""
         return all(
-            self._get_cell(row, col).strip() != ""
-            for col in self.write_colnames
+            self._get_cell(row, col).strip() != "" for col in self.write_colnames
         )
 
     # ==================== BaseTaskPool 抽象方法实现 ====================
@@ -274,8 +272,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
             row = self._data_rows[row_idx]
             if self._is_unprocessed(row):
                 record_dict = {
-                    col: self._get_cell(row, col)
-                    for col in self.columns_to_extract
+                    col: self._get_cell(row, col) for col in self.columns_to_extract
                 }
                 shard_tasks.append((row_idx, record_dict))
 
@@ -362,10 +359,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 range_str = (
                     f"{self.sheet_id}!{col_letter}{start_row}:{col_letter}{end_row}"
                 )
-                values = [
-                    [str(v) if v is not None else ""]
-                    for _, v in segment
-                ]
+                values = [[str(v) if v is not None else ""] for _, v in segment]
 
                 try:
                     await self.client.sheet_write_range(
@@ -378,17 +372,15 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     # 同步更新内存快照，防止多 shard 重复处理
                     for i, (row_idx, value) in enumerate(segment):
                         # row_idx 是数据行索引（0-based），_data_rows 也是 0-based
-                        self._data_rows[row_idx][col_idx] = str(value) if value is not None else ""
+                        self._data_rows[row_idx][col_idx] = (
+                            str(value) if value is not None else ""
+                        )
 
                 except Exception as e:
-                    self._logger.error(
-                        f"写入 {range_str} 失败: {e}"
-                    )
+                    self._logger.error(f"写入 {range_str} 失败: {e}")
                     error_count += len(segment)
 
-        self._logger.info(
-            f"Sheet 写入完成，成功: {success_count}, 失败: {error_count}"
-        )
+        self._logger.info(f"Sheet 写入完成，成功: {success_count}, 失败: {error_count}")
 
     @staticmethod
     def _group_consecutive(
@@ -409,10 +401,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
         """重新从快照加载任务数据"""
         if 0 <= task_id < len(self._data_rows):
             row = self._data_rows[task_id]
-            return {
-                col: self._get_cell(row, col)
-                for col in self.columns_to_extract
-            }
+            return {col: self._get_cell(row, col) for col in self.columns_to_extract}
         self._logger.warning(f"task_id={task_id} 超出快照范围")
         return None
 
@@ -431,10 +420,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
             if len(samples) >= sample_size:
                 break
             if self._is_unprocessed(row):
-                samples.append({
-                    col: self._get_cell(row, col)
-                    for col in self.columns_to_extract
-                })
+                samples.append(
+                    {col: self._get_cell(row, col) for col in self.columns_to_extract}
+                )
         return samples
 
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
@@ -445,8 +433,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
             if len(samples) >= sample_size:
                 break
             if self._is_processed(row):
-                samples.append({
-                    col: self._get_cell(row, col)
-                    for col in self.write_colnames
-                })
+                samples.append(
+                    {col: self._get_cell(row, col) for col in self.write_colnames}
+                )
         return samples
