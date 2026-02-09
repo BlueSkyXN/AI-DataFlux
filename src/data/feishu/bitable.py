@@ -7,7 +7,7 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 核心设计（对应云端表格与本地文件的差异）:
     1. 快照读取 —— 初始化时一次性拉取全部记录到内存，后续操作基于快照
     2. ID 映射表 —— 连续整数 task_id ↔ 字符串 record_id 的稳定映射
-    3. 写入控制 —— 批量更新上限 500 条/次，自动分块
+    3. 写入控制 —— 批量更新上限 1000 条/次，自动分块
     4. 部分失败追溯 —— 每条记录的写入状态独立跟踪
     5. Token 自动刷新 —— 由 FeishuClient 透明处理
 
@@ -302,16 +302,22 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
     async def _batch_update(self, records: list[dict[str, Any]]) -> None:
         """异步执行批量更新"""
-        try:
-            result = await self.client.bitable_batch_update(
-                self.app_token, self.table_id, records
-            )
-            self._logger.info(
-                f"Bitable 批量更新完成，成功 {len(result)} 条"
-            )
-        except Exception as e:
-            self._logger.error(f"Bitable 批量更新失败: {e}")
-            raise
+        result = await self.client.bitable_batch_update(
+            self.app_token, self.table_id, records
+        )
+        self._logger.info(
+            f"Bitable 批量更新完成，成功 {len(result)} 条"
+        )
+
+        # 同步更新内存快照，防止多 shard 重复处理
+        for rec in records:
+            rec_id = rec["record_id"]
+            fields = rec["fields"]
+            # 在快照中找到对应记录并更新
+            for snapshot_rec in self._snapshot:
+                if snapshot_rec["record_id"] == rec_id:
+                    snapshot_rec["fields"].update(fields)
+                    break
 
     def reload_task_data(self, task_id: int) -> dict[str, Any] | None:
         """重新从快照加载任务数据"""

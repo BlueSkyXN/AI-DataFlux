@@ -328,6 +328,40 @@ class TestFeishuBitableTaskPool:
         samples = bitable_pool.sample_processed_rows(10)
         assert len(samples) == 1
 
+    def test_update_task_results_syncs_snapshot(self, bitable_pool, mock_snapshot):
+        """测试写回后同步更新内存快照"""
+        import unittest.mock as mock
+
+        # 原始快照：task_id=0,1 未处理，task_id=2 已处理
+        # 写回前确认有 2 条未处理
+        assert bitable_pool.get_total_task_count() == 2
+
+        # 模拟写回结果
+        results = {
+            0: {"answer": "AI 是人工智能", "category": "tech"},
+        }
+
+        # Mock client 的 bitable_batch_update 方法
+        async def mock_batch_update(app_token, table_id, records):
+            return records  # 模拟成功写入
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=mock_batch_update,
+        ):
+            bitable_pool.update_task_results(results)
+
+        # 验证快照已更新
+        assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "AI 是人工智能"
+        assert bitable_pool._snapshot[0]["fields"]["ai_category"] == "tech"
+
+        # 验证已处理行不会被重复加载
+        # 写回后只剩 task_id=1 未处理（原本 2 条未处理，写回了 1 条）
+        assert bitable_pool.get_total_task_count() == 1
+        loaded = bitable_pool.initialize_shard(1, 0, 2)
+        assert loaded == 1
+
 
 # ==================== Sheet TaskPool 测试 ====================
 
@@ -417,6 +451,39 @@ class TestFeishuSheetTaskPool:
         """测试采样已处理行"""
         samples = sheet_pool.sample_processed_rows(10)
         assert len(samples) == 1
+
+    def test_update_task_results_syncs_snapshot(self, sheet_pool, mock_sheet_data):
+        """测试写回后同步更新内存快照"""
+        import unittest.mock as mock
+
+        # 原始快照：row_idx=0,1 未处理，row_idx=2 已处理
+        # 写回前确认有 2 条未处理
+        assert sheet_pool.get_total_task_count() == 2
+
+        results = {
+            0: {"answer": "AI 是人工智能", "category": "tech"},
+        }
+
+        # Mock client 的 sheet_write_range 方法
+        async def mock_write_range(token, range_str, values):
+            pass  # 模拟成功
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_write_range",
+            side_effect=mock_write_range,
+        ):
+            sheet_pool.update_task_results(results)
+
+        # 验证快照已更新（ai_answer 是第 3 列索引 2，ai_category 是第 4 列索引 3）
+        assert sheet_pool._data_rows[0][2] == "AI 是人工智能"
+        assert sheet_pool._data_rows[0][3] == "tech"
+
+        # 验证已处理行不会被重复加载
+        # 写回后只剩 row_idx=1 未处理（原本 2 条未处理，写回了 1 条）
+        assert sheet_pool.get_total_task_count() == 1
+        loaded = sheet_pool.initialize_shard(1, 0, 2)
+        assert loaded == 1
 
 
 class TestColIndexToLetter:

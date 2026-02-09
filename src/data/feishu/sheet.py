@@ -374,6 +374,12 @@ class FeishuSheetTaskPool(BaseTaskPool):
                         values,
                     )
                     success_count += len(segment)
+
+                    # 同步更新内存快照，防止多 shard 重复处理
+                    for i, (row_idx, value) in enumerate(segment):
+                        # row_idx 是数据行索引（0-based），_data_rows 也是 0-based
+                        self._data_rows[row_idx][col_idx] = str(value) if value is not None else ""
+
                 except Exception as e:
                     self._logger.error(
                         f"写入 {range_str} 失败: {e}"
