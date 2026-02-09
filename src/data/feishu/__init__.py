@@ -19,6 +19,33 @@
     6. 断点续传 —— 处理进度持久化到本地 JSON 文件
 """
 
+import asyncio
+import concurrent.futures
+from typing import Any
+
 from .client import FeishuClient
 
-__all__ = ["FeishuClient"]
+
+def run_async(coro: Any) -> Any:
+    """
+    在同步上下文中运行异步协程
+
+    处理两种场景:
+    1. 无事件循环 → 直接 asyncio.run()
+    2. 已有事件循环运行中 → 在新线程中 asyncio.run()
+    """
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
+
+
+__all__ = ["FeishuClient", "run_async"]

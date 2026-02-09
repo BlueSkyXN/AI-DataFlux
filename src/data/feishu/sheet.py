@@ -27,11 +27,12 @@ AI-DataFlux 的数据源进行批量 AI 处理。
     )
 """
 
-import asyncio
 import logging
+import threading
 from typing import Any
 
 from ..base import BaseTaskPool
+from . import run_async
 from .client import FeishuClient
 
 
@@ -105,31 +106,19 @@ class FeishuSheetTaskPool(BaseTaskPool):
         self.current_min_id = 0
         self.current_max_id = 0
 
-        # 写入锁（Sheet 必须串行写入）
-        self._write_lock = asyncio.Lock()
-
+        self._snapshot_lock = threading.Lock()
         self._logger = logging.getLogger("feishu.sheet_pool")
 
     # ==================== 快照管理 ====================
 
     def _load_snapshot_sync(self) -> None:
-        """同步加载快照"""
+        """同步加载快照（线程安全）"""
         if self._snapshot_loaded:
             return
-
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, self._load_snapshot())
-                future.result()
-        else:
-            asyncio.run(self._load_snapshot())
+        with self._snapshot_lock:
+            if self._snapshot_loaded:
+                return
+            run_async(self._load_snapshot())
 
     async def _load_snapshot(self) -> None:
         """从飞书拉取全部工作表数据"""
@@ -339,10 +328,15 @@ class FeishuSheetTaskPool(BaseTaskPool):
         if not col_data:
             return
 
-        self._run_async(self._write_results(col_data))
+        run_async(self._write_results(col_data))
 
     async def _write_results(self, col_data: dict[str, dict[int, Any]]) -> None:
-        """异步写入结果到电子表格"""
+        """
+        异步写入结果到电子表格
+
+        优化策略: 按列分组，将连续行号合并为一次范围写入。
+        对于非连续行号，拆分为多个连续段分别写入。
+        """
         success_count = 0
         error_count = 0
 
@@ -355,28 +349,55 @@ class FeishuSheetTaskPool(BaseTaskPool):
 
             col_letter = _col_index_to_letter(col_idx)
 
-            # 逐条写入（串行，避免并发冲突）
-            for row_idx, value in rows.items():
-                # 实际行号 = 数据行索引 + 2（跳过表头）
-                actual_row = row_idx + 2
-                range_str = f"{self.sheet_id}!{col_letter}{actual_row}"
+            # 按行索引排序，找连续段合并写入
+            sorted_rows = sorted(rows.items(), key=lambda x: x[0])
+            segments = self._group_consecutive(sorted_rows)
+
+            for segment in segments:
+                first_row_idx = segment[0][0]
+                last_row_idx = segment[-1][0]
+                # 实际行号 = 数据行索引 + 2（跳过表头，1-based）
+                start_row = first_row_idx + 2
+                end_row = last_row_idx + 2
+                range_str = (
+                    f"{self.sheet_id}!{col_letter}{start_row}:{col_letter}{end_row}"
+                )
+                values = [
+                    [str(v) if v is not None else ""]
+                    for _, v in segment
+                ]
 
                 try:
                     await self.client.sheet_write_range(
                         self.spreadsheet_token,
                         range_str,
-                        [[str(value) if value is not None else ""]],
+                        values,
                     )
-                    success_count += 1
+                    success_count += len(segment)
                 except Exception as e:
                     self._logger.error(
                         f"写入 {range_str} 失败: {e}"
                     )
-                    error_count += 1
+                    error_count += len(segment)
 
         self._logger.info(
             f"Sheet 写入完成，成功: {success_count}, 失败: {error_count}"
         )
+
+    @staticmethod
+    def _group_consecutive(
+        sorted_rows: list[tuple[int, Any]],
+    ) -> list[list[tuple[int, Any]]]:
+        """将排序后的 (row_idx, value) 列表按连续行号分组"""
+        if not sorted_rows:
+            return []
+        segments: list[list[tuple[int, Any]]] = [[sorted_rows[0]]]
+        for i in range(1, len(sorted_rows)):
+            if sorted_rows[i][0] == sorted_rows[i - 1][0] + 1:
+                segments[-1].append(sorted_rows[i])
+            else:
+                segments.append([sorted_rows[i]])
+        return segments
 
     def reload_task_data(self, task_id: int) -> dict[str, Any] | None:
         """重新从快照加载任务数据"""
@@ -392,26 +413,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
     def close(self) -> None:
         """关闭飞书客户端"""
         self._logger.info("关闭飞书电子表格任务池 ...")
-        self._run_async(self.client.close())
-
-    # ==================== 工具方法 ====================
-
-    @staticmethod
-    def _run_async(coro: Any) -> Any:
-        """在同步上下文中运行异步协程"""
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return asyncio.run(coro)
+        run_async(self.client.close())
 
     # ==================== Token 估算采样 ====================
 

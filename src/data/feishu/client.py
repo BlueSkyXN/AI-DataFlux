@@ -24,6 +24,7 @@ API 端点:
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -41,14 +42,22 @@ TOKEN_REFRESH_MARGIN = 300  # 5 分钟
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BASE_DELAY = 1.0  # 秒
 
-# Bitable 批量操作上限
-BITABLE_BATCH_CREATE_LIMIT = 500
-BITABLE_BATCH_UPDATE_LIMIT = 500
+# Bitable 批量操作上限（对齐官方文档）
+BITABLE_BATCH_CREATE_LIMIT = 1000
+BITABLE_BATCH_UPDATE_LIMIT = 1000
 BITABLE_BATCH_DELETE_LIMIT = 500
 BITABLE_LIST_PAGE_SIZE = 500
 
 # Sheet 操作常量
+SHEET_MAX_ROWS_PER_READ = 5000
 SHEET_MAX_ROWS_PER_WRITE = 5000
+
+# 请求/响应过大错误码（Sheet API 常见）
+FEISHU_TOO_LARGE_CODES = (90221, 90227)
+_TOO_LARGE_KEYWORDS = ("90221", "90227", "TooLargeResponse", "TooLargeRequest", "data exceeded")
+
+# 范围字符串解析正则: "Sheet1!A1:Z1000"
+_RANGE_RE = re.compile(r"^(.+?)!([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)$")
 
 
 class FeishuAPIError(Exception):
@@ -297,8 +306,23 @@ class FeishuClient:
                     continue
                 raise FeishuAPIError(code=biz_code, msg=body.get("msg", ""), url=url)
 
-            # 权限不足 → 终止
-            if biz_code in (99991400, 99991401, 99991403):
+            # 业务层频控（非 HTTP 429，而是 code=99991400）→ 等待后重试
+            if biz_code == 99991400:
+                if attempt < self.max_retries:
+                    wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                    self._logger.warning(
+                        f"飞书业务层频控 (code={biz_code})，等待 {wait}s 后重试"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise FeishuRateLimitError(
+                    msg=body.get("msg", "业务层频控"),
+                    retry_after=DEFAULT_RETRY_BASE_DELAY,
+                    url=url,
+                )
+
+            # 权限不足 / 配额耗尽 → 终止
+            if biz_code in (99991401, 99991403):
                 raise FeishuPermissionError(
                     code=biz_code,
                     msg=body.get("msg", "权限不足"),
@@ -379,7 +403,7 @@ class FeishuClient:
         records: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """
-        批量更新多维表格记录（单次上限 500 条）
+        批量更新多维表格记录（单次上限 1000 条，过大时自动二分）
 
         Args:
             app_token: 多维表格 App Token
@@ -397,10 +421,8 @@ class FeishuClient:
         all_results: list[dict[str, Any]] = []
         for i in range(0, len(records), BITABLE_BATCH_UPDATE_LIMIT):
             chunk = records[i : i + BITABLE_BATCH_UPDATE_LIMIT]
-            data = await self._request(
-                "POST", url, json_data={"records": chunk}
-            )
-            all_results.extend(data.get("records", []))
+            results = await self._bitable_batch_with_split(url, chunk)
+            all_results.extend(results)
 
         return all_results
 
@@ -411,7 +433,7 @@ class FeishuClient:
         records: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """
-        批量创建多维表格记录（单次上限 500 条）
+        批量创建多维表格记录（单次上限 1000 条，过大时自动二分）
 
         Args:
             app_token: 多维表格 App Token
@@ -429,10 +451,43 @@ class FeishuClient:
         all_results: list[dict[str, Any]] = []
         for i in range(0, len(records), BITABLE_BATCH_CREATE_LIMIT):
             chunk = records[i : i + BITABLE_BATCH_CREATE_LIMIT]
-            data = await self._request(
-                "POST", url, json_data={"records": chunk}
-            )
-            all_results.extend(data.get("records", []))
+            results = await self._bitable_batch_with_split(url, chunk)
+            all_results.extend(results)
+
+        return all_results
+
+    async def _bitable_batch_with_split(
+        self,
+        url: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        执行 Bitable 批量操作，遇到请求过大时自动二分重试
+
+        参考 XTF engine.py 的栈式迭代，避免递归栈溢出。
+        """
+        stack = [records]
+        all_results: list[dict[str, Any]] = []
+
+        while stack:
+            chunk = stack.pop()
+            try:
+                data = await self._request(
+                    "POST", url, json_data={"records": chunk}
+                )
+                all_results.extend(data.get("records", []))
+            except FeishuAPIError as e:
+                if _is_too_large_error(e) and len(chunk) > 1:
+                    mid = len(chunk) // 2
+                    self._logger.warning(
+                        f"Bitable 请求过大 (code={e.code})，"
+                        f"自动二分: {len(chunk)} → {mid} + {len(chunk) - mid}"
+                    )
+                    # LIFO: 先压后半，再压前半 → 先执行前半
+                    stack.append(chunk[mid:])
+                    stack.append(chunk[:mid])
+                else:
+                    raise
 
         return all_results
 
@@ -472,7 +527,7 @@ class FeishuClient:
         range_str: str,
     ) -> list[list[Any]]:
         """
-        读取电子表格指定范围的数据
+        读取电子表格指定范围的数据（过大时自动行二分）
 
         Args:
             spreadsheet_token: 电子表格 Token
@@ -481,6 +536,22 @@ class FeishuClient:
         Returns:
             二维数组 [[cell, cell, ...], ...]
         """
+        try:
+            return await self._sheet_read_single(spreadsheet_token, range_str)
+        except FeishuAPIError as e:
+            if not _is_too_large_error(e):
+                raise
+            self._logger.warning(
+                f"Sheet 读取范围过大 (code={e.code})，启用自动分块: {range_str}"
+            )
+            return await self._sheet_read_chunked(spreadsheet_token, range_str)
+
+    async def _sheet_read_single(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+    ) -> list[list[Any]]:
+        """读取单个范围（无回退）"""
         url = (
             f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets"
             f"/{spreadsheet_token}/values/{range_str}"
@@ -495,6 +566,54 @@ class FeishuClient:
         )
         return data.get("valueRange", {}).get("values", [])
 
+    async def _sheet_read_chunked(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+    ) -> list[list[Any]]:
+        """
+        分块读取电子表格，遇到 90221/90227 自动行数减半
+
+        参考 XTF api/sheet.py 的行二分策略。
+        """
+        parsed = _parse_range(range_str)
+        if parsed is None:
+            raise FeishuAPIError(
+                code=-1, msg=f"无法解析范围用于分块: {range_str}"
+            )
+
+        sheet_id, start_col, start_row, end_col, end_row = parsed
+        chunk_size = max(1, (end_row - start_row + 1) // 2)
+        all_rows: list[list[Any]] = []
+        row_cursor = start_row
+
+        while row_cursor <= end_row:
+            current_end = min(row_cursor + chunk_size - 1, end_row)
+            sub_range = (
+                f"{sheet_id}!{start_col}{row_cursor}:{end_col}{current_end}"
+            )
+
+            try:
+                rows = await self._sheet_read_single(
+                    spreadsheet_token, sub_range
+                )
+                all_rows.extend(rows)
+                row_cursor = current_end + 1
+            except FeishuAPIError as e:
+                if _is_too_large_error(e) and chunk_size > 1:
+                    old_size = chunk_size
+                    chunk_size = max(1, chunk_size // 2)
+                    self._logger.warning(
+                        f"Sheet 分块仍过大，行数减半: {old_size} → {chunk_size}"
+                    )
+                else:
+                    raise
+
+        self._logger.info(
+            f"Sheet 分块读取完成，共 {len(all_rows)} 行 (块大小: {chunk_size})"
+        )
+        return all_rows
+
     async def sheet_write_range(
         self,
         spreadsheet_token: str,
@@ -502,7 +621,7 @@ class FeishuClient:
         values: list[list[Any]],
     ) -> dict[str, Any]:
         """
-        向电子表格指定范围写入数据
+        向电子表格指定范围写入数据（过大时自动二分）
 
         Args:
             spreadsheet_token: 电子表格 Token
@@ -512,6 +631,66 @@ class FeishuClient:
         Returns:
             写入结果
         """
+        if not values:
+            return {}
+
+        # 尝试直接写入
+        try:
+            return await self._sheet_write_single(
+                spreadsheet_token, range_str, values
+            )
+        except FeishuAPIError as e:
+            if not _is_too_large_error(e) or len(values) <= 1:
+                raise
+            self._logger.warning(
+                f"Sheet 写入过大 (code={e.code})，启用自动二分: "
+                f"{len(values)} 行"
+            )
+
+        # 栈式二分写入
+        parsed = _parse_range(range_str)
+        if parsed is None:
+            raise FeishuAPIError(
+                code=-1, msg=f"无法解析范围用于分块写入: {range_str}"
+            )
+
+        sheet_id, start_col, start_row, end_col, _end_row = parsed
+        stack = [(start_row, values)]
+        last_result: dict[str, Any] = {}
+
+        while stack:
+            row_start, chunk_values = stack.pop()
+            row_end = row_start + len(chunk_values) - 1
+            sub_range = (
+                f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
+            )
+            try:
+                last_result = await self._sheet_write_single(
+                    spreadsheet_token, sub_range, chunk_values
+                )
+            except FeishuAPIError as e:
+                if _is_too_large_error(e) and len(chunk_values) > 1:
+                    mid = len(chunk_values) // 2
+                    mid_row = row_start + mid
+                    self._logger.warning(
+                        f"Sheet 写入二分: {len(chunk_values)} → "
+                        f"{mid} + {len(chunk_values) - mid}"
+                    )
+                    # LIFO: 先压后半，再压前半
+                    stack.append((mid_row, chunk_values[mid:]))
+                    stack.append((row_start, chunk_values[:mid]))
+                else:
+                    raise
+
+        return last_result
+
+    async def _sheet_write_single(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+        values: list[list[Any]],
+    ) -> dict[str, Any]:
+        """写入单个范围（无回退）"""
         url = (
             f"{FEISHU_BASE_URL}/sheets/v2/spreadsheets"
             f"/{spreadsheet_token}/values"
@@ -528,3 +707,34 @@ class FeishuClient:
         """获取电子表格基本信息"""
         url = f"{FEISHU_BASE_URL}/sheets/v3/spreadsheets/{spreadsheet_token}"
         return await self._request("GET", url)
+
+
+# ==================== 模块级辅助函数 ====================
+
+
+def _is_too_large_error(e: Exception) -> bool:
+    """
+    检测请求/响应过大错误（90221 TooLargeResponse / 90227 TooLargeRequest）
+
+    参考 XTF api/sheet.py 的 _is_too_large_response，
+    同时检查错误码和错误消息字符串以增强兼容性。
+    """
+    if isinstance(e, FeishuAPIError) and e.code in FEISHU_TOO_LARGE_CODES:
+        return True
+    msg = str(e)
+    return any(kw in msg for kw in _TOO_LARGE_KEYWORDS)
+
+
+def _parse_range(
+    range_str: str,
+) -> tuple[str, str, int, str, int] | None:
+    """
+    解析电子表格范围字符串
+
+    "Sheet1!A1:Z1000" → ("Sheet1", "A", 1, "Z", 1000)
+    无法解析时返回 None
+    """
+    m = _RANGE_RE.match(range_str)
+    if not m:
+        return None
+    return (m.group(1), m.group(2), int(m.group(3)), m.group(4), int(m.group(5)))

@@ -8,7 +8,6 @@
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 
 
 # ==================== 工厂集成测试 ====================
@@ -133,6 +132,58 @@ class TestFeishuClient:
 
         perm_err = FeishuPermissionError(code=99991403, msg="no permission")
         assert isinstance(perm_err, FeishuAPIError)
+
+
+# ==================== 常量与辅助函数测试 ====================
+
+
+class TestFeishuClientConstants:
+    """飞书客户端常量和辅助函数测试"""
+
+    def test_batch_limits_match_official(self):
+        """测试批量操作上限对齐官方文档"""
+        from src.data.feishu.client import (
+            BITABLE_BATCH_CREATE_LIMIT,
+            BITABLE_BATCH_UPDATE_LIMIT,
+            BITABLE_BATCH_DELETE_LIMIT,
+        )
+
+        assert BITABLE_BATCH_CREATE_LIMIT == 1000
+        assert BITABLE_BATCH_UPDATE_LIMIT == 1000
+        assert BITABLE_BATCH_DELETE_LIMIT == 500
+
+    def test_is_too_large_error_by_code(self):
+        """测试 _is_too_large_error 按错误码检测"""
+        from src.data.feishu.client import FeishuAPIError, _is_too_large_error
+
+        assert _is_too_large_error(FeishuAPIError(code=90221, msg="TooLargeResponse"))
+        assert _is_too_large_error(FeishuAPIError(code=90227, msg="TooLargeRequest"))
+        assert not _is_too_large_error(FeishuAPIError(code=99991403, msg="no perm"))
+
+    def test_is_too_large_error_by_message(self):
+        """测试 _is_too_large_error 按消息字符串检测"""
+        from src.data.feishu.client import _is_too_large_error
+
+        assert _is_too_large_error(Exception("error 90221 occurred"))
+        assert _is_too_large_error(Exception("TooLargeResponse"))
+        assert _is_too_large_error(Exception("data exceeded limit"))
+        assert not _is_too_large_error(Exception("random error"))
+
+    def test_parse_range(self):
+        """测试范围字符串解析"""
+        from src.data.feishu.client import _parse_range
+
+        # 正常范围
+        result = _parse_range("Sheet1!A1:Z1000")
+        assert result == ("Sheet1", "A", 1, "Z", 1000)
+
+        # 双字母列
+        result = _parse_range("0!A1:CV10000")
+        assert result == ("0", "A", 1, "CV", 10000)
+
+        # 无法解析
+        assert _parse_range("Sheet1!A1") is None
+        assert _parse_range("invalid") is None
 
 
 # ==================== Bitable TaskPool 测试 ====================

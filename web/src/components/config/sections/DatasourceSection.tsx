@@ -37,47 +37,53 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
         </FormField>
       </SectionCard>
 
-      {/* Engine Settings */}
-      <SectionCard title={t.cfgEngineSettings} description={t.cfgEngineSettingsDesc}>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormField label={t.cfgEngine}>
-            <SelectDropdown
-              value={engine}
-              onChange={(v) => updateConfig(['datasource', 'engine'], v)}
-              options={[
-                { value: 'auto', label: 'Auto' },
-                { value: 'pandas', label: 'Pandas' },
-                { value: 'polars', label: 'Polars' },
-              ]}
-            />
-          </FormField>
-          {dsType === 'excel' && (
-            <>
-              <FormField label={t.cfgExcelReader}>
-                <SelectDropdown
-                  value={excelReader}
-                  onChange={(v) => updateConfig(['datasource', 'excel_reader'], v)}
-                  options={[
-                    { value: 'auto', label: 'Auto' },
-                    { value: 'openpyxl', label: 'openpyxl' },
-                    { value: 'calamine', label: 'calamine (10x)' },
-                  ]}
-                />
-              </FormField>
-              <FormField label={t.cfgExcelWriter}>
-                <SelectDropdown
-                  value={excelWriter}
-                  onChange={(v) => updateConfig(['datasource', 'excel_writer'], v)}
-                  options={[
-                    { value: 'auto', label: 'Auto' },
-                    { value: 'openpyxl', label: 'openpyxl' },
-                    { value: 'xlsxwriter', label: 'xlsxwriter (3x)' },
-                  ]}
-                />
-              </FormField>
-            </>
-          )}
-        </div>
+      {/* Engine Settings (only for file-based datasources) */}
+      {(dsType === 'excel' || dsType === 'csv') && (
+        <SectionCard title={t.cfgEngineSettings} description={t.cfgEngineSettingsDesc}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <FormField label={t.cfgEngine}>
+              <SelectDropdown
+                value={engine}
+                onChange={(v) => updateConfig(['datasource', 'engine'], v)}
+                options={[
+                  { value: 'auto', label: 'Auto' },
+                  { value: 'pandas', label: 'Pandas' },
+                  { value: 'polars', label: 'Polars' },
+                ]}
+              />
+            </FormField>
+            {dsType === 'excel' && (
+              <>
+                <FormField label={t.cfgExcelReader}>
+                  <SelectDropdown
+                    value={excelReader}
+                    onChange={(v) => updateConfig(['datasource', 'excel_reader'], v)}
+                    options={[
+                      { value: 'auto', label: 'Auto' },
+                      { value: 'openpyxl', label: 'openpyxl' },
+                      { value: 'calamine', label: 'calamine (10x)' },
+                    ]}
+                  />
+                </FormField>
+                <FormField label={t.cfgExcelWriter}>
+                  <SelectDropdown
+                    value={excelWriter}
+                    onChange={(v) => updateConfig(['datasource', 'excel_writer'], v)}
+                    options={[
+                      { value: 'auto', label: 'Auto' },
+                      { value: 'openpyxl', label: 'openpyxl' },
+                      { value: 'xlsxwriter', label: 'xlsxwriter (3x)' },
+                    ]}
+                  />
+                </FormField>
+              </>
+            )}
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Input field validation */}
+      <SectionCard>
         <FormField label={t.cfgRequireAllFields} description={t.cfgRequireAllFieldsDesc} horizontal>
           <ToggleSwitch
             checked={requireAll}

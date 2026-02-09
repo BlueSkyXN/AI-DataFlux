@@ -29,11 +29,12 @@ AI-DataFlux 的数据源进行批量 AI 处理。
     )
 """
 
-import asyncio
 import logging
+import threading
 from typing import Any
 
 from ..base import BaseTaskPool
+from . import run_async
 from .client import FeishuClient
 
 
@@ -92,29 +93,19 @@ class FeishuBitableTaskPool(BaseTaskPool):
         self.current_min_id = 0
         self.current_max_id = 0
 
+        self._snapshot_lock = threading.Lock()
         self._logger = logging.getLogger("feishu.bitable_pool")
 
     # ==================== 快照管理 ====================
 
     def _load_snapshot_sync(self) -> None:
-        """同步方式加载快照（内部用 asyncio.run 桥接）"""
+        """同步方式加载快照（线程安全）"""
         if self._snapshot_loaded:
             return
-
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-
-        if loop and loop.is_running():
-            # 在已有事件循环中，创建新线程执行
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, self._load_snapshot())
-                future.result()
-        else:
-            asyncio.run(self._load_snapshot())
+        with self._snapshot_lock:
+            if self._snapshot_loaded:
+                return
+            run_async(self._load_snapshot())
 
     async def _load_snapshot(self) -> None:
         """从飞书拉取全部记录到内存快照"""
@@ -307,7 +298,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
             return
 
         # 同步调用异步写入
-        self._run_async(self._batch_update(update_records))
+        run_async(self._batch_update(update_records))
 
     async def _batch_update(self, records: list[dict[str, Any]]) -> None:
         """异步执行批量更新"""
@@ -336,7 +327,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
     def close(self) -> None:
         """关闭飞书客户端"""
         self._logger.info("关闭飞书多维表格任务池 ...")
-        self._run_async(self.client.close())
+        run_async(self.client.close())
 
     # ==================== 工具方法 ====================
 
@@ -361,23 +352,6 @@ class FeishuBitableTaskPool(BaseTaskPool):
         if isinstance(value, dict):
             return value.get("text", value.get("link", str(value)))
         return str(value)
-
-    @staticmethod
-    def _run_async(coro: Any) -> Any:
-        """在同步上下文中运行异步协程"""
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return asyncio.run(coro)
 
     # ==================== Token 估算采样 ====================
 

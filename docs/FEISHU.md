@@ -10,8 +10,8 @@
 
 | `datasource.type` | 对应飞书产品 | 读取方式 | 写回方式 | `task_id` 体系 | 依赖 |
 |---|---|---|---|---|---|
-| `feishu_bitable` | 飞书多维表格 | 快照拉取（search API 分页） | batch_update（500 条/次） | 连续整数 ↔ record_id 映射 | `aiohttp` |
-| `feishu_sheet` | 飞书电子表格 | 快照拉取（values API 范围读取） | 单元格写入（串行） | 数据行索引 ↔ 实际行号映射 | `aiohttp` |
+| `feishu_bitable` | 飞书多维表格 | 快照拉取（search API 分页） | batch_update（1000 条/次，过大自动二分） | 连续整数 ↔ record_id 映射 | `aiohttp` |
+| `feishu_sheet` | 飞书电子表格 | 快照拉取（values API 范围读取，过大自动行二分） | 范围写入（连续行合并，过大自动二分） | 数据行索引 ↔ 实际行号映射 | `aiohttp` |
 
 ---
 
@@ -156,7 +156,7 @@ src/data/feishu/
 | 要点 | 本地文件 | 云端表格（飞书） |
 |---|---|---|
 | 写入速度 | 内存操作，极快 | HTTP 请求，几十到几百毫秒 |
-| 批量限制 | 无 | Bitable 500条/次，Sheet 有频控 |
+| 批量限制 | 无 | Bitable 1000条/次（create/update），500条/次（delete），Sheet 有频控 |
 | 并发写入 | 随意 | Sheet 单文档必须串行 |
 | 原子性 | 最终统一保存 | 每次 API 调用立即生效 |
 | 部分失败 | 不存在 | 可能写了一半断开 |
@@ -167,8 +167,10 @@ src/data/feishu/
 | 错误场景 | 处理方式 |
 |---|---|
 | 429 限流 | 读 `x-ogw-ratelimit-reset` 响应头，等待后重试 |
+| 业务层频控 (99991400) | 指数退避重试 |
 | 网络超时 | 指数退避重试（1s, 2s, 4s, ...） |
 | Token 失效 | 自动刷新后重试当前请求 |
+| 请求/响应过大 (90221/90227) | 自动二分：行数减半重试，栈式迭代直到成功（参考 XTF） |
 | record_id 不存在 | 跳过并记日志 |
 | 权限不足 | 抛出 `FeishuPermissionError`，终止任务 |
 | 飞书服务端 500 | 指数退避重试，连续失败则抛出异常 |
