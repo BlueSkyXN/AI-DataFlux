@@ -83,7 +83,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
       )}
 
       {/* Input field validation */}
-      <SectionCard>
+      <SectionCard title={t.cfgValidation || 'Validation'}>
         <FormField label={t.cfgRequireAllFields} description={t.cfgRequireAllFieldsDesc} horizontal>
           <ToggleSwitch
             checked={requireAll}
