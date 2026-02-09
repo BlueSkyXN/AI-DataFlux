@@ -1,6 +1,6 @@
-# 原生飞书数据源指南
+# 飞书数据源指南 (Native Async)
 
-AI-DataFlux 内置了高性能的**原生飞书客户端**，不依赖任何第三方 SDK（如 `lark-sdk` 或 `feishu-sdk`），直接使用 `aiohttp` 实现异步 I/O。
+AI-DataFlux 内置了高性能的**原生飞书客户端**，直接使用 `aiohttp` 实现异步 I/O，不依赖任何第三方 SDK。该设计参考了 [XTF](https://github.com/BlueSkyXN/XTF) 的高并发架构，专为大批量数据处理优化。
 
 ## 核心特性
 
@@ -22,7 +22,7 @@ feishu:
   app_id: "cli_a1b2c3d4e5f6"
   app_secret: "your_app_secret_here"
   max_retries: 3        # 最大重试次数 (默认 3)
-  qps_limit: 10         # QPS 限制 (默认 0=不限制)
+  qps_limit: 10         # QPS 限制 (默认 0=不限制，建议 5-10)
 
 # 数据源配置 (多维表格)
 datasource:
@@ -57,9 +57,7 @@ datasource:
   - `sheets:spreadsheet:read` (查看电子表格内容)
   - `sheets:spreadsheet:write` (修改电子表格内容)
 
-## 技术细节
-
-### 架构设计
+## 架构设计
 
 `FeishuClient` (`src/data/feishu/client.py`) 是核心组件：
 
@@ -77,13 +75,6 @@ datasource:
    - `FeishuRateLimitError`: 遇到 429 或 99991400 时，自动等待 `Retry-After` 秒数。
    - `FeishuAPIError`: 遇到 5xx 或网络错误，指数退避重试 (1s, 2s, 4s...)。
 
-### 开发扩展
-
-如需添加新 API 支持：
-1. 修改 `src/data/feishu/client.py`。
-2. 使用 `_request()` 方法，它自动处理了认证和重试。
-3. 如果涉及批量操作，请参考 `bitable_batch_update` 使用信号量并发。
-
 ## 测试连接
 
 控制面板提供了测试 API：
@@ -93,3 +84,4 @@ curl -X POST http://127.0.0.1:8790/api/feishu/test_connection \
   -H "Content-Type: application/json" \
   -d '{"app_id": "cli_xxx", "app_secret": "xxx"}'
 ```
+

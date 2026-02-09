@@ -183,6 +183,20 @@ class FeishuClient:
         self._logger.info(f"Token 获取成功，有效期 {expires_in} 秒")
         return self._token
 
+    async def check_connection(self) -> bool:
+        """
+        检查连接是否正常（通过获取 Token 验证）
+
+        Returns:
+            bool: 连接成功返回 True，失败抛出异常或返回 False
+        """
+        try:
+            await self.ensure_token()
+            return True
+        except Exception as e:
+            self._logger.error(f"连接检查失败: {e}")
+            raise
+
     async def _auth_headers(self) -> dict[str, str]:
         """构建认证请求头"""
         token = await self.ensure_token()
