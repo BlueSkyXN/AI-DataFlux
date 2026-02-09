@@ -537,7 +537,7 @@ def _create_feishu_bitable_pool(
     创建飞书多维表格任务池
 
     Args:
-        config: 完整配置（需包含 feishu 配置节）
+        config: 完整配置（需包含 feishu 和 datasource 配置节）
         columns_to_extract: 提取列
         columns_to_write: 写回映射
         require_all_input_fields: 是否要求所有输入字段非空
@@ -555,18 +555,23 @@ def _create_feishu_bitable_pool(
     from .feishu.bitable import FeishuBitableTaskPool
 
     feishu_config = config.get("feishu", {})
+    datasource_config = config.get("datasource", {})
 
-    # 验证必需配置字段
-    required_keys = ["app_id", "app_secret", "app_token", "table_id"]
-    missing_keys = [k for k in required_keys if not feishu_config.get(k)]
-    if missing_keys:
-        raise ValueError(f"飞书多维表格配置缺少必需字段: {missing_keys}")
+    # 验证全局凭据
+    if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
+        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+
+    # 验证资源参数
+    if not datasource_config.get("app_token"):
+        raise ValueError("缺少飞书多维表格配置: datasource.app_token")
+    if not datasource_config.get("table_id"):
+        raise ValueError("缺少飞书多维表格配置: datasource.table_id")
 
     return FeishuBitableTaskPool(
         app_id=feishu_config["app_id"],
         app_secret=feishu_config["app_secret"],
-        app_token=feishu_config["app_token"],
-        table_id=feishu_config["table_id"],
+        app_token=datasource_config["app_token"],
+        table_id=datasource_config["table_id"],
         columns_to_extract=columns_to_extract,
         columns_to_write=columns_to_write,
         require_all_input_fields=require_all_input_fields,
@@ -585,7 +590,7 @@ def _create_feishu_sheet_pool(
     创建飞书电子表格任务池
 
     Args:
-        config: 完整配置（需包含 feishu 配置节）
+        config: 完整配置（需包含 feishu 和 datasource 配置节）
         columns_to_extract: 提取列
         columns_to_write: 写回映射
         require_all_input_fields: 是否要求所有输入字段非空
@@ -603,18 +608,23 @@ def _create_feishu_sheet_pool(
     from .feishu.sheet import FeishuSheetTaskPool
 
     feishu_config = config.get("feishu", {})
+    datasource_config = config.get("datasource", {})
 
-    # 验证必需配置字段
-    required_keys = ["app_id", "app_secret", "spreadsheet_token", "sheet_id"]
-    missing_keys = [k for k in required_keys if not feishu_config.get(k)]
-    if missing_keys:
-        raise ValueError(f"飞书电子表格配置缺少必需字段: {missing_keys}")
+    # 验证全局凭据
+    if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
+        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+
+    # 验证资源参数
+    if not datasource_config.get("spreadsheet_token"):
+        raise ValueError("缺少飞书电子表格配置: datasource.spreadsheet_token")
+    if not datasource_config.get("sheet_id"):
+        raise ValueError("缺少飞书电子表格配置: datasource.sheet_id")
 
     return FeishuSheetTaskPool(
         app_id=feishu_config["app_id"],
         app_secret=feishu_config["app_secret"],
-        spreadsheet_token=feishu_config["spreadsheet_token"],
-        sheet_id=feishu_config["sheet_id"],
+        spreadsheet_token=datasource_config["spreadsheet_token"],
+        sheet_id=datasource_config["sheet_id"],
         columns_to_extract=columns_to_extract,
         columns_to_write=columns_to_write,
         require_all_input_fields=require_all_input_fields,

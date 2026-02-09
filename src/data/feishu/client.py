@@ -107,11 +107,13 @@ class FeishuClient:
         app_secret: str,
         max_retries: int = DEFAULT_MAX_RETRIES,
         qps_limit: float = 0,
+        concurrency: int = 5,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
         self.max_retries = max_retries
         self.qps_limit = qps_limit
+        self.concurrency = concurrency
 
         # Token 状态
         self._token: str | None = None
@@ -120,6 +122,8 @@ class FeishuClient:
         # 速率控制
         self._last_request_time: float = 0
         self._min_interval = 1.0 / qps_limit if qps_limit > 0 else 0
+        self._rate_limit_lock = asyncio.Lock()  # 保护速率控制状态
+        self._semaphore = asyncio.Semaphore(concurrency) # 限制并发请求数
 
         # HTTP 会话（延迟创建）
         self._session: aiohttp.ClientSession | None = None
@@ -222,123 +226,134 @@ class FeishuClient:
         """
         last_error: Exception | None = None
 
-        for attempt in range(self.max_retries + 1):
-            # 速率控制
-            if self._min_interval > 0:
-                now = time.time()
-                elapsed = now - self._last_request_time
-                if elapsed < self._min_interval:
-                    await asyncio.sleep(self._min_interval - elapsed)
-                self._last_request_time = time.time()
+        # 信号量控制并发
+        async with self._semaphore:
+            for attempt in range(self.max_retries + 1):
+                # 速率控制 (线程安全)
+                async with self._rate_limit_lock:
+                    if self._min_interval > 0:
+                        now = time.time()
+                        elapsed = now - self._last_request_time
+                        if elapsed < self._min_interval:
+                            await asyncio.sleep(self._min_interval - elapsed)
+                        self._last_request_time = time.time()
 
-            try:
-                headers = await self._auth_headers()
-                session = await self._get_session()
+                try:
+                    headers = await self._auth_headers()
+                    session = await self._get_session()
 
-                async with session.request(
-                    method,
-                    url,
-                    json=json_data,
-                    params=params,
-                    headers=headers,
-                ) as resp:
-                    # 处理 429 限流
-                    if resp.status == 429:
-                        retry_after = float(
-                            resp.headers.get(
-                                "x-ogw-ratelimit-reset",
-                                resp.headers.get("Retry-After", "1"),
+                    async with session.request(
+                        method,
+                        url,
+                        json=json_data,
+                        params=params,
+                        headers=headers,
+                    ) as resp:
+                        # 处理 429 限流
+                        if resp.status == 429:
+                            retry_after = float(
+                                resp.headers.get(
+                                    "x-ogw-ratelimit-reset",
+                                    resp.headers.get("Retry-After", "1"),
+                                )
                             )
-                        )
-                        if attempt < self.max_retries:
-                            self._logger.warning(
-                                f"飞书 429 限流，等待 {retry_after}s 后重试 "
-                                f"(第 {attempt + 1}/{self.max_retries} 次)"
+                            if attempt < self.max_retries:
+                                self._logger.warning(
+                                    f"飞书 429 限流，等待 {retry_after}s 后重试 "
+                                    f"(第 {attempt + 1}/{self.max_retries} 次)"
+                                )
+                                await asyncio.sleep(retry_after)
+                                continue
+                            raise FeishuRateLimitError(
+                                msg="重试耗尽后仍被限流",
+                                retry_after=retry_after,
+                                url=url,
                             )
-                            await asyncio.sleep(retry_after)
-                            continue
-                        raise FeishuRateLimitError(
-                            msg="重试耗尽后仍被限流",
-                            retry_after=retry_after,
-                            url=url,
-                        )
 
-                    # 处理 5xx 服务端错误
-                    if resp.status >= 500:
-                        if attempt < self.max_retries:
-                            wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
-                            self._logger.warning(
-                                f"飞书服务端 {resp.status}，等待 {wait}s 后重试"
+                        # 处理 5xx 服务端错误
+                        if resp.status >= 500:
+                            if attempt < self.max_retries:
+                                wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                                self._logger.warning(
+                                    f"飞书服务端 {resp.status}，等待 {wait}s 后重试"
+                                )
+                                await asyncio.sleep(wait)
+                                continue
+                            body_text = await resp.text()
+                            raise FeishuAPIError(
+                                code=resp.status,
+                                msg=f"服务端错误: {body_text[:200]}",
+                                url=url,
                             )
-                            await asyncio.sleep(wait)
-                            continue
-                        body_text = await resp.text()
-                        raise FeishuAPIError(
-                            code=resp.status,
-                            msg=f"服务端错误: {body_text[:200]}",
-                            url=url,
+
+                        body = await resp.json()
+
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                ) as e:
+                    last_error = e
+                    if attempt < self.max_retries:
+                        wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                        self._logger.warning(f"网络错误: {e}，等待 {wait}s 后重试")
+                        await asyncio.sleep(wait)
+                        continue
+                    raise FeishuAPIError(
+                        code=-1,
+                        msg=f"网络错误: {e}",
+                        url=url,
+                    ) from last_error
+
+                # 解析飞书业务层 code
+                biz_code = body.get("code", 0)
+                if biz_code == 0:
+                    return body.get("data", {})
+
+                # Token 失效 → 刷新后重试
+                if biz_code in (99991661, 99991668):
+                    self._token = None
+                    if attempt < self.max_retries:
+                        self._logger.warning("Token 失效，正在刷新 ...")
+                        continue
+                    raise FeishuAPIError(code=biz_code, msg=body.get("msg", ""), url=url)
+
+                # 业务层频控（非 HTTP 429，而是 code=99991400）→ 等待后重试
+                if biz_code == 99991400:
+                    if attempt < self.max_retries:
+                        wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                        self._logger.warning(
+                            f"飞书业务层频控 (code={biz_code})，等待 {wait}s 后重试"
                         )
-
-                    body = await resp.json()
-
-            except (
-                aiohttp.ClientError,
-                asyncio.TimeoutError,
-            ) as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
-                    self._logger.warning(f"网络错误: {e}，等待 {wait}s 后重试")
-                    await asyncio.sleep(wait)
-                    continue
-                raise FeishuAPIError(
-                    code=-1,
-                    msg=f"网络错误: {e}",
-                    url=url,
-                ) from last_error
-
-            # 解析飞书业务层 code
-            biz_code = body.get("code", 0)
-            if biz_code == 0:
-                return body.get("data", {})
-
-            # Token 失效 → 刷新后重试
-            if biz_code in (99991661, 99991668):
-                self._token = None
-                if attempt < self.max_retries:
-                    self._logger.warning("Token 失效，正在刷新 ...")
-                    continue
-                raise FeishuAPIError(code=biz_code, msg=body.get("msg", ""), url=url)
-
-            # 业务层频控（非 HTTP 429，而是 code=99991400）→ 等待后重试
-            if biz_code == 99991400:
-                if attempt < self.max_retries:
-                    wait = DEFAULT_RETRY_BASE_DELAY * (2**attempt)
-                    self._logger.warning(
-                        f"飞书业务层频控 (code={biz_code})，等待 {wait}s 后重试"
+                        await asyncio.sleep(wait)
+                        continue
+                    raise FeishuRateLimitError(
+                        msg=body.get("msg", "业务层频控"),
+                        retry_after=DEFAULT_RETRY_BASE_DELAY,
+                        url=url,
                     )
-                    await asyncio.sleep(wait)
-                    continue
-                raise FeishuRateLimitError(
-                    msg=body.get("msg", "业务层频控"),
-                    retry_after=DEFAULT_RETRY_BASE_DELAY,
-                    url=url,
-                )
 
-            # 权限不足 / 配额耗尽 → 终止
-            if biz_code in (99991401, 99991403):
-                raise FeishuPermissionError(
+                # 权限不足 / 配额耗尽 → 终止
+                if biz_code in (99991401, 99991403):
+                    raise FeishuPermissionError(
+                        code=biz_code,
+                        msg=body.get("msg", "权限不足"),
+                        url=url,
+                    )
+
+                # Sheet 单元格超限 (Sheet 写入常见)
+                if biz_code == 131002: # 单元格数量超过限制
+                    raise FeishuAPIError(
+                        code=biz_code,
+                        msg=f"单元格超限: {body.get('msg')}",
+                        url=url
+                    )
+
+                # 其他错误
+                raise FeishuAPIError(
                     code=biz_code,
-                    msg=body.get("msg", "权限不足"),
+                    msg=body.get("msg", "未知错误"),
                     url=url,
                 )
-
-            # 其他错误
-            raise FeishuAPIError(
-                code=biz_code,
-                msg=body.get("msg", "未知错误"),
-                url=url,
-            )
 
         # 理论上不会执行到此处
         raise FeishuAPIError(
@@ -407,7 +422,7 @@ class FeishuClient:
         records: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """
-        批量更新多维表格记录（单次上限 1000 条，过大时自动二分）
+        批量更新多维表格记录（单次上限 1000 条，过大时自动二分，支持并发）
 
         Args:
             app_token: 多维表格 App Token
@@ -422,11 +437,18 @@ class FeishuClient:
             f"/tables/{table_id}/records/batch_update"
         )
 
-        all_results: list[dict[str, Any]] = []
+        tasks = []
         for i in range(0, len(records), BITABLE_BATCH_UPDATE_LIMIT):
             chunk = records[i : i + BITABLE_BATCH_UPDATE_LIMIT]
-            results = await self._bitable_batch_with_split(url, chunk)
-            all_results.extend(results)
+            tasks.append(self._bitable_batch_with_split(url, chunk))
+
+        # 并发执行所有块
+        results_list = await asyncio.gather(*tasks)
+
+        # 合并结果
+        all_results = []
+        for res in results_list:
+            all_results.extend(res)
 
         return all_results
 
@@ -437,7 +459,7 @@ class FeishuClient:
         records: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """
-        批量创建多维表格记录（单次上限 1000 条，过大时自动二分）
+        批量创建多维表格记录（单次上限 1000 条，过大时自动二分，支持并发）
 
         Args:
             app_token: 多维表格 App Token
@@ -452,11 +474,18 @@ class FeishuClient:
             f"/tables/{table_id}/records/batch_create"
         )
 
-        all_results: list[dict[str, Any]] = []
+        tasks = []
         for i in range(0, len(records), BITABLE_BATCH_CREATE_LIMIT):
             chunk = records[i : i + BITABLE_BATCH_CREATE_LIMIT]
-            results = await self._bitable_batch_with_split(url, chunk)
-            all_results.extend(results)
+            tasks.append(self._bitable_batch_with_split(url, chunk))
+
+        # 并发执行所有块
+        results_list = await asyncio.gather(*tasks)
+
+        # 合并结果
+        all_results = []
+        for res in results_list:
+            all_results.extend(res)
 
         return all_results
 
