@@ -102,6 +102,20 @@ export async function stopProcess(): Promise<ManagedProcessStatus> {
   return response.json();
 }
 
+export async function testFeishuConnection(appId: string, appSecret: string): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${API_BASE}/api/feishu/test_connection`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to test connection: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 // WebSocket connection for logs (basic)
 export function connectLogs(
   target: 'gateway' | 'process',

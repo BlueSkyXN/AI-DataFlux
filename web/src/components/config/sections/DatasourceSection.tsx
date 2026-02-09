@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
@@ -6,6 +7,7 @@ import TextInput from '../shared/TextInput';
 import NumberInput from '../shared/NumberInput';
 import SelectDropdown from '../shared/SelectDropdown';
 import ToggleSwitch from '../shared/ToggleSwitch';
+import { testFeishuConnection } from '../../../api';
 
 export default function DatasourceSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
@@ -110,6 +112,54 @@ interface ConnProps {
   getConfig: (path: string[]) => unknown;
   updateConfig: (path: string[], value: unknown) => void;
   t: ReturnType<typeof getTranslations>;
+}
+
+function FeishuTestButton({ appId, appSecret, t }: { appId: string; appSecret: string; t: ReturnType<typeof getTranslations> }) {
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const handleTest = async () => {
+    if (!appId || !appSecret) {
+      setResult({ success: false, message: 'App ID and App Secret are required' });
+      return;
+    }
+
+    setTesting(true);
+    setResult(null);
+
+    try {
+      const res = await testFeishuConnection(appId, appSecret);
+      setResult(res);
+    } catch (err) {
+      setResult({ success: false, message: err instanceof Error ? err.message : 'Unknown error' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <div className="flex items-center space-x-2">
+        <button
+          onClick={handleTest}
+          disabled={testing || !appId || !appSecret}
+          className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+            testing || !appId || !appSecret
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              : 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100 border border-cyan-200'
+          }`}
+        >
+          {testing ? t.loading : 'Test Connection'}
+        </button>
+
+        {result && (
+          <span className={`text-sm ${result.success ? 'text-green-600' : 'text-red-500'}`}>
+            {result.success ? '✓ ' : '✗ '} {result.message}
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function ExcelConnection({ getConfig, updateConfig, t }: ConnProps) {
@@ -307,12 +357,15 @@ function SqliteConnection({ getConfig, updateConfig, t }: ConnProps) {
 }
 
 function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
+  const appId = (getConfig(['feishu', 'app_id']) as string) ?? '';
+  const appSecret = (getConfig(['feishu', 'app_secret']) as string) ?? '';
+
   return (
     <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label={t.cfgFeishuAppId} required>
           <TextInput
-            value={(getConfig(['feishu', 'app_id']) as string) ?? ''}
+            value={appId}
             onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
             placeholder="cli_xxxxxxxxxxxxx"
             monospace
@@ -320,11 +373,14 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
         </FormField>
         <FormField label={t.cfgFeishuAppSecret} required>
           <TextInput
-            value={(getConfig(['feishu', 'app_secret']) as string) ?? ''}
+            value={appSecret}
             onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
             type="password"
           />
         </FormField>
+        <div className="sm:col-span-2">
+            <FeishuTestButton appId={appId} appSecret={appSecret} t={t} />
+        </div>
         <FormField label={t.cfgFeishuAppToken} required>
           <TextInput
             value={(getConfig(['feishu', 'app_token']) as string) ?? ''}
@@ -361,12 +417,15 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
 }
 
 function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
+  const appId = (getConfig(['feishu', 'app_id']) as string) ?? '';
+  const appSecret = (getConfig(['feishu', 'app_secret']) as string) ?? '';
+
   return (
     <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label={t.cfgFeishuAppId} required>
           <TextInput
-            value={(getConfig(['feishu', 'app_id']) as string) ?? ''}
+            value={appId}
             onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
             placeholder="cli_xxxxxxxxxxxxx"
             monospace
@@ -374,11 +433,14 @@ function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
         </FormField>
         <FormField label={t.cfgFeishuAppSecret} required>
           <TextInput
-            value={(getConfig(['feishu', 'app_secret']) as string) ?? ''}
+            value={appSecret}
             onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
             type="password"
           />
         </FormField>
+        <div className="sm:col-span-2">
+            <FeishuTestButton appId={appId} appSecret={appSecret} t={t} />
+        </div>
         <FormField label={t.cfgFeishuSpreadsheetToken} required>
           <TextInput
             value={(getConfig(['feishu', 'spreadsheet_token']) as string) ?? ''}
