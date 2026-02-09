@@ -6,9 +6,11 @@ AI-DataFlux 内置了高性能的**原生飞书客户端**，直接使用 `aioht
 
 - **原生异步**：基于 `aiohttp` 和 `asyncio`，支持高并发读写。
 - **自动流控**：内置智能 Rate Limiter，自动处理 HTTP 429 和业务层频控。
-- **批量并发**：自动将大批量写入请求拆分为并发块（Chunk），利用 Semaphore 控制并发度。
+- **批量并发**：
+    - **多维表格 (Bitable)**: 写入操作自动合并为批量请求（单次上限 1000 条），利用 Semaphore 控制并发度。
+    - **电子表格 (Sheet)**: 读取和写入支持自动分块（二分法），解决 "TooLarge" 错误。
 - **自动重试**：网络超时、5xx 错误、Token 过期自动指数退避重试。
-- **容错分片**：如果 Bitable 或 Sheet 请求因 Payload 过大失败，自动二分重试。
+- **连接复用**: 全局单例 `ClientSession`，复用 TCP 连接。
 
 ## 配置指南
 
@@ -41,7 +43,23 @@ datasource:
 datasource:
   type: feishu_sheet
   spreadsheet_token: "shtcnXXXXXXXXXXXXXXX" # 电子表格 Token
-  sheet_id: "a1b2c3"                        # 工作表 ID (不是名称)
+  sheet_id: "Wk1"                           # 工作表 ID (不是名称)
+
+  # 并发控制
+  concurrency:
+    batch_size: 20                    # Sheet 并发数建议较小，避免写冲突
+```
+
+### 3. 字段映射配置
+
+```yaml
+columns_to_extract:
+  - "问题描述"
+  - "上下文信息"
+
+columns_to_write:
+  "ai_analysis": "AI分析结果"      # AI 输出字段 -> 飞书字段
+  "category": "分类标签"
 ```
 
 ## 权限要求
@@ -75,13 +93,24 @@ datasource:
    - `FeishuRateLimitError`: 遇到 429 或 99991400 时，自动等待 `Retry-After` 秒数。
    - `FeishuAPIError`: 遇到 5xx 或网络错误，指数退避重试 (1s, 2s, 4s...)。
 
-## 测试连接
+## Web GUI 连接测试
 
-控制面板提供了测试 API：
+启动控制面板后，可在 "配置" 页面测试飞书连接：
 
-```bash
-curl -X POST http://127.0.0.1:8790/api/feishu/test_connection \
-  -H "Content-Type: application/json" \
-  -d '{"app_id": "cli_xxx", "app_secret": "xxx"}'
-```
+1.  启动 GUI: `python cli.py gui`
+2.  进入配置编辑器，填写 `feishu` 节配置。
+3.  点击 "测试连接" 按钮。
+    *   后端调用 `/api/feishu/test_connection` 接口。
+    *   自动尝试获取 `tenant_access_token` 验证 App ID/Secret 有效性。
 
+## 常见问题
+
+**Q: 为什么写入速度比读取慢？**
+A: 飞书 Sheet API 写入存在较严格的频率限制，且需要串行锁以保证数据一致性。多维表格 (Bitable) 针对批量写入做了优化，推荐优先使用 Bitable。
+
+**Q: 遇到 "TooLargeRequest" 错误怎么办？**
+A: 客户端内置了自动二分重试机制。如果仍然报错，请尝试减小 `batch_size`。
+
+**Q: 如何获取 app_token 和 table_id？**
+A: 打开飞书多维表格，URL格式如下：
+`https://{tenant}.feishu.cn/base/{app_token}?table={table_id}&...`

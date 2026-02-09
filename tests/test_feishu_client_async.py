@@ -10,19 +10,14 @@
 使用 pytest-asyncio 和 aioresponses/unittest.mock 进行测试。
 """
 
-import asyncio
-import json
 import time
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
-from aiohttp import ClientResponse, ClientResponseError, RequestInfo
+from unittest.mock import patch
 from src.data.feishu.client import (
     FeishuClient,
     FeishuAPIError,
     FeishuRateLimitError,
-    FeishuPermissionError,
     TOKEN_URL,
-    FEISHU_BASE_URL
 )
 
 # 模拟响应对象
@@ -185,14 +180,11 @@ class TestFeishuClientAsync:
             async def mock_request(self, *args, **kwargs):
                 # 解析参数
                 if len(args) == 1: # session.post(url)
-                    method = "POST"
                     url = args[0]
                 elif len(args) >= 2: # session.request(method, url)
-                    method = args[0]
                     url = args[1]
                 else:
                     # 可能通过 kwargs 传参
-                    method = kwargs.get("method", "GET")
                     url = kwargs.get("url", "")
 
                 if url == TOKEN_URL:
@@ -244,16 +236,6 @@ class TestFeishuClientAsync:
         # 1. 第一次请求 (10条) -> 失败 (TooLarge)
         # 2. 第二次请求 (5条) -> 成功
         # 3. 第三次请求 (5条) -> 成功
-
-        async def mock_request(method, url, json_data=None, **kwargs):
-            recs = json_data.get("records", [])
-            if len(recs) == 10:
-                # 模拟飞书 TooLarge 错误 (抛出 Exception 由 client 捕获)
-                # 注意：_request 方法内部捕获的是 aiohttp 错误，或者返回业务错误
-                # 这里我们模拟 _request 抛出 FeishuAPIError
-                # 但这里是 mock _request 本身，所以我们得让 _request 表现出 "已经处理了HTTP响应并抛出业务异常"
-                pass
-            return {"records": recs} # Default success
 
         # 这里的难点是，client.bitable_batch_create 调用的是 self._request
         # 我们需要 mock self._request 来模拟不同情况
