@@ -5,6 +5,37 @@
   - project root 解析
   - 静态资源路径查找
   - 子进程启动命令构造
+
+函数清单:
+    _looks_like_project_root(path) -> bool
+        判断给定目录是否"看起来像项目根目录"
+        输入: path (Path) - 待检测目录
+        输出: bool - 目录中是否存在配置文件标记 (config.yaml 等)
+
+    is_packaged() -> bool
+        检测当前是否运行在打包环境 (PyInstaller / Nuitka)
+        输出: bool - sys.frozen 或 sys._MEIPASS 是否存在
+
+    get_repo_root() -> Path
+        获取源码模式下的仓库根目录（基于本文件位置向上两级）
+        输出: Path - 仓库根目录绝对路径
+
+    get_project_root() -> Path
+        获取项目根目录（语义化，区分源码/打包环境）
+        输出: Path - 项目根目录
+        环境变量覆盖: DATAFLUX_PROJECT_ROOT, AI_DATAFLUX_PROJECT_ROOT
+
+    get_embedded_root() -> Optional[Path]
+        获取打包环境下的资源根目录
+        输出: Optional[Path] - PyInstaller _MEIPASS 或可执行文件目录
+
+    find_web_dist_dir(project_root) -> Optional[Path]
+        查找 web/dist 前端构建产物目录
+        输入: project_root (Optional[Path]) - 项目根目录（可选）
+        输出: Optional[Path] - 第一个存在的 web/dist 目录，或 None
+
+模块依赖:
+    - os, sys, pathlib: 路径与环境检测
 """
 
 from __future__ import annotations
@@ -16,6 +47,18 @@ from typing import Optional
 
 
 def _looks_like_project_root(path: Path) -> bool:
+    """
+    判断给定目录是否"看起来像项目根目录"
+
+    通过检测目录下是否存在配置文件标记来判断。
+    用于打包环境下优先使用 cwd 还是可执行文件目录的决策。
+
+    Args:
+        path: 待检测目录
+
+    Returns:
+        bool: 目录中存在任一配置文件标记则返回 True
+    """
     markers = (
         "config.yaml",
         "config.yml",

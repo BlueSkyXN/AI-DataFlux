@@ -43,6 +43,21 @@ API 端点:
 
     # 方式二：获取 FastAPI 应用实例（用于测试等）
     app = create_app("config.yaml")
+
+本模块导出清单:
+    - create_app(config_path: str) -> FastAPI
+        创建并配置 FastAPI 应用实例
+        输入: config_path — YAML 配置文件路径
+        输出: 配置完成的 FastAPI 应用实例
+
+    - run_server(config_path, host, port, workers, reload) -> None
+        启动 uvicorn 服务器运行网关
+        输入: config_path, host="0.0.0.0", port=8787, workers=1, reload=False
+        输出: 无（阻塞运行直到进程终止）
+
+    - FluxApiService(config_path: str)
+        核心服务类（从 service 模块重新导出）
+        详见 src/gateway/service.py
 """
 
 from .app import create_app, run_server

@@ -60,6 +60,50 @@ DataFrame 引擎抽象基类模块
     2. 实现所有抽象方法
     3. 在 __init__.py 中注册引擎
 
+方法签名索引:
+    BaseEngine (抽象基类)
+    ├── 属性
+    │   └── name -> str                                     — 引擎名称标识
+    ├── 文件 I/O
+    │   ├── read_excel(path, sheet_name=0) -> DataFrame     — 读取 Excel 文件
+    │   ├── write_excel(df, path, sheet_name) -> None       — 写入 Excel 文件
+    │   ├── read_csv(path) -> DataFrame                     — 读取 CSV 文件
+    │   └── write_csv(df, path) -> None                     — 写入 CSV 文件
+    ├── 行操作
+    │   ├── get_row(df, idx) -> dict[str, Any]              — 获取单行数据
+    │   ├── get_rows_by_indices(df, indices) -> list[dict]  — 批量获取多行
+    │   ├── set_value(df, idx, column, value) -> DataFrame  — 设置单元格值
+    │   └── set_values_batch(df, updates) -> DataFrame      — 批量设置单元格
+    ├── 列操作
+    │   ├── get_column_names(df) -> list[str]               — 获取所有列名
+    │   ├── has_column(df, column) -> bool                  — 检查列是否存在
+    │   └── add_column(df, column, default) -> DataFrame    — 添加新列
+    ├── 过滤与查询
+    │   ├── filter_indices(df, column, condition, value) -> list[int]
+    │   │       单列条件过滤，支持 empty/not_empty/eq/ne/gt/lt/ge/le
+    │   └── filter_indices_vectorized(df, input_cols, output_cols, ...) -> list[int]
+    │           向量化过滤未处理行，比逐行检查快 50-100x
+    ├── 值操作
+    │   ├── is_empty(value) -> bool                         — 判断值是否为空
+    │   ├── is_empty_vectorized(series) -> BoolSeries       — 向量化空值判断
+    │   └── to_string(value) -> str                         — 值转字符串
+    ├── 信息查询
+    │   ├── row_count(df) -> int                            — 获取行数
+    │   ├── get_index_range(df) -> tuple[int, int]          — 获取索引范围 (min, max)
+    │   └── get_indices(df) -> list[int]                    — 获取所有索引
+    └── 迭代与操作
+        ├── iter_rows(df, columns) -> Iterator[(idx, dict)] — 迭代所有行
+        ├── slice_by_index_range(df, min, max) -> DataFrame — 按索引范围切片
+        └── copy(df) -> DataFrame                           — 创建深拷贝
+
+关键类型:
+    df (Any): DataFrame 对象，具体类型取决于引擎 (pd.DataFrame / pl.DataFrame)
+    series (Any): 列/Series 对象 (pd.Series / pl.Series)
+    value (Any): 单元格值，可以是任意 Python 类型
+
+模块依赖:
+    标准库: abc (ABC, abstractmethod), pathlib (Path), typing (Any, Iterator)
+
 注意事项:
     - DataFrame 类型是 Any，因为不同引擎有不同的 DataFrame 类型
     - 索引操作应保持一致性（整数索引）

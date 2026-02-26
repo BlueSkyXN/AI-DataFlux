@@ -40,6 +40,38 @@
     - json: JSON 格式，适合日志聚合系统
       格式: {"time": "...", "level": "...", "message": "..."}
 
+函数清单:
+    load_config(config_path: str | Path) -> dict[str, Any]
+        加载并解析 YAML 配置文件
+        输入: 配置文件路径 | 输出: 配置字典
+        异常: ConfigError (文件不存在/格式错误/YAML 解析失败)
+
+    init_logging(log_config: dict[str, Any] | None = None) -> None
+        初始化 Python 标准日志系统
+        输入: 日志配置字典 (level/format/output/file_path/date_format)
+        副作用: 配置根日志器, 降低第三方库日志级别
+
+    get_nested(config: dict, *keys: str, default: Any = None) -> Any
+        安全获取嵌套字典值 (链式键路径)
+        输入: 配置字典 + 键路径 | 输出: 目标值或默认值
+
+    merge_config(base: dict, override: dict) -> dict[str, Any]
+        深度递归合并两个配置字典
+        输入: 基础配置 + 覆盖配置 | 输出: 合并后的新字典 (不修改原字典)
+
+关键变量:
+    DEFAULT_CONFIG: dict[str, Any]
+        默认配置字典，包含以下顶层键:
+        - global.log: 日志配置 (级别/格式/输出/路径)
+        - global.flux_api_url: API 网关地址 (默认 http://127.0.0.1:8787)
+        - datasource: 数据源配置 (类型/引擎/并发参数/重试限制)
+        - token_estimation: Token 估算配置 (模式/采样/编码)
+
+依赖模块:
+    - yaml: YAML 文件解析
+    - logging: Python 标准日志库
+    - src.models.errors.ConfigError: 配置错误异常类
+
 使用示例:
     # 加载配置
     config = load_config("config.yaml")

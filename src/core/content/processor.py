@@ -4,6 +4,39 @@
 本模块实现 AI 交互的内容处理逻辑，是数据与 AI 模型之间的桥梁。
 负责将原始数据转换为 Prompt，并从 AI 响应中提取结构化数据。
 
+类/函数清单:
+    ContentProcessor:
+        - __init__(prompt_template, required_fields, validator, use_json_schema, exclude_fields)
+          初始化处理器
+          输入: str 模板, List[str] 必需字段, JsonValidator 验证器,
+                bool JSON Schema 开关, Optional[List[str]] 排除字段
+        - create_prompt(record_data: Dict) -> str
+          将记录数据渲染为 Prompt (过滤 _开头字段、None 值、排除字段)
+          输入: Dict 原始记录数据 | 输出: str 渲染后的 Prompt 字符串
+        - parse_response(content: Optional[str]) -> Dict
+          从 AI 响应提取 JSON，三级回退策略 (Markdown → 直接解析 → 正则)
+          输入: str|None AI 响应文本 | 输出: Dict 解析结果或错误字典
+        - _check_missing_fields(data: Dict) -> List[str]
+          检查数据中缺失的必需字段
+          输入: Dict 待检查数据 | 输出: List[str] 缺失字段名列表
+        - build_schema() -> Optional[Dict]
+          根据 required_fields 和验证规则构建 JSON Schema
+          输出: Dict JSON Schema 或 None
+
+关键变量:
+    - prompt_template: Prompt 模板，{record_json} 占位符
+    - required_fields: 必需字段列表，用于解析验证和 Schema 构建
+    - validator: JsonValidator 实例，验证枚举值
+    - use_json_schema: JSON Schema 模式开关
+    - exclude_fields: Prompt 中排除的字段列表 (如路由字段)
+
+模块依赖:
+    - json: JSON 序列化与解析
+    - re: 正则表达式 (Markdown 代码块提取、JSON 搜索、尾逗号清理)
+    - logging: 错误日志
+    - src.core.validator.JsonValidator: 字段枚举值验证
+    - src.models.errors.ErrorType: 错误类型常量
+
 处理流程:
     ┌──────────────────────────────────────────────────────────────────┐
     │                        输入阶段                                   │
@@ -117,7 +150,8 @@ class ContentProcessor:
         Note:
             - 以 _ 开头的内部字段会被过滤
             - None 值会被过滤
-            - 使用紧凑 JSON 格式 (无空格)
+            - exclude_fields 中指定的字段会被排除
+            - 使用紧凑 JSON 格式 (无空格，节省 token)
         """
         if not self.prompt_template:
             return ""

@@ -39,6 +39,30 @@ ClientSession 实例，避免重复创建连接，提高请求效率。
     # 关闭连接池
     await pool.close_all()
 
+类与方法清单:
+
+    SessionPool:
+        HTTP Session 连接池（按 ssl_verify × proxy 分组复用）
+        ├── __init__(max_connections=1000, max_connections_per_host=1000, resolver=None)
+        │   输入: max_connections — 总最大连接数
+        │         max_connections_per_host — 每主机最大连接数
+        │         resolver — 自定义 DNS 解析器（可选）
+        ├── get_or_create(ssl_verify=True, proxy="") -> aiohttp.ClientSession
+        │   获取或创建 Session（双重检查锁定模式）
+        │   输入: ssl_verify — 是否验证 SSL; proxy — 代理地址
+        │   输出: 可用的 ClientSession 实例
+        │   异常: RuntimeError — 连接池已关闭
+        ├── close_all() -> None
+        │   关闭所有 Session 和解析器，释放连接资源
+        └── get_stats() -> dict
+            获取连接池统计（Session 数量、配置、解析器状态）
+        关键变量: sessions — (ssl_verify, proxy) 到 ClientSession 的映射
+                  _create_lock — 异步锁，防止并发创建重复 Session
+
+依赖模块:
+    - aiohttp: 异步 HTTP 客户端和连接器
+    - aiohttp.abc.AbstractResolver: 自定义 DNS 解析器接口
+
 注意事项:
     - Session 不要手动关闭，由连接池统一管理
     - 使用自定义解析器时会禁用 DNS 缓存以确保轮询生效

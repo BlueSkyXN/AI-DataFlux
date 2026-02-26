@@ -53,6 +53,59 @@ Pandas 生态成熟稳定，兼容性最好，适合大多数使用场景。
     必需: pandas, openpyxl
     可选: fastexcel (calamine), xlsxwriter, numpy
 
+方法清单:
+    PandasEngine(BaseEngine) — 基于 Pandas 的 DataFrame 引擎
+    ├── __init__(excel_reader="openpyxl", excel_writer="openpyxl")
+    │       初始化引擎，自动检测高性能库可用性并回退
+    ├── 属性
+    │   ├── name -> str ("pandas")
+    │   ├── excel_reader -> str                             — 当前 Excel 读取器
+    │   └── excel_writer -> str                             — 当前 Excel 写入器
+    ├── 文件 I/O
+    │   ├── read_excel(path, sheet_name=0) -> pd.DataFrame  — 读取 Excel（自动选择读取器）
+    │   ├── _read_excel_calamine(path, sheet_name) -> pd.DataFrame  — calamine 高性能读取
+    │   ├── _read_excel_openpyxl(path, sheet_name) -> pd.DataFrame  — openpyxl 标准读取
+    │   ├── write_excel(df, path, sheet_name) -> None       — 写入 Excel（自动选择写入器）
+    │   ├── _write_excel_xlsxwriter(df, path, sheet_name) -> None   — xlsxwriter 高性能写入
+    │   ├── _write_excel_openpyxl(df, path, sheet_name) -> None     — openpyxl 标准写入
+    │   ├── read_csv(path) -> pd.DataFrame                  — 读取 CSV
+    │   └── write_csv(df, path) -> None                     — 写入 CSV
+    ├── 行操作
+    │   ├── get_row(df, idx) -> dict[str, Any]              — 通过 df.loc 获取单行
+    │   ├── get_rows_by_indices(df, indices) -> list[dict]  — 批量获取多行
+    │   ├── set_value(df, idx, column, value) -> pd.DataFrame  — 通过 df.at 设置值（原地修改）
+    │   └── set_values_batch(df, updates) -> pd.DataFrame   — 批量 df.at 设置
+    ├── 列操作
+    │   ├── get_column_names(df) -> list[str]
+    │   ├── has_column(df, column) -> bool
+    │   └── add_column(df, column, default) -> pd.DataFrame
+    ├── 过滤与查询
+    │   ├── filter_indices(df, column, condition, value) -> list[int]
+    │   └── filter_indices_vectorized(df, input_cols, output_cols, ...) -> list[int]
+    │           使用 pandas 向量化 + numpy 加速索引提取
+    ├── 值操作
+    │   ├── is_empty(value) -> bool                         — 基于 pd.isna() 判断
+    │   ├── is_empty_vectorized(series) -> pd.Series        — 向量化空值判断（含空白字符串检测）
+    │   └── to_string(value) -> str
+    ├── 信息查询
+    │   ├── row_count(df) -> int
+    │   ├── get_index_range(df) -> tuple[int, int]          — 基于 df.index.min/max
+    │   └── get_indices(df) -> list[int]                    — numpy 加速索引提取
+    └── 迭代与操作
+        ├── iter_rows(df, columns) -> Iterator[(int, dict)]
+        ├── slice_by_index_range(df, min_idx, max_idx) -> pd.DataFrame
+        └── copy(df) -> pd.DataFrame                        — df.copy() 深拷贝
+
+关键变量:
+    NUMPY_AVAILABLE (bool): NumPy 是否可用（影响向量化性能优化路径）
+    FASTEXCEL_AVAILABLE (bool): fastexcel 是否可用（calamine 高性能读取器）
+    XLSXWRITER_AVAILABLE (bool): xlsxwriter 是否可用（高性能写入器）
+
+模块依赖:
+    必需: pandas, openpyxl, logging, pathlib, typing
+    可选: numpy (向量化加速), fastexcel (calamine 读取), xlsxwriter (高性能写入)
+    内部: .base.BaseEngine
+
 注意事项:
     1. calamine 不支持写入，只能用于读取
     2. xlsxwriter 不支持读取，只能用于写入

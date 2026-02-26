@@ -27,6 +27,60 @@ Token 估算器
     - min/max: 最小/最大值
     - p50/p90/p99: 百分位数统计
 
+模块级函数:
+    normalize_mode(mode) -> str
+        - 功能: 将各种模式别名统一转换为标准内部形式
+        - 输入: mode (str) — 原始模式值 (如 "input", "in", "io")
+        - 输出: 规范化后的模式字符串 ("in" / "out" / "io")
+
+    run_token_estimation(config_path, mode=None) -> dict
+        - 功能: 完整的 token 估算入口函数（加载配置、创建任务池、执行估算）
+        - 输入: config_path (str) — 配置文件路径; mode (str|None) — 可选模式覆盖
+        - 输出: dict — 估算结果，包含 input_tokens / output_tokens 统计
+        - 异常: FileNotFoundError — 输入/输出文件不存在
+
+类清单:
+    TokenEstimator
+        - 功能: 计算 AI 数据处理任务的预估 token 用量
+        - 关键属性: config, mode, encoding, sample_size, system_prompt, prompt_template
+
+        方法:
+        ├── __init__(config)
+        │     输入: config (dict) — 完整配置字典
+        │     异常: ImportError (tiktoken 未安装), ValueError (配置无效)
+        │
+        ├── count_tokens(text) -> int
+        │     输入: text (str); 输出: token 数量
+        │
+        ├── count_message_tokens(messages) -> int
+        │     输入: messages (list[dict]) — 消息列表; 输出: 拼接后文本的 token 数
+        │
+        ├── create_prompt(record_data) -> str
+        │     输入: record_data (dict) — 记录数据; 输出: 替换 {record_json} 后的提示词
+        │
+        ├── build_messages(prompt) -> list[dict]
+        │     输入: prompt (str); 输出: [system_msg, user_msg] 消息列表
+        │
+        ├── estimate_input_tokens_for_record(record_data) -> int
+        │     输入: record_data (dict); 输出: 单条记录的输入 token 数
+        │
+        ├── estimate_output_tokens_for_record(output_data) -> int
+        │     输入: output_data (dict); 输出: 单条记录的输出 token 数
+        │
+        ├── estimate(input_pool, output_pool=None) -> dict
+        │     输入: input_pool/output_pool (TaskPool); 输出: 完整估算结果字典
+        │
+        └── _compute_stats(tokens_list, total_rows) -> dict
+              输入: tokens_list (list[int]), total_rows (int)
+              输出: 包含 total_estimated/avg/min/max/p50/p90/p99 的统计字典
+
+模块依赖:
+    - json: JSON 序列化
+    - logging: 日志
+    - tiktoken (可选): token 编码计算
+    - ..config.settings: 配置加载
+    - ..data: 任务池工厂
+
 使用示例:
     from src.core.token_estimator import run_token_estimation
 

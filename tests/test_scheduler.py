@@ -1,11 +1,49 @@
 """
 分片调度器测试
 
+被测模块: src/core/scheduler.py (ShardedTaskManager)
+
 测试 src/core/scheduler.py 的分片任务管理功能，包括：
 - ShardedTaskManager 初始化
 - 分片大小计算 (最优/最小/最大)
 - 内存监控阈值
 - 分片迭代器行为
+
+测试类/函数清单:
+    TestShardedTaskManagerInit                          初始化测试
+        test_init_with_valid_task_pool                 验证有效任务池初始化及默认值
+        test_init_with_custom_shard_sizes              验证自定义分片大小
+        test_init_with_invalid_task_pool               验证无效任务池抛 TypeError
+        test_init_retry_counts                         验证默认重试次数配置
+    TestShardCalculation                               分片计算测试
+        test_calculate_optimal_shard_size_basic        验证分片大小在 min-max 范围内
+        test_calculate_optimal_shard_size_small_range  验证小范围数据返回 min_shard_size
+        test_calculate_optimal_shard_size_with_processing_metrics  验证带处理速度的计算
+    TestShardInitialization                             分片初始化测试
+        test_initialize_success                        验证成功初始化及分片边界生成
+        test_initialize_no_tasks                       验证无任务时返回 False
+        test_initialize_shard_boundaries               验证分片边界覆盖完整范围
+    TestShardLoading                                   分片加载测试
+        test_load_next_shard_success                   验证成功加载下一个分片
+        test_load_next_shard_no_more                   验证没有更多分片时返回 False
+        test_load_next_shard_empty_shard               验证空分片被跳过
+        test_has_more_shards                           验证 has_more_shards 属性
+    TestProcessingMetrics                              处理指标测试
+        test_update_processing_metrics_initial         验证首次更新指标
+        test_update_processing_metrics_smoothing       验证指数移动平均平滑
+        test_update_processing_metrics_zero_time       验证零时间不更新
+        test_update_processing_metrics_zero_count      验证零数量不更新
+    TestProgressTracking                               进度跟踪测试
+        test_progress_percent_zero                     验证初始进度为 0
+        test_progress_percent_partial                  验证部分进度
+        test_progress_percent_complete                 验证完成进度为 100
+        test_progress_percent_no_tasks                 验证无任务时进度为 100
+    TestMemoryMonitoring                               内存监控测试
+        test_monitor_memory_usage_updates_tracker      验证内存监控更新跟踪器
+        test_monitor_memory_usage_respects_interval    验证遵守检查间隔
+    TestFinalize                                       结束处理测试
+        test_finalize_closes_task_pool                 验证 finalize 关闭任务池
+        test_finalize_handles_close_error              验证 finalize 处理关闭错误不抛异常
 """
 
 import time

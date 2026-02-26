@@ -1,6 +1,8 @@
 """
 PostgreSQL 数据源任务池单元测试
 
+被测模块: src/data/postgresql.py (PostgreSQLTaskPool, PostgreSQLConnectionPoolManager)
+
 测试 src/data/postgresql.py 的 PostgreSQLTaskPool 类功能，包括：
 - ThreadedConnectionPool 连接池管理
 - execute_batch 批量写入优化
@@ -8,6 +10,26 @@ PostgreSQL 数据源任务池单元测试
 - 连接池大小配置
 
 注意: 这些测试使用 Mock 对象，不需要实际的 PostgreSQL 数据库连接。
+
+测试类/函数清单:
+    TestPostgreSQLAvailabilityCheck                    可用性检查测试
+        test_import_error_when_psycopg2_not_available  验证 psycopg2 不可用时的处理
+    TestPostgreSQLConnectionPoolManager                连接池管理器测试
+        test_get_pool_creates_instance                 验证首次调用创建连接池实例
+        test_get_pool_raises_without_config            验证首次调用无配置时抛 ValueError
+        test_get_pool_raises_when_not_available         验证 psycopg2 不可用时抛 ImportError
+    TestPostgreSQLTaskPoolMocked                       任务池测试（Mock）
+        test_initialization                            验证初始化参数存储
+        test_initialization_rejects_invalid_identifier 验证非法标识符被拒绝
+        test_get_total_task_count                      验证获取未处理任务数
+        test_get_id_boundaries                         验证获取 ID 边界
+        test_initialize_shard                          验证分片初始化
+        test_update_task_results_batch                 验证批量更新
+        test_reload_task_data                          验证重载任务数据
+        test_reload_task_data_not_found                验证重载不存在记录返回 None
+    TestPostgreSQLTaskPoolConditionBuilding             WHERE 条件构建测试
+        test_build_unprocessed_condition_all_required   验证 require_all=True 用 AND
+        test_build_unprocessed_condition_any_required   验证 require_all=False 用 OR
 """
 
 import pytest
@@ -15,7 +37,7 @@ from unittest.mock import patch, MagicMock
 
 
 def create_mock_sql():
-    """创建模拟的 psycopg2.sql 模块"""
+    """创建模拟的 psycopg2.sql 模块，用于测试 SQL 标识符安全拼接"""
 
     class MockSQL:
         def __init__(self, template):

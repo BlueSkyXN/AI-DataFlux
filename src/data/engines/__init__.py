@@ -58,6 +58,55 @@ DataFrame 引擎抽象层模块
     │ DataFrame 处理      │ 1x         │ 2-5x       │
     └─────────────────────┴────────────┴────────────┘
     高性能配置: polars + calamine + xlsxwriter
+
+函数清单:
+    _safe_check_library(import_code, lib_name, timeout=30) -> bool
+        在子进程中安全检测指定库是否可用，避免导入崩溃影响主进程
+        输入: import_code (导入代码字符串), lib_name (库名), timeout (超时秒数)
+        输出: bool (库是否可用)
+
+    _resolve_reader(reader_type: ReaderType) -> str
+        解析实际使用的 Excel 读取器，auto 时优先级: calamine > openpyxl
+        输入: reader_type (请求的读取器类型)
+        输出: str (实际使用的读取器名称)
+
+    _resolve_writer(writer_type: WriterType) -> str
+        解析实际使用的 Excel 写入器，auto 时优先级: xlsxwriter > openpyxl
+        输入: writer_type (请求的写入器类型)
+        输出: str (实际使用的写入器名称)
+
+    _resolve_engine(engine_type: EngineType) -> str
+        解析实际使用的 DataFrame 引擎，auto 时优先级: polars > pandas
+        输入: engine_type (请求的引擎类型)
+        输出: str (实际使用的引擎名称)
+
+    get_engine(engine_type, excel_reader, excel_writer) -> BaseEngine
+        工厂函数，根据配置创建合适的引擎实例（核心公开接口）
+        输入: engine_type (引擎类型), excel_reader (读取器), excel_writer (写入器)
+        输出: BaseEngine 实例 (PandasEngine 或 PolarsEngine)
+
+    get_available_libraries() -> dict[str, bool]
+        获取所有可选库的可用状态，用于诊断和系统信息展示
+        输出: {库名: 是否可用} 字典
+
+    register_engine(name, engine_class) -> None
+        注册新引擎实现（预留扩展接口，当前为空实现）
+
+关键变量:
+    POLARS_AVAILABLE (bool): Polars 库可用性标志（子进程检测结果）
+    FASTEXCEL_AVAILABLE (bool): fastexcel/calamine 库可用性标志
+    XLSXWRITER_AVAILABLE (bool): xlsxwriter 库可用性标志
+    NUMPY_AVAILABLE (bool): NumPy 库可用性标志
+
+类型定义:
+    EngineType = Literal["pandas", "polars", "auto"]     — 引擎类型
+    ReaderType = Literal["openpyxl", "calamine", "auto"] — 读取器类型
+    WriterType = Literal["openpyxl", "xlsxwriter", "auto"] — 写入器类型
+
+模块依赖:
+    标准库: logging, subprocess, sys, typing
+    内部模块: .base.BaseEngine, .pandas_engine.PandasEngine
+    条件导入: .polars_engine.PolarsEngine (在 get_engine() 中延迟导入，避免不必要的开销)
 """
 
 import logging

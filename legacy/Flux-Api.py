@@ -34,8 +34,52 @@ Flux-Api.py - 旧版 API 网关 (Legacy)
 
 Warning:
     此文件已弃用，不再维护。请使用新版网关层 (src/gateway/)。
+
+文件索引:
+    基础组件:
+        ErrorType (L65)              — 错误类型枚举（API/内容/系统）
+        RWLock (L79)                 — 读写锁实现（允许多读单写）
+        TokenBucket (L158)           — 令牌桶限流器
+        ModelRateLimiter (L202)      — 模型级限流管理器
+
+    调度与配置:
+        ModelDispatcher (L246)       — 模型调度器（退避、可用性缓存、指标追踪）
+        ModelConfig (L405)           — 单个模型的配置对象
+
+    Pydantic 模型 (OpenAI API 兼容):
+        ChatMessage (L457)           — 聊天消息结构
+        ChatCompletionRequest (L467) — 请求体
+        ChatCompletionResponse (L504)— 响应体
+        ModelInfo / ModelsResponse (L513) — 管理接口响应
+        HealthResponse (L530)        — 健康检查响应
+
+    核心服务:
+        FluxApiService (L540)        — API 服务主类
+          ├── load_config()            — 加载 YAML 配置
+          ├── setup_logging()          — 初始化日志
+          ├── initialize_models()      — 初始化模型/调度器/限流器
+          ├── _get_or_create_session() — HTTP Session 池管理
+          ├── get_available_model()    — 加权随机模型选择
+          ├── call_ai_api_async()      — 异步调用后端 AI API
+          ├── _handle_streaming_response() — 流式响应处理
+          ├── create_chat_completion() — 请求处理核心（含重试）
+          ├── get_models_info()        — 管理接口: 模型状态
+          └── get_health_info()        — 管理接口: 健康检查
+
+    FastAPI 应用:
+        lifespan (L1357)             — 应用生命周期管理
+        app (L1391)                  — FastAPI 实例
+        /v1/chat/completions (L1433) — 聊天补全端点
+        /v1/models (L1469)           — 模型列表端点
+        /admin/models (L1483)        — 管理: 模型状态
+        /admin/health (L1494)        — 管理: 健康检查
+
+    入口:
+        validate_config_file (L1534) — 配置文件校验
+        main (L1564)                 — 命令行入口 (启动 Uvicorn)
 """
 
+# 标准库和第三方库导入
 import argparse
 import uvicorn
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends, Header
@@ -538,7 +582,16 @@ class HealthResponse(BaseModel):
 # API服务主类
 ###############################################################################
 class FluxApiService:
-    """OpenAI API 兼容的服务，管理模型池和请求处理"""
+    """
+    OpenAI API 兼容的服务 — 管理模型池和请求处理
+
+    核心职责:
+    - 加载模型/通道配置，初始化调度器和限流器
+    - 维护 HTTP Session 池（按 ssl_verify + proxy 复用连接）
+    - 处理聊天补全请求: 模型选择 → API 调用 → 结果包装
+    - 支持流式和非流式两种响应模式
+    - 失败自动重试（排除已失败的模型，最多3轮）
+    """
     def __init__(self, config_path: str):
         """初始化服务，加载配置、设置日志、初始化模型等"""
         self.start_time = time.time() # 记录启动时间
@@ -1351,7 +1404,7 @@ class FluxApiService:
 ###############################################################################
 # FastAPI 应用定义与生命周期管理
 ###############################################################################
-service: Optional[FluxApiService] = None # 全局服务实例变量
+service: Optional[FluxApiService] = None # 全局服务实例变量（在 lifespan 中初始化）
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI): # 使用 lifespan 替代 on_event

@@ -1,11 +1,25 @@
 """
 集成测试
 
+被测模块: src/data/excel.py, src/data/engines/, src/data/factory.py, src/config/
+
 测试多个模块协同工作的场景，包括：
 - Excel 任务池端到端流程
 - 数据源工厂创建
 - 任务读取与写入
 - 引擎切换 (Pandas/Polars)
+
+测试类/函数清单:
+    TestExcelTaskPoolIntegration              Excel 任务池集成测试
+        test_create_excel_task_pool           验证创建 Excel 任务池
+        test_get_id_boundaries                验证获取 ID 边界
+        test_initialize_shard                 验证初始化分片
+        test_update_task_results              验证更新任务结果并写入 DataFrame
+    TestEngineCompatibility                   引擎兼容性测试
+        test_pandas_polars_read_same_file     验证 Pandas/Polars 读同一文件结果一致
+        test_engine_auto_fallback             验证引擎自动回退
+    TestConfigToPoolIntegration               配置到任务池完整流程测试
+        test_factory_creates_correct_pool     验证工厂根据配置创建正确的任务池
 """
 
 import pytest

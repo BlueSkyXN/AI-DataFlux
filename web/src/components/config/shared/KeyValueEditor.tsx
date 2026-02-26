@@ -1,5 +1,12 @@
+/**
+ * 键值对编辑器组件
+ *
+ * 用途：管理字符串键值对的增删改操作，适用于列名映射等场景
+ *
+ * Props: value - 键值对对象 | onChange - 变更回调
+ *        keyPlaceholder/valuePlaceholder - 输入占位文本 | addLabel - 添加按钮文本
+ */
 import { useState } from 'react';
-
 interface KeyValueEditorProps {
   value: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
@@ -8,6 +15,7 @@ interface KeyValueEditorProps {
   addLabel?: string;
 }
 
+/** 键值对编辑器，支持新增、删除、编辑值 */
 export default function KeyValueEditor({
   value = {},
   onChange,

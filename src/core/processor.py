@@ -39,6 +39,68 @@
     │ SYSTEM_ERROR │ RETRY            │ ✓          │ ✗               │
     └──────────────┴──────────────────┴────────────┴─────────────────┘
 
+类清单:
+    UniversalAIProcessor
+        - 功能: 协调各组件完成「加载→API调用→解析→写回」的完整数据处理流
+        - 关键属性:
+            config (dict): 完整配置
+            flux_api_url (str): API 网关 URL
+            batch_size (int): 最大并发任务数
+            client (FluxAIClient): API 客户端
+            content_processor (ContentProcessor): 内容处理器
+            state_manager (TaskStateManager): 任务状态管理器
+            retry_strategy (RetryStrategy): 重试策略
+            task_pool (BaseTaskPool): 数据源任务池
+            task_manager (ShardedTaskManager): 分片调度器
+
+        方法:
+        ├── __init__(config_path, progress_file=None)
+        │     功能: 加载配置 → 初始化 6 个核心组件 → 创建任务池和分片管理器
+        │     输入: config_path (str), progress_file (str|None)
+        │     异常: ValueError (配置缺失), RuntimeError (组件初始化失败)
+        │
+        ├── run() -> None
+        │     功能: 同步入口，内部调用 asyncio.run() 启动异步处理
+        │
+        ├── process_shard_async_continuous() -> None  [async]
+        │     功能: 异步处理入口 — 初始化分片 → 创建连接池 → 执行主循环 → 清理资源
+        │
+        ├── _process_loop(session) -> None  [async, 核心]
+        │     功能: 连续任务流主循环，包含 8 个阶段:
+        │       1.分片轮转 2.填充任务 3.等待完成 4.处理结果
+        │       5.API熔断 6.重试入队 7.批量写回 8.监控日志
+        │
+        ├── _process_one_record(session, record_id, row_data) -> dict  [async]
+        │     功能: 单条记录处理（Prompt生成→API调用→响应解析）
+        │     输出: 成功时返回解析结果; 失败时返回 {_error, _error_type} 字典
+        │
+        ├── _init_routing_contexts() -> None
+        │     功能: 加载路由子配置，为每个规则创建独立的 ContentProcessor 和 Validator
+        │
+        ├── _load_routing_profile(profile_path) -> dict
+        │     功能: 加载路由子配置文件（支持绝对/相对路径）
+        │
+        ├── _get_routing_context(row_data) -> dict | None
+        │     功能: 根据记录的路由字段值匹配路由上下文
+        │
+        ├── _write_progress() -> None
+        │     功能: 原子写入进度 JSON 文件供 GUI 控制面板读取
+        │
+        └── _cleanup_progress() -> None
+              功能: 正常结束时删除进度文件
+
+模块依赖:
+    - asyncio, aiohttp: 异步 HTTP 通信
+    - ..config.settings: 配置加载与合并
+    - ..models.errors.ErrorType: 错误类型枚举
+    - ..data: 任务池工厂
+    - .scheduler.ShardedTaskManager: 分片调度
+    - .validator.JsonValidator: 字段验证
+    - .content.ContentProcessor: Prompt 生成与响应解析
+    - .clients.FluxAIClient: API 客户端
+    - .state.TaskStateManager: 任务状态管理
+    - .retry.RetryStrategy: 重试决策
+
 使用示例:
     # 基本使用
     processor = UniversalAIProcessor("config.yaml")

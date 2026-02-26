@@ -1,11 +1,46 @@
 """
 数据引擎测试
 
+被测模块: src/data/engines/ (PandasEngine, PolarsEngine, get_engine)
+
 测试 src/data/engines/ 的引擎实现，包括：
 - 引擎工厂 (get_engine)
 - Pandas 引擎操作
 - Polars 引擎操作 (如可用)
 - 自动引擎选择 (auto)
+
+测试类/函数清单:
+    TestEngineFactory                  引擎工厂测试
+        test_get_pandas_engine         验证获取 Pandas 引擎
+        test_get_auto_engine           验证自动选择引擎（优先 Polars）
+        test_get_available_libraries   验证可用库状态检测
+        test_reader_writer_auto        验证读写器自动选择
+        test_fallback_on_unavailable   验证不可用时回退到 Pandas
+    TestPandasEngine                   PandasEngine 测试
+        test_read_excel                验证读取 Excel 返回 DataFrame
+        test_write_excel               验证写入 Excel 文件
+        test_get_row                   验证获取行数据为字典
+        test_get_row_invalid_index     验证无效索引抛出 IndexError
+        test_set_value                 验证设置单元格值
+        test_is_empty                  验证空值判断（None/""/空格）
+        test_is_empty_vectorized       验证向量化空值判断
+        test_is_empty_vectorized_string_dtype  验证 string dtype 空值判断
+        test_filter_indices            验证条件过滤（非空筛选）
+        test_filter_indices_vectorized 验证向量化过滤未处理行
+        test_row_count                 验证行数统计
+        test_get_column_names          验证获取列名
+        test_has_column                验证列存在检查
+        test_add_column                验证添加新列
+        test_copy                      验证深拷贝独立性
+    TestPolarsEngine                   PolarsEngine 测试（需要 Polars 可用）
+        test_read_excel                验证读取 Excel 返回 pl.DataFrame
+        test_row_count                 验证行数统计
+        test_get_column_names          验证获取列名
+        test_is_empty                  验证空值判断
+        test_set_value                 验证设置值返回新 DataFrame（不可变）
+        test_set_values_batch          验证批量更新
+        test_filter_indices_vectorized_with_offset  验证分片过滤返回全局索引
+        test_write_excel               验证写回 Excel（需要 xlsxwriter）
 """
 
 import pytest

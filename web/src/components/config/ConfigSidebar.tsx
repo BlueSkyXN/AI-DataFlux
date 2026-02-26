@@ -1,6 +1,21 @@
+/**
+ * 配置侧边栏导航组件
+ *
+ * 用途：在配置页面左侧渲染导航菜单，支持切换不同配置分区
+ *
+ * 导出：
+ *   - ConfigSectionId（类型）：所有配置分区的联合类型标识
+ *   - ConfigSidebar（默认导出组件）：侧边栏导航 UI
+ *     Props: activeSection - 当前激活的分区 ID
+ *            onSelect    - 分区点击切换回调
+ *            language    - 国际化语言标识
+ *
+ * 依赖：../../i18n（国际化翻译）
+ */
 import type { Language } from '../../i18n';
 import { getTranslations } from '../../i18n';
 
+/** 配置分区 ID 联合类型，对应侧边栏各导航项 */
 export type ConfigSectionId =
   | 'global'
   | 'datasource'
@@ -14,17 +29,23 @@ export type ConfigSectionId =
   | 'routing'
   | 'raw';
 
+/** ConfigSidebar 组件的 Props */
 interface ConfigSidebarProps {
+  /** 当前激活的配置分区 */
   activeSection: ConfigSectionId;
+  /** 用户点击切换分区时的回调 */
   onSelect: (section: ConfigSectionId) => void;
+  /** 当前界面语言 */
   language: Language;
 }
 
+/** 侧边栏单项数据结构 */
 interface SidebarItem {
   id: ConfigSectionId;
   icon: React.ReactNode;
 }
 
+/** 各配置分区对应的 SVG 图标映射 */
 const sectionIcons: Record<ConfigSectionId, React.ReactNode> = {
   global: (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -84,14 +105,20 @@ const sectionIcons: Record<ConfigSectionId, React.ReactNode> = {
   ),
 };
 
+/** 侧边栏主区域的分区 ID 有序列表（不含 raw） */
 const sectionIds: ConfigSectionId[] = [
   'global', 'datasource', 'concurrency', 'columns', 'validation',
   'models', 'channels', 'prompt', 'token', 'routing',
 ];
 
+/**
+ * 配置侧边栏导航组件
+ * 渲染各配置分区的导航按钮，底部单独放置 Raw YAML 编辑器入口
+ */
 export default function ConfigSidebar({ activeSection, onSelect, language }: ConfigSidebarProps) {
   const t = getTranslations(language);
 
+  // 根据当前语言生成各分区的显示标签
   const sectionLabels: Record<ConfigSectionId, string> = {
     global: t.cfgGlobal,
     datasource: t.cfgDatasource,

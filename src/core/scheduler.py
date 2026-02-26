@@ -41,6 +41,52 @@
     - 系统内存 > 85%: 触发 GC
     - 进程内存 > 40GB: 触发 GC
 
+类清单:
+    ShardedTaskManager
+        - 功能: 分片调度、进度跟踪、内存监控、统计输出
+        - 关键属性:
+            task_pool (BaseTaskPool): 数据源任务池
+            shard_boundaries (list[tuple]): 分片 ID 范围列表
+            total_processed_successfully (int): 累计成功数
+            processing_metrics (dict): 处理速率指标 (EMA 平滑)
+
+        方法:
+        ├── __init__(task_pool, optimal_shard_size, min_shard_size, max_shard_size, max_retry_counts)
+        │     输入: 任务池实例及分片/重试参数
+        │
+        ├── calculate_optimal_shard_size(total_range) -> int
+        │     输入: total_range (int) — 数据总范围
+        │     输出: 最优分片大小 (受内存、时间、配置三重约束)
+        │
+        ├── initialize() -> bool
+        │     功能: 获取 ID 边界 → 计算分片 → 创建边界列表
+        │     输出: 是否初始化成功
+        │
+        ├── load_next_shard() -> bool
+        │     功能: 加载下一分片到任务池（空分片自动递归跳过）
+        │     输出: 是否还有分片可处理
+        │
+        ├── update_processing_metrics(batch_success_count, batch_processing_time) -> None
+        │     功能: 使用 EMA(α=0.1) 平滑更新处理速率指标
+        │
+        ├── monitor_memory_usage() -> None
+        │     功能: 定期检查内存，高使用时触发 GC (间隔 60 秒)
+        │
+        ├── finalize() -> None
+        │     功能: 输出统计信息、关闭任务池资源
+        │
+        ├── has_more_shards -> bool (property)
+        │     输出: 是否还有更多未处理分片
+        │
+        └── progress_percent -> float (property)
+              输出: 当前处理进度百分比
+
+模块依赖:
+    - gc: 垃圾回收
+    - psutil (可选): 内存监控
+    - ..models.errors.ErrorType: 错误类型枚举
+    - ..data.base.BaseTaskPool: 任务池基类
+
 使用示例:
     from src.core.scheduler import ShardedTaskManager
 

@@ -72,9 +72,68 @@ Polars 是用 Rust 编写的 DataFrame 库，具有卓越的性能表现，
     必需: polars
     可选: fastexcel (calamine), xlsxwriter
 
+方法清单:
+    PolarsEngine(BaseEngine) — 基于 Polars 的高性能 DataFrame 引擎
+    ├── __init__(excel_reader="calamine", excel_writer="xlsxwriter")
+    │       初始化引擎，需要 Polars 可用，否则抛出 ImportError
+    ├── 属性
+    │   ├── name -> str ("polars")
+    │   ├── excel_reader -> str                              — 当前 Excel 读取器
+    │   └── excel_writer -> str                              — 当前 Excel 写入器
+    ├── 文件 I/O
+    │   ├── read_excel(path, sheet_name=0) -> pl.DataFrame   — 优先 fastexcel，回退 Polars 内置
+    │   ├── write_excel(df, path, sheet_name) -> None        — 使用 Polars write_excel (xlsxwriter)
+    │   ├── read_csv(path) -> pl.DataFrame                   — pl.read_csv
+    │   └── write_csv(df, path) -> None                      — df.write_csv
+    ├── 行操作
+    │   ├── get_row(df, idx) -> dict[str, Any]               — 通过 df.row(idx) 位置索引
+    │   ├── get_rows_by_indices(df, indices) -> list[dict]   — 批量位置索引获取
+    │   ├── set_value(df, idx, column, value) -> pl.DataFrame
+    │   │       通过 with_row_index + when/then 实现（返回新 DataFrame）
+    │   └── set_values_batch(df, updates) -> pl.DataFrame
+    │           按列聚合更新，构建 when/then 表达式链批量设置
+    ├── 列操作
+    │   ├── get_column_names(df) -> list[str]
+    │   ├── has_column(df, column) -> bool
+    │   └── add_column(df, column, default) -> pl.DataFrame  — with_columns + pl.lit
+    ├── 过滤与查询
+    │   ├── filter_indices(df, column, condition, value) -> list[int]
+    │   │       通过 with_row_index 添加行号后过滤
+    │   ├── _is_empty_expr(column) -> pl.Expr                — 构建空值检查表达式 (null | 空白)
+    │   └── filter_indices_vectorized(df, input_cols, output_cols, ...) -> list[int]
+    │           使用 Polars 表达式 API 向量化过滤
+    ├── 值操作
+    │   ├── is_empty(value) -> bool                          — None 或空白字符串检测
+    │   ├── is_empty_vectorized(series) -> pl.Series         — is_null + 字符串空白检测
+    │   └── to_string(value) -> str
+    ├── 信息查询
+    │   ├── row_count(df) -> int
+    │   ├── get_index_range(df) -> tuple[int, int]           — 位置索引 [0, len-1]
+    │   └── get_indices(df) -> list[int]                     — list(range(len(df)))
+    └── 迭代与操作
+        ├── iter_rows(df, columns) -> Iterator[(int, dict)]  — df.row(idx) 逐行迭代
+        ├── slice_by_index_range(df, min_idx, max_idx) -> pl.DataFrame  — df.slice 位置切片
+        └── copy(df) -> pl.DataFrame                         — df.clone() 轻量级拷贝
+
+关键变量:
+    POLARS_AVAILABLE (bool): Polars 库是否可用
+    FASTEXCEL_AVAILABLE (bool): fastexcel/calamine 库是否可用
+    XLSXWRITER_AVAILABLE (bool): xlsxwriter 库是否可用
+
+关键设计:
+    索引模拟: Polars 原生无行索引，通过 with_row_index("__row_idx__") 临时添加行号列，
+              操作完成后 drop("__row_idx__") 移除，实现与 Pandas 兼容的索引操作。
+    不可变性: Polars DataFrame 是不可变的，所有修改操作（set_value, set_values_batch,
+              add_column）返回新 DataFrame，原 DataFrame 不受影响。
+
+模块依赖:
+    必需: polars, logging, pathlib, typing
+    可选: fastexcel (calamine 读取), xlsxwriter (高性能写入)
+    内部: .base.BaseEngine
+
 注意事项:
     1. Polars DataFrame 是不可变的，set_value 返回新 DataFrame
-    2. 索引系统与 Pandas 不同，使用 row_nr 列模拟
+    2. 索引系统与 Pandas 不同，使用 with_row_index 临时列模拟
     3. 某些平台可能存在兼容性问题（如 Windows ARM）
     4. 需要 Python 3.8+
 """

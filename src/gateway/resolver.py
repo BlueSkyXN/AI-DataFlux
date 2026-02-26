@@ -41,6 +41,31 @@
     connector = aiohttp.TCPConnector(resolver=resolver)
     session = aiohttp.ClientSession(connector=connector)
 
+类与函数清单:
+
+    RoundRobinResolver(AbstractResolver):
+        轮询 DNS 解析器
+        ├── __init__(ip_pools, default_port=443)  初始化 IP 池和默认端口
+        ├── resolve(host, port, family) -> list[ResolveResult]
+        │   解析域名，配置了 IP 池的域名返回轮询排序的地址列表
+        │   输入: host — 域名; port — 端口号; family — 地址族
+        │   输出: 按轮询顺序排列的解析结果
+        ├── close()                              关闭解析器资源
+        └── get_stats() -> dict                  获取解析器统计信息
+        关键变量: _ip_pools — 域名到 IP 列表映射; _counters — 轮询计数器
+
+    build_ip_pools_from_channels(channels: dict) -> dict[str, list[str]]
+        从通道配置构建 IP 池映射
+        输入: channels — 通道配置字典
+        输出: 域名到有效 IP 地址列表的映射
+        注意: 跳过配置了 proxy 的通道，自动过滤无效 IP
+
+    _is_valid_ip(ip_str: str) -> bool
+        验证字符串是否为有效 IPv4 或 IPv6 地址（内部辅助函数）
+
+依赖模块:
+    - aiohttp: 异步 HTTP 客户端（AbstractResolver 基类）
+
 注意事项:
     - 配置了代理的通道不应使用 IP 池（代理模式下无效）
     - IP 池中的地址必须是有效的 IPv4 或 IPv6 地址

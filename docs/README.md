@@ -12,7 +12,7 @@
 2. **项目结构** - 目录布局、关键文件说明、组织原则
 3. **架构分层** - 四层架构详解
 4. **双组件架构** - 批处理引擎 + API 网关
-5. **数据源层架构** - 5 种数据源实现（Excel/CSV/MySQL/PostgreSQL/SQLite）
+5. **数据源层架构** - 7 种数据源实现（Excel/CSV/MySQL/PostgreSQL/SQLite/Feishu Bitable/Feishu Sheet）
 6. **核心处理引擎** - 组件化设计（Content/State/Retry/Clients）
 7. **API 网关架构** - 模型调度、限流、故障转移
 8. **数据流与生命周期** - 完整的数据处理流程
@@ -96,12 +96,23 @@ python cli.py gui --port 8080  # 指定端口
 
 ### [DATA_SOURCE.md](./DATA_SOURCE.md) - 数据源读写回机制
 
-**从代码逻辑出发**，说明当前支持的数据源类型（Excel/CSV/MySQL/PostgreSQL/SQLite）以及：
+**从代码逻辑出发**，说明当前支持的数据源类型（Excel/CSV/MySQL/PostgreSQL/SQLite/Feishu Bitable/Feishu Sheet）以及：
 
 - 任务“未处理/已处理”的判定规则
 - 分片读取方案与 `task_id` 定位方式
 - 各数据源写回策略与关键差异（如缺失字段写回语义）
 - Excel 保存与 CSV 回退策略
+
+---
+
+### [FEISHU.md](./FEISHU.md) - 飞书数据源指南
+
+**飞书数据源接入文档**，包含：
+
+- 飞书应用权限与 Token 获取方式
+- `feishu_bitable` / `feishu_sheet` 配置示例
+- 原生异步客户端的限流、重试、分块机制说明
+- GUI 连接测试接口说明
 
 ---
 

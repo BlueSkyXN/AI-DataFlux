@@ -31,6 +31,62 @@ Excel 数据源任务池实现模块
     │  └─────────────────────────────────────────────┘│
     └─────────────────────────────────────────────────┘
 
+类清单:
+    ExcelTaskPool(BaseTaskPool):
+        Excel/CSV 数据源任务池，管理内存 DataFrame 与任务队列的同步。
+
+        公开方法（BaseTaskPool 接口实现）:
+            - __init__(input_path, output_path, columns_to_extract, columns_to_write,
+                       save_interval, require_all_input_fields, engine_type,
+                       excel_reader, excel_writer)
+                初始化：读取文件 → 验证列 → 创建输出列
+            - get_total_task_count() -> int
+                统计未处理任务数（向量化过滤）
+            - get_processed_task_count() -> int
+                统计已处理任务数（遍历检查输出列）
+            - get_id_boundaries() -> tuple[int, int]
+                获取 DataFrame 索引边界 (min_idx, max_idx)
+            - initialize_shard(shard_id, min_idx, max_idx) -> int
+                加载分片到内存队列（向量化过滤 + 逐行提取）
+            - get_task_batch(batch_size) -> list[tuple]
+                从内存队列弹出一批任务
+            - update_task_results(results) -> None
+                写入 DataFrame + 检查自动保存间隔
+            - reload_task_data(idx) -> dict | None
+                从 DataFrame 重新读取指定索引的输入数据
+            - close() -> None
+                执行最终保存
+
+        Token 估算方法:
+            - sample_unprocessed_rows(sample_size) -> list[dict]
+            - sample_processed_rows(sample_size) -> list[dict]
+            - fetch_all_rows(columns) -> list[dict]
+            - fetch_all_processed_rows(columns) -> list[dict]
+
+        内部方法:
+            - _validate_and_prepare_columns() -> None
+                验证输入列存在、创建缺失的输出列
+            - _filter_unprocessed_indices(min_idx, max_idx) -> list[int]
+                向量化过滤未处理索引（核心性能优化）
+            - _save_excel() -> None
+                保存文件，含 Unicode 编码修复和 CSV 降级策略
+            - _clear_problematic_cells(df) -> tuple[df, int]
+                清空有编码问题的 AI 输出单元格
+
+        关键属性:
+            - input_path (Path): 输入文件路径
+            - output_path (Path): 输出文件路径
+            - engine (BaseEngine): DataFrame 引擎实例（Pandas/Polars）
+            - df: 内存中的 DataFrame
+            - save_interval (int): 自动保存间隔（秒）
+            - last_save_time (float): 上次保存时间戳
+            - _is_csv (bool): 是否为 CSV 文件
+
+    模块依赖:
+        - base.BaseTaskPool: 抽象基类
+        - engines.get_engine: 引擎工厂函数
+        - engines.BaseEngine: 引擎抽象基类
+
 性能优化:
     1. 向量化过滤: filter_indices_vectorized() 比逐行快 50-100 倍
     2. 批量更新: set_values_batch() 减少内存分配

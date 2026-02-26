@@ -4,6 +4,72 @@ SQLite 数据源任务池实现模块
 本模块提供 SQLite 数据库的任务池实现，适用于本地开发测试和中小规模数据处理。
 SQLite 是 Python 标准库自带的嵌入式数据库，无需额外安装依赖。
 
+类清单:
+    SQLiteConnectionManager:
+        SQLite 连接管理器（线程级单例），每个线程独立的连接实例。
+        类方法:
+            - set_db_path(db_path) -> None
+                设置全局数据库路径（首次使用前调用）
+            - get_connection(db_path=None) -> sqlite3.Connection
+                获取当前线程的连接（不存在则创建并配置 WAL 模式）
+            - close_connection() -> None
+                关闭当前线程的连接（含 WAL checkpoint）
+
+    SQLiteTaskPool(BaseTaskPool):
+        SQLite 数据源任务池，轻量级实现适合本地开发和中小规模数据。
+
+        公开方法（BaseTaskPool 接口实现）:
+            - __init__(db_path, table_name, columns_to_extract, columns_to_write,
+                       require_all_input_fields)
+                初始化：验证文件 → 校验标识符 → 验证表存在
+            - get_total_task_count() -> int
+                COUNT(*) 统计未处理任务数
+            - get_processed_task_count() -> int
+                COUNT(*) 统计已处理任务数
+            - get_id_boundaries() -> tuple[int, int]
+                查询 MIN(id)/MAX(id) 获取 ID 边界
+            - initialize_shard(shard_id, min_id, max_id) -> int
+                SELECT 指定 ID 范围的未处理记录到内存队列
+            - get_task_batch(batch_size) -> list[tuple]
+                从内存队列弹出一批任务
+            - update_task_results(results) -> None
+                显式事务（BEGIN/COMMIT/ROLLBACK）批量写回结果
+            - reload_task_data(record_id) -> dict | None
+                SELECT 重新加载指定记录的输入数据
+            - close() -> None
+                关闭当前线程的数据库连接
+
+        Token 估算方法:
+            - sample_unprocessed_rows(sample_size) -> list[dict]
+            - sample_processed_rows(sample_size) -> list[dict]
+            - fetch_all_rows(columns) -> list[dict]
+            - fetch_all_processed_rows(columns) -> list[dict]
+
+        内部方法:
+            - _validate_table() -> None
+                查询 sqlite_master 验证目标表存在
+            - _validate_identifier(identifier, field_name) -> str  [静态]
+                校验 SQL 标识符安全性（仅字母/数字/下划线）
+            - _validate_identifiers(identifiers, field_name) -> list[str]
+                批量校验 SQL 标识符
+            - _build_unprocessed_condition() -> str
+                构建未处理任务的 WHERE 条件（方括号标识符）
+            - _build_processed_condition() -> str
+                构建已处理任务的 WHERE 条件
+
+        关键属性:
+            - db_path (Path): SQLite 数据库文件路径
+            - table_name (str): 目标数据表名
+            - select_columns (list[str]): 查询列（id + 输入列）
+            - write_colnames (list[str]): 写入列名列表
+
+    模块级常量:
+        - IDENTIFIER_PATTERN (re.Pattern): SQL 标识符合法性正则
+
+    模块依赖:
+        - base.BaseTaskPool: 抽象基类
+        - sqlite3: Python 标准库 SQLite 接口
+
 核心特性:
     - 零配置: Python 标准库自带，即装即用
     - 线程级连接: 每个线程独立连接，避免线程安全问题

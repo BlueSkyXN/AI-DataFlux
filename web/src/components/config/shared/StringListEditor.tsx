@@ -1,5 +1,12 @@
+/**
+ * 字符串列表编辑器组件
+ *
+ * 用途：管理字符串数组的增删操作，以标签形式展示已有项
+ *
+ * Props: value - 字符串数组 | onChange - 变更回调
+ *        placeholder - 输入占位文本 | addLabel - 添加按钮文本
+ */
 import { useState } from 'react';
-
 interface StringListEditorProps {
   value: string[];
   onChange: (value: string[]) => void;
@@ -7,6 +14,7 @@ interface StringListEditorProps {
   addLabel?: string;
 }
 
+/** 字符串列表编辑器，标签式展示 + 输入框添加 */
 export default function StringListEditor({ value = [], onChange, placeholder = '', addLabel = '+' }: StringListEditorProps) {
   const [newItem, setNewItem] = useState('');
 

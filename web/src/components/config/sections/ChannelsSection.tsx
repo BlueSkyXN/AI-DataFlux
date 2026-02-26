@@ -1,14 +1,26 @@
+/**
+ * API 渠道（Channels）配置分区组件
+ *
+ * 用途：管理 API 渠道列表，支持添加、删除、编辑渠道的连接参数
+ *       每个渠道包含名称、Base URL、API Path、超时、代理、SSL 验证、IP 池等配置
+ *
+ * 导出：ChannelsSection（默认导出）
+ *   Props: SectionProps（formData, updateConfig, getConfig, language）
+ *
+ * 依赖：../shared/*（表单控件）、../../../i18n（国际化）
+ */
 import { useState } from 'react';
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
+import ArrayItemCard from '../shared/ArrayItemCard';
 import FormField from '../shared/FormField';
 import TextInput from '../shared/TextInput';
 import NumberInput from '../shared/NumberInput';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import StringListEditor from '../shared/StringListEditor';
-import ArrayItemCard from '../shared/ArrayItemCard';
 
+/** 单个渠道的配置数据结构 */
 interface ChannelConfig {
   name: string;
   base_url: string;
@@ -19,6 +31,7 @@ interface ChannelConfig {
   ip_pool?: string[];
 }
 
+/** 新建渠道时的默认值 */
 const defaultChannel: ChannelConfig = {
   name: '',
   base_url: '',
@@ -28,6 +41,10 @@ const defaultChannel: ChannelConfig = {
   ssl_verify: true,
 };
 
+/**
+ * 渠道配置分区组件
+ * 以卡片列表形式展示和编辑所有 API 渠道，底部提供新增渠道输入框
+ */
 export default function ChannelsSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
   const [newChannelId, setNewChannelId] = useState('');
@@ -37,11 +54,13 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
 
   const channelEntries = Object.entries(channels);
 
+  /** 更新指定渠道的某个字段 */
   const handleUpdate = (id: string, field: keyof ChannelConfig, value: unknown) => {
     const next = { ...channels, [id]: { ...channels[id], [field]: value } };
     updateConfig(['channels'], next);
   };
 
+  /** 添加新渠道，ID 不能为空且不能重复 */
   const handleAdd = () => {
     const id = newChannelId.trim();
     if (!id || id in channels) return;
@@ -49,8 +68,10 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
     setNewChannelId('');
   };
 
+  /** 删除渠道，若有模型引用该渠道则弹出确认提示 */
   const handleRemove = (id: string) => {
     // Check if any model references this channel
+    // 检查是否有模型引用了此渠道
     const referencedBy = models.filter((m) => String(m.channel_id) === id);
     if (referencedBy.length > 0) {
       const ok = window.confirm(

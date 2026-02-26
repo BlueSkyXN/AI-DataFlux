@@ -1,9 +1,17 @@
+/**
+ * 开关切换组件
+ *
+ * 用途：布尔值的可视化切换控件，遵循 ARIA switch 角色规范
+ *
+ * Props: checked - 当前状态 | onChange - 状态变更回调 | disabled - 是否禁用
+ */
 interface ToggleSwitchProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
 }
 
+/** 开关切换按钮，带滑动动画效果 */
 export default function ToggleSwitch({ checked, onChange, disabled }: ToggleSwitchProps) {
   return (
     <button

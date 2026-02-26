@@ -32,9 +32,52 @@
         - 复用 ExcelTaskPool 实现
         - 自动检测文件类型
 
+    - feishu_bitable: 飞书多维表格
+        - 原生异步 HTTP 客户端（基于 aiohttp）
+        - 快照读取，ID 映射，批量更新
+        - Token 自动刷新，限流重试
+
+    - feishu_sheet: 飞书电子表格
+        - 原生异步 HTTP 客户端（基于 aiohttp）
+        - 快照读取，行号映射，串行写入
+        - Token 自动刷新，限流重试
+
+函数/变量清单:
+    公开函数:
+        - create_task_pool(config, columns_to_extract, columns_to_write) -> BaseTaskPool
+            工厂函数，根据 datasource.type 创建对应任务池实例
+            输入: config (完整 YAML 配置字典), columns_to_extract, columns_to_write
+            输出: BaseTaskPool 子类实例
+            异常: ValueError (配置无效), ImportError (依赖缺失)
+
+    内部函数:
+        - _normalize_nonempty_str(value) -> str | None
+            规范化配置值为非空字符串，None/bool/空白 -> None
+        - _create_mysql_pool(...) -> MySQLTaskPool
+            创建 MySQL 任务池，验证必需配置字段
+        - _create_excel_pool(...) -> ExcelTaskPool
+            创建 Excel 任务池，支持引擎和读写器配置
+        - _create_postgresql_pool(...) -> PostgreSQLTaskPool
+            创建 PostgreSQL 任务池，支持 Schema 配置
+        - _create_sqlite_pool(...) -> SQLiteTaskPool
+            创建 SQLite 任务池，验证数据库路径和表名
+        - _create_csv_pool(...) -> ExcelTaskPool
+            创建 CSV 任务池，复用 ExcelTaskPool 实现
+        - _create_feishu_bitable_pool(...) -> FeishuBitableTaskPool
+            创建飞书多维表格任务池
+        - _create_feishu_sheet_pool(...) -> FeishuSheetTaskPool
+            创建飞书电子表格任务池
+
+    模块级变量（可用性标志）:
+        - MYSQL_AVAILABLE (bool): mysql-connector-python 是否已安装
+        - POSTGRESQL_AVAILABLE (bool): psycopg2 是否已安装
+        - SQLITE_AVAILABLE (bool): 始终为 True（标准库）
+        - EXCEL_ENABLED (bool): pandas + openpyxl 是否已安装
+        - FEISHU_AVAILABLE (bool): aiohttp 是否已安装
+
 配置示例:
     datasource:
-      type: mysql  # 或 postgresql、sqlite、excel、csv
+      type: mysql  # 或 postgresql、sqlite、excel、csv、feishu_bitable、feishu_sheet
       engine: auto  # pandas、polars 或 auto
       excel_reader: auto  # openpyxl、calamine 或 auto
       excel_writer: auto  # openpyxl、xlsxwriter 或 auto
@@ -72,6 +115,7 @@ MYSQL_AVAILABLE = False
 POSTGRESQL_AVAILABLE = False
 SQLITE_AVAILABLE = True  # SQLite 是 Python 标准库，始终可用
 EXCEL_ENABLED = False
+FEISHU_AVAILABLE = False
 
 # 检测 MySQL 连接器
 try:
@@ -97,6 +141,27 @@ try:
     EXCEL_ENABLED = True
 except ImportError:
     pass
+
+# 检测飞书依赖（aiohttp）
+try:
+    import aiohttp  # noqa: F401
+
+    FEISHU_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def _normalize_nonempty_str(value: Any) -> str | None:
+    """
+    规范化配置值为非空字符串。
+
+    - None / bool / 空白字符串 -> None
+    - 其他类型 -> str(value).strip()
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    return text if text else None
 
 
 def create_task_pool(
@@ -198,10 +263,26 @@ def create_task_pool(
             engine_type,
         )
 
+    elif datasource_type == "feishu_bitable":
+        return _create_feishu_bitable_pool(
+            config,
+            columns_to_extract,
+            columns_to_write,
+            require_all_input_fields,
+        )
+
+    elif datasource_type == "feishu_sheet":
+        return _create_feishu_sheet_pool(
+            config,
+            columns_to_extract,
+            columns_to_write,
+            require_all_input_fields,
+        )
+
     else:
         raise ValueError(
             f"不支持的数据源类型: {datasource_type}，"
-            f"可选: mysql, postgresql, sqlite, excel, csv"
+            f"可选: mysql, postgresql, sqlite, excel, csv, feishu_bitable, feishu_sheet"
         )
 
 
@@ -492,10 +573,141 @@ def _create_csv_pool(
     )
 
 
+def _create_feishu_bitable_pool(
+    config: dict[str, Any],
+    columns_to_extract: list[str],
+    columns_to_write: dict[str, str],
+    require_all_input_fields: bool,
+) -> BaseTaskPool:
+    """
+    创建飞书多维表格任务池
+
+    Args:
+        config: 完整配置（需包含 feishu 和 datasource 配置节）
+        columns_to_extract: 提取列
+        columns_to_write: 写回映射
+        require_all_input_fields: 是否要求所有输入字段非空
+
+    Returns:
+        FeishuBitableTaskPool 实例
+
+    Raises:
+        ImportError: aiohttp 未安装
+        ValueError: 缺少必需配置字段
+    """
+    if not FEISHU_AVAILABLE:
+        raise ImportError("aiohttp 不可用，请安装: pip install aiohttp")
+
+    from .feishu.bitable import FeishuBitableTaskPool
+
+    feishu_config = config.get("feishu", {})
+    datasource_config = config.get("datasource", {})
+
+    # 验证全局凭据
+    if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
+        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+
+    # 兼容两种配置路径:
+    # 1) feishu.app_token/table_id（GUI 当前写入路径）
+    # 2) datasource.app_token/table_id（旧路径）
+    app_token = _normalize_nonempty_str(feishu_config.get("app_token"))
+    if app_token is None:
+        app_token = _normalize_nonempty_str(datasource_config.get("app_token"))
+    table_id = _normalize_nonempty_str(feishu_config.get("table_id"))
+    if table_id is None:
+        table_id = _normalize_nonempty_str(datasource_config.get("table_id"))
+    if app_token is None:
+        raise ValueError(
+            "缺少飞书多维表格配置: feishu.app_token 或 datasource.app_token"
+        )
+    if table_id is None:
+        raise ValueError(
+            "缺少飞书多维表格配置: feishu.table_id 或 datasource.table_id"
+        )
+
+    return FeishuBitableTaskPool(
+        app_id=feishu_config["app_id"],
+        app_secret=feishu_config["app_secret"],
+        app_token=app_token,
+        table_id=table_id,
+        columns_to_extract=columns_to_extract,
+        columns_to_write=columns_to_write,
+        require_all_input_fields=require_all_input_fields,
+        max_retries=feishu_config.get("max_retries", 3),
+        qps_limit=feishu_config.get("qps_limit", 0),
+    )
+
+
+def _create_feishu_sheet_pool(
+    config: dict[str, Any],
+    columns_to_extract: list[str],
+    columns_to_write: dict[str, str],
+    require_all_input_fields: bool,
+) -> BaseTaskPool:
+    """
+    创建飞书电子表格任务池
+
+    Args:
+        config: 完整配置（需包含 feishu 和 datasource 配置节）
+        columns_to_extract: 提取列
+        columns_to_write: 写回映射
+        require_all_input_fields: 是否要求所有输入字段非空
+
+    Returns:
+        FeishuSheetTaskPool 实例
+
+    Raises:
+        ImportError: aiohttp 未安装
+        ValueError: 缺少必需配置字段
+    """
+    if not FEISHU_AVAILABLE:
+        raise ImportError("aiohttp 不可用，请安装: pip install aiohttp")
+
+    from .feishu.sheet import FeishuSheetTaskPool
+
+    feishu_config = config.get("feishu", {})
+    datasource_config = config.get("datasource", {})
+
+    # 验证全局凭据
+    if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
+        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+
+    # 兼容两种配置路径:
+    # 1) feishu.spreadsheet_token/sheet_id（GUI 当前写入路径）
+    # 2) datasource.spreadsheet_token/sheet_id（旧路径）
+    spreadsheet_token = _normalize_nonempty_str(feishu_config.get("spreadsheet_token"))
+    if spreadsheet_token is None:
+        spreadsheet_token = _normalize_nonempty_str(
+            datasource_config.get("spreadsheet_token")
+        )
+    sheet_id = _normalize_nonempty_str(feishu_config.get("sheet_id"))
+    if sheet_id is None:
+        sheet_id = _normalize_nonempty_str(datasource_config.get("sheet_id"))
+    if spreadsheet_token is None:
+        raise ValueError(
+            "缺少飞书电子表格配置: feishu.spreadsheet_token 或 datasource.spreadsheet_token"
+        )
+    if sheet_id is None:
+        raise ValueError("缺少飞书电子表格配置: feishu.sheet_id 或 datasource.sheet_id")
+
+    return FeishuSheetTaskPool(
+        app_id=feishu_config["app_id"],
+        app_secret=feishu_config["app_secret"],
+        spreadsheet_token=spreadsheet_token,
+        sheet_id=sheet_id,
+        columns_to_extract=columns_to_extract,
+        columns_to_write=columns_to_write,
+        require_all_input_fields=require_all_input_fields,
+        max_retries=feishu_config.get("max_retries", 3),
+        qps_limit=feishu_config.get("qps_limit", 0),
+    )
+
+
 __all__ = [
     "create_task_pool",
     "MYSQL_AVAILABLE",
     "POSTGRESQL_AVAILABLE",
     "SQLITE_AVAILABLE",
     "EXCEL_ENABLED",
+    "FEISHU_AVAILABLE",
 ]

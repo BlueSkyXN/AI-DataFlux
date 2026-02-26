@@ -28,6 +28,75 @@ PostgreSQL 数据源任务池实现模块
     │  └─────────────┘   └──────────────────────────────────────┘ │
     └─────────────────────────────────────────────────────────────┘
 
+类清单:
+    PostgreSQLConnectionPoolManager:
+        PostgreSQL 连接池管理器（单例模式），管理全局唯一的 ThreadedConnectionPool。
+        类方法:
+            - get_pool(config, pool_name, min_connections, max_connections) -> ThreadedConnectionPool
+                获取或创建连接池实例（双检锁线程安全）
+            - close_pool() -> None
+                关闭连接池并释放所有连接（closeall）
+
+    PostgreSQLTaskPool(BaseTaskPool):
+        PostgreSQL 数据源任务池，针对大规模数据和高并发场景优化。
+
+        公开方法（BaseTaskPool 接口实现）:
+            - __init__(connection_config, columns_to_extract, columns_to_write,
+                       table_name, schema_name, pool_size, require_all_input_fields)
+                初始化：检查依赖 → 校验标识符 → 获取连接池
+            - get_total_task_count() -> int
+                COUNT(*) 统计未处理任务数（psycopg2.sql 安全构建）
+            - get_processed_task_count() -> int
+                COUNT(*) 统计已处理任务数
+            - get_id_boundaries() -> tuple[int, int]
+                查询 MIN(id)/MAX(id) 获取 ID 边界
+            - initialize_shard(shard_id, min_id, max_id) -> int
+                SELECT 指定 ID 范围的未处理记录到内存队列
+            - get_task_batch(batch_size) -> list[tuple]
+                从内存队列弹出一批任务
+            - update_task_results(results) -> None
+                使用 execute_batch() 批量写回结果（性能 5-10x）
+            - reload_task_data(record_id) -> dict | None
+                SELECT 重新加载指定记录的输入数据
+            - close() -> None
+                关闭全局连接池
+
+        Token 估算方法:
+            - sample_unprocessed_rows(sample_size) -> list[dict]
+            - sample_processed_rows(sample_size) -> list[dict]
+            - fetch_all_rows(columns) -> list[dict]
+            - fetch_all_processed_rows(columns) -> list[dict]
+
+        内部方法:
+            - _get_connection() -> Connection
+                从连接池获取连接（getconn）
+            - _put_connection(conn) -> None
+                归还连接到连接池（putconn）
+            - execute_with_connection(callback, is_write) -> Any
+                封装连接获取/归还/事务管理（RealDictCursor）
+            - _validate_identifier(identifier, field_name) -> str
+                校验 SQL 标识符安全性
+            - _validate_identifiers(identifiers, field_name) -> list[str]
+                批量校验 SQL 标识符
+            - _build_unprocessed_condition() -> str
+                构建未处理任务的 WHERE 条件（双引号标识符）
+            - _build_processed_condition() -> str
+                构建已处理任务的 WHERE 条件
+
+        关键属性:
+            - table_name (str): 目标数据表名
+            - schema_name (str): 数据库 Schema 名（默认 public）
+            - pool: ThreadedConnectionPool 实例
+            - select_columns (list[str]): 查询列（id + 输入列）
+            - write_colnames (list[str]): 写入列名列表
+
+    模块依赖:
+        - base.BaseTaskPool: 抽象基类
+        - psycopg2: PostgreSQL 连接器（可选依赖）
+        - psycopg2.pool: 线程安全连接池
+        - psycopg2.extras: RealDictCursor, execute_batch
+        - psycopg2.sql: 安全 SQL 构建器
+
 与 MySQL 版本的差异:
     1. 标识符引用: PostgreSQL 用双引号，MySQL 用反引号
     2. 连接池: ThreadedConnectionPool vs MySQLConnectionPool
@@ -451,7 +520,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
     # ==================== 核心接口实现 ====================
 
     def get_total_task_count(self) -> int:
-        """获取未处理任务总数"""
+        """
+        获取未处理任务总数
+
+        使用 psycopg2.sql 模块安全构建 COUNT(*) 查询。
+
+        Returns:
+            int: 未处理任务数量，查询失败返回 0
+        """
 
         def _get_count(conn: Any, cursor: Any) -> int:
             where_clause = self._build_unprocessed_condition()
@@ -477,7 +553,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return 0
 
     def get_processed_task_count(self) -> int:
-        """获取已处理任务总数"""
+        """
+        获取已处理任务总数
+
+        统计所有输出列都非空的记录数。
+
+        Returns:
+            int: 已处理任务数量，查询失败返回 0
+        """
 
         def _get_count(conn: Any, cursor: Any) -> int:
             where_clause = self._build_processed_condition()
@@ -501,7 +584,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return 0
 
     def get_id_boundaries(self) -> tuple[int, int]:
-        """获取 ID 边界"""
+        """
+        获取表中 ID 的边界值
+
+        Returns:
+            tuple[int, int]: (最小ID, 最大ID)，表为空返回 (0, 0)
+        """
 
         def _get_boundaries(conn: Any, cursor: Any) -> tuple[int, int]:
             query = sql.SQL(
@@ -530,7 +618,20 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return (0, 0)
 
     def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
-        """初始化分片"""
+        """
+        初始化分片，从数据库加载指定 ID 范围的未处理任务
+
+        使用 psycopg2.sql 模块安全构建 SELECT 查询，
+        将结果加载到内存任务队列中。
+
+        Args:
+            shard_id: 分片标识符（用于日志）
+            min_id: ID 范围起始（包含）
+            max_id: ID 范围结束（包含）
+
+        Returns:
+            int: 实际加载的任务数量
+        """
 
         def _load_shard(conn: Any, cursor: Any) -> int:
             shard_tasks: list[tuple[Any, dict[str, Any]]] = []
@@ -602,7 +703,15 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return 0
 
     def get_task_batch(self, batch_size: int) -> list[tuple[Any, dict[str, Any]]]:
-        """从内存队列获取一批任务"""
+        """
+        从内存队列获取一批任务
+
+        Args:
+            batch_size: 请求的任务数量
+
+        Returns:
+            list[tuple[Any, dict]]: 任务列表 [(record_id, data_dict), ...]
+        """
         with self.lock:
             batch = self.tasks[:batch_size]
             self.tasks = self.tasks[batch_size:]
@@ -689,7 +798,15 @@ class PostgreSQLTaskPool(BaseTaskPool):
             logging.error(f"更新 PostgreSQL 记录失败: {e}")
 
     def reload_task_data(self, record_id: int) -> dict[str, Any] | None:
-        """重新加载任务的原始输入数据"""
+        """
+        重新加载任务的原始输入数据
+
+        Args:
+            record_id: 记录的主键 ID
+
+        Returns:
+            dict[str, Any] | None: 输入数据字典，记录不存在返回 None
+        """
 
         def _reload(conn: Any, cursor: Any) -> dict[str, Any] | None:
             if not self.columns_to_extract:
@@ -719,7 +836,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return None
 
     def close(self) -> None:
-        """关闭连接池"""
+        """
+        关闭连接池
+
+        释放所有 PostgreSQL 数据库连接。
+        连接池是全局单例，关闭后其他实例也会受影响。
+        """
         logging.info("请求关闭 PostgreSQL 连接池...")
         PostgreSQLConnectionPoolManager.close_pool()
 

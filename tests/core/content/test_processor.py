@@ -1,11 +1,29 @@
 """
 内容处理器单元测试
 
+被测模块: src/core/content/processor.py (ContentProcessor)
+
 测试 src/core/content/processor.py 的 ContentProcessor 类功能，包括：
 - Prompt 生成 (模板替换、JSON 序列化)
 - AI 响应解析 (JSON 提取、Markdown 代码块处理)
 - 字段验证 (必需字段检查、枚举值验证)
 - JSON Schema 构建
+
+测试类/函数清单:
+    TestContentProcessor                           内容处理器测试
+        test_create_prompt                         验证模板替换并排除内部字段（_前缀）
+        test_create_prompt_serialization_error      验证不可序列化对象的错误处理
+        test_parse_response_valid_json             验证有效 JSON 解析
+        test_parse_response_markdown_json          验证 Markdown 代码块中的 JSON 提取
+        test_parse_response_with_trailing_comma    验证尾部逗号容错
+        test_parse_response_regex_extraction       验证正则表达式提取混合文本中的 JSON
+        test_parse_response_missing_fields         验证缺少必需字段返回 CONTENT 错误
+        test_parse_response_validation_failure     验证枚举值校验失败返回错误
+        test_build_schema                          验证 JSON Schema 构建（含枚举约束）
+        test_exclude_fields_in_prompt              验证排除字段不出现在 Prompt 中
+        test_exclude_fields_empty_list             验证空排除列表不影响输出
+        test_explicit_routing_field_included       验证显式声明的路由字段包含在 Prompt 中
+        test_implicit_routing_field_excluded       验证隐式路由字段从 Prompt 中排除
 """
 
 import pytest
@@ -16,6 +34,7 @@ from src.models.errors import ErrorType
 
 
 class TestContentProcessor:
+    """内容处理器测试"""
 
     @pytest.fixture
     def mock_validator(self):

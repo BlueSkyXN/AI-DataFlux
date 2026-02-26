@@ -16,6 +16,32 @@ JSON 字段验证器
     例如: 情感分析任务要求返回 "positive", "neutral", "negative" 之一，
     但 AI 返回了 "good"，验证器会标记为无效。
 
+类清单:
+    JsonValidator
+        - 功能: 根据预定义规则验证 JSON 字段值的合法性
+        - 关键属性: enabled (bool), field_rules (dict[str, list[Any]])
+
+        方法:
+        ├── __init__()
+        │     初始化验证器，设置默认禁用状态
+        │
+        ├── configure(validation_config) -> None
+        │     输入: validation_config (dict | None) — 验证配置字典
+        │     功能: 加载并解析 field_rules，启用/禁用验证
+        │     副作用: 更新 self.enabled 和 self.field_rules
+        │
+        ├── validate(data) -> tuple[bool, list[str]]
+        │     输入: data (dict[str, Any]) — 待验证的 JSON 数据
+        │     输出: (是否通过, 错误消息列表)
+        │     注意: 仅验证配置了规则且存在于 data 中的字段
+        │
+        └── get_rules_summary() -> dict[str, int]
+              输出: {字段名: 允许值数量} 的摘要字典
+
+模块依赖:
+    - logging: 日志记录
+    - typing.Any: 类型注解
+
 配置示例:
     validation:
       enabled: true

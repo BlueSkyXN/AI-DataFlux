@@ -27,9 +27,39 @@ Flux_Data.py - 旧版数据源处理模块 (Legacy)
 
 Warning:
     此文件已弃用，不再维护。请使用新版数据层 (src/data/)。
+
+文件索引:
+    类:
+        BaseTaskPool (L71)             — 数据源任务池抽象基类
+          ├── get_total_task_count()     — 获取未处理任务总数
+          ├── get_id_boundaries()        — 获取 ID 边界用于分片
+          ├── initialize_shard()         — 加载指定分片的任务到内存
+          ├── get_task_batch()           — 从内存队列取出一批任务
+          ├── update_task_results()      — 将处理结果写回数据源
+          ├── reload_task_data()         — 重新加载任务原始数据（用于重试）
+          ├── close()                    — 释放资源
+          ├── add_task_to_front()        — 将任务放回队列头部（重试）
+          ├── add_task_to_back()         — 将任务放回队列尾部（延迟处理）
+          ├── has_tasks()                — 检查是否有剩余任务
+          └── get_remaining_count()      — 获取剩余任务数
+
+        MySQLConnectionPoolManager (L146) — MySQL 连接池单例管理器
+        MySQLTaskPool (L200)             — MySQL 数据源任务池实现
+          ├── _build_unprocessed_condition() — 构建未处理行的 WHERE 条件
+          └── execute_with_connection()      — 安全的数据库操作封装
+
+        ExcelTaskPool (L506)             — Excel 数据源任务池实现
+          ├── _is_value_empty()            — 判断值是否为空
+          ├── _is_value_empty_vectorized()  — 向量化空值检测（50-100x 加速）
+          ├── _filter_unprocessed_indices() — 过滤未处理行的索引
+          └── _save_excel()                — 保存 Excel（含编码错误自动修复）
+
+    函数:
+        create_task_pool (L851)          — 工厂函数，根据配置创建对应的任务池
 """
 
 # Flux_Data.py
+# 标准库和第三方库导入
 import logging
 import threading
 import time
@@ -40,6 +70,7 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 from abc import ABC, abstractmethod
 
 # --- Conditional Import for MySQL ---
+# 条件导入 MySQL 连接器（可选依赖）
 try:
     import mysql.connector
     from mysql.connector import pooling, errorcode
@@ -69,7 +100,13 @@ except (ImportError, AttributeError):
 
 # --- Base Task Pool Abstract Base Class (Defined internally) ---
 class BaseTaskPool(ABC):
-    """Abstract base class defining the interface for data source task pools."""
+    """
+    数据源任务池抽象基类
+
+    定义了所有数据源（Excel、MySQL 等）必须实现的接口。
+    核心设计: 将数据源抽象为 "任务池"，支持分片加载、批量获取、结果回写。
+    线程安全: 使用 threading.Lock 保护内存中的任务列表。
+    """
     def __init__(self, columns_to_extract: List[str], columns_to_write: Dict[str, str], require_all_input_fields: bool = True):
         self.columns_to_extract = columns_to_extract
         self.columns_to_write = columns_to_write
@@ -142,9 +179,15 @@ class BaseTaskPool(ABC):
             return len(self.tasks)
 
 # --- MySQL Specific Components ---
+# MySQL 相关组件（仅在 mysql-connector-python 可用时定义）
 if MYSQL_AVAILABLE:
     class MySQLConnectionPoolManager:
-        """Manages a single MySQL connection pool instance."""
+        """
+        MySQL 连接池单例管理器
+
+        使用单例模式确保整个应用中只有一个连接池实例。
+        线程安全: 使用 threading.Lock 保护实例创建。
+        """
         _instance = None
         _lock = threading.Lock()
         _pool = None
@@ -198,7 +241,14 @@ if MYSQL_AVAILABLE:
                     cls._instance = None
 
     class MySQLTaskPool(BaseTaskPool):
-        """MySQL data source task pool implementation."""
+        """
+        MySQL 数据源任务池实现
+
+        核心逻辑:
+        - 通过 ID 范围分片查询未处理记录
+        - 未处理条件: 输入字段非空 AND 至少一个输出字段为空
+        - 结果写回使用逐条 UPDATE（保证安全性）
+        """
         def __init__(
             self,
             connection_config: Dict[str, Any],
@@ -502,9 +552,18 @@ if MYSQL_AVAILABLE:
             MySQLConnectionPoolManager.close_pool()
 
 # --- Excel Specific Components ---
+# Excel 相关组件（仅在 pandas + openpyxl 可用时定义）
 if EXCEL_ENABLED:
     class ExcelTaskPool(BaseTaskPool):
-        """Excel data source task pool implementation."""
+        """
+        Excel 数据源任务池实现
+
+        核心逻辑:
+        - 启动时一次性加载整个 Excel 到 pandas DataFrame
+        - 通过行索引范围分片，使用向量化操作过滤未处理行
+        - 结果写回到 DataFrame 内存中，按 save_interval 定期保存文件
+        - 保存时自动处理 Unicode 编码问题（清空问题单元格或回退到 CSV）
+        """
         def __init__(
             self,
             input_excel: str,
@@ -848,6 +907,7 @@ if EXCEL_ENABLED:
 
 
 # --- Top-Level Factory Function ---
+# 顶层工厂函数: 根据配置类型创建对应的数据源任务池
 def create_task_pool(config: Dict[str, Any], columns_to_extract: List[str], columns_to_write: Dict[str, str]) -> BaseTaskPool:
     """
     Factory function to create the appropriate task pool (MySQL or Excel)

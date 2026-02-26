@@ -1,11 +1,39 @@
 """
 数据源工厂测试
 
+被测模块: src/data/factory.py
+
 测试 src/data/factory.py 的任务池工厂功能，包括：
 - 工厂函数导入
 - Excel/CSV 任务池创建
 - MySQL/PostgreSQL 可用性检测
 - 无效数据源类型处理
+
+测试类/函数清单:
+    TestFactoryBasics                               工厂基础功能测试
+        test_factory_imports                        验证工厂模块可导入
+        test_excel_enabled                          验证 Excel 功能可用
+    TestCreateExcelPool                             Excel 任务池创建测试
+        test_create_excel_pool_success              验证成功创建 Excel 任务池
+        test_create_excel_pool_with_auto_engine     验证使用自动引擎创建
+        test_create_excel_pool_missing_input_path   验证缺少输入路径抛异常
+        test_create_excel_pool_default_output_path  验证默认输出路径等于输入路径
+    TestCreateMySQLPool                             MySQL 任务池创建测试
+        test_create_mysql_pool_missing_config       验证缺少 MySQL 配置字段抛异常
+        test_create_mysql_pool_connector_not_available  验证 connector 不可用时抛 ImportError
+    TestUnsupportedDataSource                       不支持的数据源测试
+        test_unsupported_datasource_type            验证不支持类型抛 ValueError
+        test_empty_datasource_type_defaults_to_excel  验证空类型默认为 Excel
+    TestEngineSelection                             引擎选择测试
+        test_pandas_engine_selection                验证选择 Pandas 引擎
+        test_polars_engine_selection                验证选择 Polars 引擎
+        test_reader_writer_selection                验证读写器选择
+    TestConcurrencyConfig                           并发配置测试
+        test_save_interval_config                   验证保存间隔配置
+        test_default_save_interval                  验证默认保存间隔为 300 秒
+    TestRequireAllInputFields                       输入字段要求测试
+        test_require_all_input_fields_true          验证要求所有输入字段
+        test_require_all_input_fields_false         验证不要求所有输入字段
 """
 
 import pytest

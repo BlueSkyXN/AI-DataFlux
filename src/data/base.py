@@ -30,6 +30,57 @@
        - add_task_to_back(): 延迟处理时放回队尾
        - has_tasks(): 检查队列是否为空
 
+类清单:
+    BaseTaskPool (ABC):
+        抽象基类，定义数据源任务池的统一接口。
+
+        抽象方法（子类必须实现）:
+            - get_total_task_count() -> int
+                获取未处理任务总数
+            - get_processed_task_count() -> int
+                获取已处理任务总数
+            - get_id_boundaries() -> tuple[Any, Any]
+                获取任务 ID 边界 (min_id, max_id)
+            - initialize_shard(shard_id, min_id, max_id) -> int
+                初始化分片并加载到内存队列，返回加载数量
+            - get_task_batch(batch_size) -> list[tuple[Any, dict]]
+                从内存队列获取一批任务
+            - update_task_results(results: dict) -> None
+                批量写回处理结果
+            - reload_task_data(task_id) -> dict | None
+                重新加载任务原始输入数据（用于重试）
+            - close() -> None
+                关闭资源并清理
+
+        具体方法（已实现）:
+            - add_task_to_front(task_id, record_dict) -> None
+                将任务放回队列头部（优先重试）
+            - add_task_to_back(task_id, record_dict) -> None
+                将任务放到队列尾部（延迟处理）
+            - has_tasks() -> bool
+                检查内存队列是否还有任务
+            - get_remaining_count() -> int
+                获取剩余任务数量
+            - clear_tasks() -> None
+                清空内存队列
+
+        可覆盖方法（子类可选实现）:
+            - sample_unprocessed_rows(sample_size) -> list[dict]
+                采样未处理行（用于输入 Token 估算）
+            - sample_processed_rows(sample_size) -> list[dict]
+                采样已处理行（用于输出 Token 估算）
+            - fetch_all_rows(columns) -> list[dict]
+                获取所有行（忽略处理状态）
+            - fetch_all_processed_rows(columns) -> list[dict]
+                获取所有已处理行
+
+        关键属性:
+            - columns_to_extract (list[str]): 输入列名列表
+            - columns_to_write (dict[str, str]): 输出映射 {别名: 实际列名}
+            - require_all_input_fields (bool): 是否要求所有输入字段非空
+            - tasks (list[tuple]): 内存任务队列 [(task_id, data_dict), ...]
+            - lock (threading.Lock): 保护 tasks 队列的线程锁
+
 实现指南:
     创建新数据源需要：
     1. 继承 BaseTaskPool

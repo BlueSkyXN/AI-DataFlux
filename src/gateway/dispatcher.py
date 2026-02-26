@@ -29,6 +29,34 @@
     为避免频繁获取锁检查可用性，使用带 TTL 的缓存。
     默认 TTL 为 0.5 秒，在此期间直接返回缓存结果。
 
+类与函数清单:
+
+    ModelConfig:
+        模型配置封装类
+        ├── __init__(model_dict, channels)  从字典初始化模型配置
+        │   输入: model_dict — 模型配置字典; channels — 通道配置字典
+        │   异常: ValueError — 缺少必填字段或通道不存在
+        └── to_dict() -> dict               转换为字典格式
+        关键属性: id, model, api_url, weight, safe_rps, final_timeout
+
+    ModelDispatcher:
+        模型调度器（加权随机选择 + 故障退避）
+        ├── __init__(models, backoff_factor=2)     初始化调度器
+        ├── select_model(exclude_model_ids) -> ModelConfig | None
+        │   加权随机选择可用模型
+        │   输入: exclude_model_ids — 排除的模型 ID 集合
+        │   输出: 选中的模型配置或 None
+        ├── mark_model_success(model_id)           标记成功，重置退避
+        ├── mark_model_failed(model_id, error_type) 标记失败，触发指数退避
+        ├── is_model_available(model_id) -> bool   检查模型可用性（带缓存）
+        ├── get_available_models(exclude) -> list[str]  获取所有可用模型 ID
+        ├── update_model_metrics(model_id, response_time, success)  更新性能指标
+        ├── get_model_success_rate(model_id) -> float   获取成功率
+        ├── get_model_avg_response_time(model_id) -> float  获取平均响应时间
+        ├── get_model_config(model_id) -> ModelConfig | None  获取模型配置
+        └── get_all_model_stats() -> list[dict]    获取所有模型统计信息
+        关键变量: _model_state — 模型运行时状态; _availability_cache — 可用性缓存
+
 使用示例:
     # 创建调度器
     dispatcher = ModelDispatcher(models)
@@ -41,6 +69,9 @@
         dispatcher.mark_model_success(model.id)
     else:
         dispatcher.mark_model_failed(model.id, "api_error")
+
+依赖模块:
+    - limiter.RWLock: 读写锁，保护并发访问共享状态
 """
 
 import logging
@@ -210,7 +241,12 @@ class ModelDispatcher:
         self._update_availability_cache()
 
     def _update_availability_cache(self) -> None:
-        """更新可用性缓存"""
+        """
+        更新可用性缓存
+
+        遍历所有模型，根据当前时间与 next_available_ts 比较，
+        更新缓存中每个模型的可用状态。需要持有写锁。
+        """
         with self._rwlock.write_lock():
             current_time = time.time()
             new_cache = {}
@@ -222,7 +258,17 @@ class ModelDispatcher:
     def update_model_metrics(
         self, model_id: str, response_time: float, success: bool
     ) -> None:
-        """更新模型性能指标"""
+        """
+        更新模型性能指标（成功/错误计数和响应时间）
+
+        响应时间使用指数移动平均（EMA）计算，权重 α=0.1，
+        公式: avg = avg_old * 0.9 + response_time * 0.1
+
+        Args:
+            model_id: 模型 ID
+            response_time: 本次请求响应时间（秒）
+            success: 是否成功
+        """
         with self._rwlock.write_lock():
             state = self._model_state.get(model_id)
             if not state:
@@ -245,7 +291,15 @@ class ModelDispatcher:
                 )
 
     def get_model_success_rate(self, model_id: str) -> float:
-        """获取模型成功率"""
+        """
+        获取模型成功率
+
+        Args:
+            model_id: 模型 ID
+
+        Returns:
+            float: 成功率 (0.0~1.0)，无调用记录时返回 1.0
+        """
         with self._rwlock.read_lock():
             state = self._model_state.get(model_id)
             if not state:
@@ -254,13 +308,34 @@ class ModelDispatcher:
             return state["success_count"] / total if total > 0 else 1.0
 
     def get_model_avg_response_time(self, model_id: str) -> float:
-        """获取模型平均响应时间"""
+        """
+        获取模型平均响应时间（指数移动平均值）
+
+        Args:
+            model_id: 模型 ID
+
+        Returns:
+            float: 平均响应时间（秒），无数据时返回 1.0
+        """
         with self._rwlock.read_lock():
             state = self._model_state.get(model_id)
             return (state.get("avg_response_time", 1.0) or 1.0) if state else 1.0
 
     def is_model_available(self, model_id: str) -> bool:
-        """判断模型是否可用"""
+        """
+        判断模型是否可用（优先使用缓存，过期后刷新）
+
+        三层检查逻辑:
+        1. 缓存未过期 → 直接返回缓存结果
+        2. 缓存已过期 → 刷新缓存后返回
+        3. 缓存无记录 → 直接计算 next_available_ts
+
+        Args:
+            model_id: 模型 ID
+
+        Returns:
+            bool: 模型是否可用（未处于退避期）
+        """
         current_time = time.time()
 
         with self._rwlock.read_lock():
@@ -278,7 +353,15 @@ class ModelDispatcher:
             return (current_time >= state["next_available_ts"]) if state else False
 
     def mark_model_success(self, model_id: str) -> None:
-        """标记模型调用成功"""
+        """
+        标记模型调用成功，重置退避状态
+
+        操作: 将 fail_count 归零，next_available_ts 归零，更新缓存为可用。
+        如果模型之前处于退避状态，会记录恢复日志。
+
+        Args:
+            model_id: 模型 ID
+        """
         with self._rwlock.write_lock():
             state = self._model_state.get(model_id)
             if state:
@@ -291,7 +374,16 @@ class ModelDispatcher:
                     logging.info(f"模型[{model_id}] 调用成功，恢复可用")
 
     def mark_model_failed(self, model_id: str, error_type: str = "api_error") -> None:
-        """标记模型调用失败"""
+        """
+        标记模型调用失败，仅对 api_error 类型触发指数退避
+
+        非 api_error 类型（如内容错误）不触发退避，因为这类错误
+        通常不是模型本身的问题，重试可能成功。
+
+        Args:
+            model_id: 模型 ID
+            error_type: 错误类型，仅 "api_error" 触发退避
+        """
         if error_type != "api_error":
             logging.warning(f"模型[{model_id}] 遇到 {error_type}，不执行退避")
             return
@@ -321,7 +413,15 @@ class ModelDispatcher:
     def get_available_models(
         self, exclude_model_ids: set[str] | None = None
     ) -> list[str]:
-        """获取所有可用模型 ID"""
+        """
+        获取所有可用模型 ID（排除指定模型和处于退避期的模型）
+
+        Args:
+            exclude_model_ids: 要排除的模型 ID 集合
+
+        Returns:
+            list[str]: 当前可用的模型 ID 列表
+        """
         exclude_ids = exclude_model_ids or set()
 
         with self._rwlock.read_lock():
@@ -367,11 +467,26 @@ class ModelDispatcher:
         return selected[0] if selected else None
 
     def get_model_config(self, model_id: str) -> ModelConfig | None:
-        """获取模型配置"""
+        """
+        获取模型配置
+
+        Args:
+            model_id: 模型 ID
+
+        Returns:
+            ModelConfig | None: 模型配置对象，不存在时返回 None
+        """
         return self.models.get(model_id)
 
     def get_all_model_stats(self) -> list[dict[str, Any]]:
-        """获取所有模型的统计信息"""
+        """
+        获取所有模型的统计信息（用于管理接口）
+
+        Returns:
+            list[dict]: 每个模型的统计字典，包含:
+                id, name, model, weight, success_rate,
+                avg_response_time, available, channel
+        """
         stats = []
 
         with self._rwlock.read_lock():

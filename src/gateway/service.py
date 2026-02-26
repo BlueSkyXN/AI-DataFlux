@@ -35,11 +35,60 @@ Flux API 核心服务模块
 
     await service.shutdown()  # 清理资源
 
+FluxApiService 方法清单:
+
+    生命周期管理:
+        ├── __init__(config_path: str)          加载配置，初始化同步组件
+        ├── startup() -> None                   异步启动（创建连接池和解析器）
+        └── shutdown() -> None                  关闭服务，释放所有资源
+
+    配置初始化（内部方法）:
+        ├── _load_config()                      加载 YAML 配置文件，初始化日志
+        ├── _init_models()                      解析模型配置，创建名称映射
+        ├── _init_dispatcher()                  初始化模型调度器
+        └── _init_rate_limiter()                初始化令牌桶限流器
+
+    请求处理（核心流程）:
+        ├── chat_completion(request) -> Response | AsyncIterable
+        │   处理聊天补全请求，自动重试最多 min(模型数, 3) 次
+        │   输入: ChatCompletionRequest
+        │   输出: ChatCompletionResponse（非流式）或 AsyncIterable[str]（流式 SSE）
+        │   异常: RuntimeError — 所有模型调用失败
+        ├── _call_model_api(model, request) -> Response | AsyncIterable
+        │   调用单个模型的上游 API（核心 HTTP 调用逻辑）
+        └── _handle_streaming_response(response, model, start_time) -> AsyncIterable
+            流式 SSE 响应处理生成器（缓冲区拼接、[DONE] 检测、错误恢复）
+
+    模型选择:
+        ├── resolve_model_id(name_or_id) -> str | None
+        │   将用户请求的模型名称解析为内部 ID
+        └── get_available_model(requested_model_name, exclude) -> ModelConfig | None
+            综合调度器 + 限流器选择可用模型
+
+    辅助方法:
+        ├── _extract_peer_ip(resp, model) -> str | None    提取对端 IP
+        ├── _log_upstream_response(model, status, ip)      记录上游响应日志
+        ├── _extract_content_from_event_stream(text) -> str 从意外 SSE 文本提取内容
+        ├── get_uptime() -> float                          获取服务运行时间
+        ├── get_health_status() -> dict                    获取健康状态
+        └── get_models_info() -> dict                      获取模型统计信息
+
+    关键变量:
+        - config: 加载的 YAML 配置字典
+        - models: ModelConfig 列表
+        - model_name_to_id: 名称/别名 → 内部 ID 映射字典
+        - dispatcher: ModelDispatcher 调度器实例
+        - rate_limiter: ModelRateLimiter 限流器实例
+        - session_pool: SessionPool HTTP 连接池实例
+
 依赖模块:
-    - ModelDispatcher: 模型调度和故障退避
-    - ModelRateLimiter: 令牌桶限流
-    - SessionPool: HTTP 连接复用
-    - RoundRobinResolver: IP 池轮询
+    - dispatcher.ModelDispatcher: 模型调度和故障退避
+    - dispatcher.ModelConfig: 模型配置封装
+    - limiter.ModelRateLimiter: 令牌桶限流
+    - session.SessionPool: HTTP 连接复用
+    - resolver.RoundRobinResolver: IP 池轮询解析
+    - schemas: 请求/响应 Pydantic 模型
+    - models.errors.ErrorType: 错误类型枚举
 """
 
 import asyncio
@@ -119,7 +168,18 @@ class FluxApiService:
         logging.info("FluxApiService 初始化完成")
 
     def _load_config(self) -> None:
-        """加载配置文件"""
+        """
+        加载配置文件并初始化全局设置
+
+        操作:
+        1. 读取并解析 YAML 配置文件
+        2. 初始化日志系统（级别从 global.log.level 读取）
+        3. 提取通道配置 (self.channels)
+        4. 提取网关连接池参数 (max_connections, max_connections_per_host)
+
+        Raises:
+            ValueError: YAML 格式错误或配置根节点不是字典
+        """
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self.config = yaml.safe_load(f)
@@ -161,7 +221,19 @@ class FluxApiService:
         )
 
     def _init_models(self) -> None:
-        """初始化模型配置"""
+        """
+        初始化模型配置并创建名称映射
+
+        操作:
+        1. 遍历配置中的模型列表，为每个创建 ModelConfig 对象
+        2. 创建 model_name_to_id 映射字典（ID → ID, model → ID, name → ID）
+        3. 验证至少有一个有效权重的模型
+
+        映射优先级: name > model > id（后注册的覆盖先注册的）
+
+        Raises:
+            ValueError: 未定义模型或所有模型加载失败
+        """
         models_cfg = self.config.get("models", [])
 
         if not models_cfg:
@@ -208,16 +280,23 @@ class FluxApiService:
             logging.warning("所有模型的权重都为 0 或负数，随机选择将无法工作")
 
     def _init_dispatcher(self) -> None:
-        """初始化模型调度器"""
+        """初始化模型调度器（ModelDispatcher 管理加权选择和退避）"""
         self.dispatcher = ModelDispatcher(self.models)
 
     def _init_rate_limiter(self) -> None:
-        """初始化限流器"""
+        """初始化令牌桶限流器（每个模型独立的 TokenBucket，容量 = safe_rps × 2）"""
         self.rate_limiter = ModelRateLimiter()
         self.rate_limiter.configure([m.to_dict() for m in self.models])
 
     async def startup(self) -> None:
-        """启动服务 (异步初始化)"""
+        """
+        启动服务（异步初始化）
+
+        操作:
+        1. 从通道配置构建 IP 池映射
+        2. 若有 IP 池，创建 RoundRobinResolver
+        3. 创建 SessionPool（HTTP 连接池）
+        """
         # 构建 IP 池并创建自定义解析器
         ip_pools = build_ip_pools_from_channels(self.channels)
         resolver = RoundRobinResolver(ip_pools) if ip_pools else None
@@ -233,7 +312,7 @@ class FluxApiService:
         logging.info("FluxApiService 启动完成")
 
     async def shutdown(self) -> None:
-        """关闭服务"""
+        """关闭服务，释放 SessionPool 的所有连接和 DNS 解析器资源"""
         if self.session_pool:
             await self.session_pool.close_all()
         logging.info("FluxApiService 已关闭")
@@ -578,7 +657,19 @@ class FluxApiService:
     def _extract_peer_ip(
         self, resp: aiohttp.ClientResponse, model: ModelConfig
     ) -> str | None:
-        """从响应中提取对端 IP 地址"""
+        """
+        从响应中提取对端 IP 地址（用于日志记录）
+
+        通过 transport 的 peername 获取实际连接的服务器 IP，
+        代理模式下返回 None（无法获取真实 IP）。
+
+        Args:
+            resp: aiohttp 响应对象
+            model: 模型配置（用于检查是否使用代理）
+
+        Returns:
+            str | None: 对端 IP 地址，代理模式或获取失败返回 None
+        """
         if model.proxy:
             return None
         try:
@@ -593,7 +684,14 @@ class FluxApiService:
     def _log_upstream_response(
         self, model: ModelConfig, status: int, peer_ip: str | None
     ) -> None:
-        """记录上游响应日志"""
+        """
+        记录上游 API 响应日志
+
+        Args:
+            model: 模型配置
+            status: HTTP 状态码
+            peer_ip: 对端 IP 地址（可选，代理模式下为 None）
+        """
         if peer_ip:
             logging.info(
                 "上游响应 model=%s status=%s url=%s ip=%s",
@@ -874,11 +972,25 @@ class FluxApiService:
         return "".join(full_content)
 
     def get_uptime(self) -> float:
-        """获取服务运行时间"""
+        """
+        获取服务运行时间
+
+        Returns:
+            float: 自服务启动以来经过的秒数
+        """
         return time.time() - self.start_time
 
     def get_health_status(self) -> dict[str, Any]:
-        """获取健康状态"""
+        """
+        获取服务健康状态
+
+        Returns:
+            dict: 包含以下字段:
+                - status: "healthy" | "degraded" | "unhealthy"
+                - available_models: 可用模型数
+                - total_models: 模型总数
+                - uptime: 运行时间（秒）
+        """
         available = len(self.dispatcher.get_available_models())
         total = len(self.models)
 
@@ -897,7 +1009,15 @@ class FluxApiService:
         }
 
     def get_models_info(self) -> dict[str, Any]:
-        """获取模型信息"""
+        """
+        获取所有模型的详细信息（用于 /admin/models 接口）
+
+        Returns:
+            dict: 包含以下字段:
+                - models: 模型统计列表（来自 dispatcher.get_all_model_stats）
+                - total: 模型总数
+                - available: 当前可用模型数
+        """
         stats = self.dispatcher.get_all_model_stats()
         available = sum(1 for s in stats if s["available"])
 

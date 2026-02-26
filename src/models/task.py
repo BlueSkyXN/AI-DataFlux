@@ -31,6 +31,26 @@
     - 任务完成或失败后移除 TaskMetadata
     - 重试时保留 TaskMetadata，从数据源重新加载业务数据
 
+类清单:
+    ErrorRecord
+        单次错误记录数据类
+        属性: timestamp (float), error_type (ErrorType), message (str)
+
+    TaskMetadata
+        任务元数据数据类，管理任务内部状态和重试信息
+        属性: record_id, created_at, last_retry_at, retry_counts, error_history
+        关键常量: _MAX_ERROR_HISTORY = 5 (最大保留错误历史条数)
+
+        方法:
+            increment_retry(error_type) -> int     递增重试计数并返回新值
+            get_retry_count(error_type) -> int     获取指定类型重试次数
+            add_error(error_type, message) -> None 添加错误记录（自动截断）
+            total_retries -> int                   所有类型总重试次数 (属性)
+            has_errors -> bool                     是否有错误记录 (属性)
+            last_error -> ErrorRecord | None       最近一次错误 (属性)
+            reset_retry_count(error_type) -> None  重置指定类型计数
+            reset_all() -> None                    重置所有状态
+
 使用示例:
     metadata = TaskMetadata(record_id=123)
 
@@ -42,6 +62,11 @@
     print(metadata.get_retry_count(ErrorType.API))  # 1
     print(metadata.has_errors)  # True
     print(metadata.last_error.message)  # "连接超时"
+
+模块依赖:
+    - dataclasses: 数据类装饰器
+    - time: 时间戳生成
+    - .errors.ErrorType: 错误类型枚举
 """
 
 from dataclasses import dataclass, field

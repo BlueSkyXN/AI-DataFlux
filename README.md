@@ -4,7 +4,7 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 
 ## 核心特性
 
-- **全能数据源支持**：完整支持 **Excel (xlsx/xls)**、**CSV**、**MySQL**、**PostgreSQL** 和 **SQLite**。
+- **全能数据源支持**：完整支持 **Excel (xlsx/xls)**、**CSV**、**MySQL**、**PostgreSQL**、**SQLite**、**Feishu Bitable** 和 **Feishu Sheet**。
 - **可插拔数据引擎**：支持 Pandas 和 Polars 双引擎，可通过配置切换。
 - **高性能读写器**：支持 Calamine (10x 读取) 和 xlsxwriter (3x 写入) 加速。
 - **自动引擎选择**：`engine: auto` 自动选择最快的可用引擎和读写器。
@@ -254,7 +254,7 @@ gateway:
 
 ```yaml
 datasource:
-  type: excel    # 数据源类型: mysql, postgresql, sqlite, excel, csv
+  type: excel    # 数据源类型: mysql, postgresql, sqlite, excel, csv, feishu_bitable, feishu_sheet
 
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
@@ -325,6 +325,17 @@ excel:
 csv:
   input_path: "./data/input.csv"
   output_path: "./data/output.csv"
+
+# 飞书数据源配置（type=feishu_bitable 或 feishu_sheet）
+feishu:
+  app_id: "cli_xxxxxxxxxxxxx"
+  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxx"
+  app_token: "bascxxxxxxxxxxxxx"          # 多维表格使用
+  table_id: "tblxxxxxxxxxxxxx"            # 多维表格使用
+  spreadsheet_token: "shtcnxxxxxxxxxxxxx" # 电子表格使用
+  sheet_id: "0"                           # 电子表格使用
+  max_retries: 3
+  qps_limit: 5
 ```
 
 ### 字段配置

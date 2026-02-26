@@ -1,8 +1,37 @@
+/**
+ * 国际化 (i18n) 模块 — AI-DataFlux 控制面板多语言支持
+ *
+ * 功能职责：
+ * - 定义 Translations 接口，涵盖控制面板所有 UI 文本键
+ * - 提供英文 (en) 和中文 (zh) 两套完整翻译
+ * - 自动检测浏览器语言偏好，并支持 localStorage 持久化
+ * - 提供模板字符串插值函数
+ *
+ * 导出清单：
+ * - Language (type) — 语言类型 'en' | 'zh'
+ * - Translations (interface) — 翻译文本接口
+ * - getInitialLanguage() — 获取初始语言（优先 localStorage → 浏览器偏好）
+ * - saveLanguagePreference() — 保存语言偏好到 localStorage
+ * - getTranslations() — 根据语言获取翻译对象
+ * - interpolate() — 字符串模板变量插值（如 '{target}' → '网关'）
+ *
+ * 依赖模块：无（纯工具模块）
+ */
+
 // i18n - Internationalization support for AI-DataFlux Control Panel
 // Supports English and Chinese languages
 
+/** 支持的语言类型 */
 export type Language = 'en' | 'zh';
 
+/**
+ * 翻译文本接口
+ *
+ * 按功能区域组织所有 UI 可翻译文本键，包括：
+ * Header、Tabs、Dashboard、Config Editor、Config Sidebar Sections、
+ * Global/Datasource/Concurrency/Columns/Validation/Models/Channels/Prompt/Routing 配置区、
+ * Logs、Footer、Errors、New features 等。
+ */
 export interface Translations {
   // Header
   controlPanel: string;
@@ -103,6 +132,20 @@ export interface Translations {
   cfgTableName: string;
   cfgPoolSize: string;
   cfgDbPath: string;
+  cfgFeishuBitable: string;
+  cfgFeishuSheet: string;
+  cfgFeishuDesc: string;
+  cfgFeishuAppId: string;
+  cfgFeishuAppSecret: string;
+  cfgFeishuAppToken: string;
+  cfgFeishuTableId: string;
+  cfgFeishuSpreadsheetToken: string;
+  cfgFeishuSheetId: string;
+  cfgFeishuMaxRetries: string;
+  cfgFeishuQpsLimit: string;
+  cfgFeishuQpsLimitDesc: string;
+  cfgFeishuTestConnection: string;
+  cfgFeishuCredentialRequired: string;
 
   // Concurrency Section
   cfgBasicConcurrency: string;
@@ -231,6 +274,7 @@ export interface Translations {
   controllerDisconnected: string;
 }
 
+/** 英文翻译 */
 const en: Translations = {
   // Header
   controlPanel: 'Control Panel',
@@ -331,6 +375,20 @@ const en: Translations = {
   cfgTableName: 'Table Name',
   cfgPoolSize: 'Pool Size',
   cfgDbPath: 'DB Path',
+  cfgFeishuBitable: 'Feishu Bitable',
+  cfgFeishuSheet: 'Feishu Sheet',
+  cfgFeishuDesc: 'Feishu (Lark) cloud spreadsheet. Requires app_id and app_secret from Feishu Open Platform.',
+  cfgFeishuAppId: 'App ID',
+  cfgFeishuAppSecret: 'App Secret',
+  cfgFeishuAppToken: 'App Token',
+  cfgFeishuTableId: 'Table ID',
+  cfgFeishuSpreadsheetToken: 'Spreadsheet Token',
+  cfgFeishuSheetId: 'Sheet ID',
+  cfgFeishuMaxRetries: 'Max Retries',
+  cfgFeishuQpsLimit: 'QPS Limit',
+  cfgFeishuQpsLimitDesc: '0 = unlimited',
+  cfgFeishuTestConnection: 'Test Connection',
+  cfgFeishuCredentialRequired: 'App ID and App Secret are required',
 
   // Concurrency Section
   cfgBasicConcurrency: 'Basic Concurrency',
@@ -459,6 +517,7 @@ const en: Translations = {
   controllerDisconnected: 'Disconnected',
 };
 
+/** 中文翻译 */
 const zh: Translations = {
   // Header
   controlPanel: '控制面板',
@@ -559,6 +618,20 @@ const zh: Translations = {
   cfgTableName: '表名',
   cfgPoolSize: '连接池大小',
   cfgDbPath: '数据库路径',
+  cfgFeishuBitable: '飞书多维表格',
+  cfgFeishuSheet: '飞书电子表格',
+  cfgFeishuDesc: '飞书云端表格数据源，需要在飞书开放平台创建自建应用获取 App ID 和 App Secret。',
+  cfgFeishuAppId: '应用 ID',
+  cfgFeishuAppSecret: '应用密钥',
+  cfgFeishuAppToken: '多维表格 Token',
+  cfgFeishuTableId: '数据表 ID',
+  cfgFeishuSpreadsheetToken: '电子表格 Token',
+  cfgFeishuSheetId: '工作表 ID',
+  cfgFeishuMaxRetries: '最大重试次数',
+  cfgFeishuQpsLimit: 'QPS 限制',
+  cfgFeishuQpsLimitDesc: '0 = 不限制',
+  cfgFeishuTestConnection: '测试连接',
+  cfgFeishuCredentialRequired: '请先填写 App ID 和 App Secret',
 
   // Concurrency Section
   cfgBasicConcurrency: '基本并发',
@@ -687,11 +760,16 @@ const zh: Translations = {
   controllerDisconnected: '未连接',
 };
 
+/** 语言 → 翻译对象映射表 */
 const translations: Record<Language, Translations> = {
   en,
   zh,
 };
 
+/**
+ * 检测浏览器语言偏好
+ * @returns 浏览器语言为中文时返回 'zh'，否则返回 'en'
+ */
 // Get browser language preference
 function getBrowserLanguage(): Language {
   const lang = navigator.language.toLowerCase();
@@ -701,6 +779,11 @@ function getBrowserLanguage(): Language {
   return 'en';
 }
 
+/**
+ * 获取初始语言
+ * 优先使用 localStorage 中存储的偏好，否则回退到浏览器语言检测。
+ * @returns 初始语言设置
+ */
 // Get stored language preference or browser default
 export function getInitialLanguage(): Language {
   const stored = localStorage.getItem('language') as Language | null;
@@ -710,16 +793,35 @@ export function getInitialLanguage(): Language {
   return getBrowserLanguage();
 }
 
+/**
+ * 保存语言偏好到 localStorage
+ * @param lang - 要保存的语言设置
+ */
 // Save language preference
 export function saveLanguagePreference(lang: Language): void {
   localStorage.setItem('language', lang);
 }
 
+/**
+ * 获取指定语言的翻译对象
+ * @param lang - 目标语言
+ * @returns 对应语言的完整翻译文本
+ */
 // Get translations for a language
 export function getTranslations(lang: Language): Translations {
   return translations[lang];
 }
 
+/**
+ * 字符串模板变量插值
+ *
+ * 将翻译文本中的 {key} 占位符替换为实际值。
+ * 例如：interpolate('停止{target}？', { target: '网关' }) → '停止网关？'
+ *
+ * @param text - 包含 {key} 占位符的模板字符串
+ * @param vars - 变量键值对
+ * @returns 插值后的字符串
+ */
 // Interpolate variables in translation strings
 export function interpolate(text: string, vars: Record<string, string>): string {
   return text.replace(/\{(\w+)\}/g, (match, key) => vars[key] || match);

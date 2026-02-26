@@ -14,6 +14,79 @@
     - stop: 停止子进程 (杀进程树)
     - 状态查询
     - 日志流采集
+
+数据类:
+    ManagedProcess
+        被管理的进程信息数据类，记录进程名称、状态、PID、启动时间等
+        属性: name, status, pid, start_time, exit_code, command, config_path, port
+        方法: to_dict() -> dict
+
+函数清单:
+    kill_tree(pid) -> None
+        杀掉进程及其所有子进程（优先使用 psutil 进程树清理）
+        输入: pid (int) - 进程 ID
+        设计: 先 SIGTERM 等待 3 秒，仍存活则 SIGKILL
+
+类: ProcessManager
+    管理 Gateway 和 Process 两个子进程的完整生命周期
+
+    公开方法:
+        start_gateway(config_path, port, workers) -> dict
+            启动 Gateway 子进程，幂等设计（已运行则直接返回）
+        stop_gateway() -> dict
+            停止 Gateway 子进程
+        start_process(config_path) -> dict
+            启动 Process 子进程，自动传递 --progress-file 参数
+        stop_process() -> dict
+            停止 Process 子进程
+        get_status(name) -> dict
+            获取指定进程状态
+        get_all_status() -> dict
+            获取所有进程状态（同步版本，含 Gateway 健康检查和 Process 进度）
+        get_all_status_async() -> dict
+            获取所有进程状态（异步版本，避免阻塞 event loop）
+        add_log_callback(name, callback) -> None
+            注册日志行回调（用于 WebSocket 推送）
+        remove_log_callback(name, callback) -> None
+            移除日志行回调
+        get_log_buffer(name) -> List[str]
+            获取日志环形缓冲区内容
+        shutdown() -> None
+            关闭所有托管进程
+
+    内部方法:
+        _build_subprocess_cmd(subcommand, args) -> list[str]
+            构建子进程启动命令（区分源码 / 打包环境）
+        _check_process_status(name) -> None
+            轮询进程退出状态并更新 ManagedProcess
+        _stop_process(name) -> dict
+            停止指定进程的通用实现
+        _probe_gateway_health_sync(timeout) -> Optional[dict]
+            同步探测 Gateway /admin/health 端点
+        _gateway_health_cache_ttl_seconds() -> float
+            根据上次探测结果返回缓存 TTL
+        _get_gateway_health_cached() -> Optional[dict]
+            异步获取 Gateway 健康状态（带缓存）
+        _read_process_progress() -> Optional[dict]
+            读取 Process 进度文件（.dataflux_progress.json）
+        _start_log_reader(name, proc) -> None
+            启动异步日志读取任务，逐行读取 stdout 并分发回调
+
+    get_process_manager() -> ProcessManager
+        获取全局单例 ProcessManager 实例
+
+关键变量:
+    PROJECT_ROOT: str - 项目根目录
+    PROGRESS_FILE: str - 进度文件名 (.dataflux_progress.json)
+    PROGRESS_TIMEOUT_SECONDS: int - 进度文件超时阈值 (15 秒)
+    LOG_BUFFER_SIZE: int - 日志环形缓冲区容量 (1000 行)
+    PSUTIL_AVAILABLE: bool - psutil 库是否可用
+    _manager: Optional[ProcessManager] - 全局单例实例
+
+模块依赖:
+    - asyncio, subprocess, os, sys, time: 进程与异步管理
+    - psutil (可选): 进程树清理
+    - .runtime: 项目根目录与打包环境检测
 """
 
 import asyncio
@@ -51,7 +124,22 @@ LOG_BUFFER_SIZE = 1000
 
 @dataclass
 class ManagedProcess:
-    """被管理的进程信息"""
+    """
+    被管理的进程信息
+
+    记录单个子进程 (Gateway 或 Process) 的运行状态和元数据。
+    由 ProcessManager 创建和维护。
+
+    Attributes:
+        name: 进程名称 ("gateway" | "process")
+        status: 当前状态 ("stopped" | "running" | "exited")
+        pid: 系统进程 ID (停止时为 None)
+        start_time: 启动时间戳 (Unix 时间)
+        exit_code: 退出码 (仅 exited 状态有值)
+        command: 启动命令列表
+        config_path: 使用的配置文件路径
+        port: 监听端口 (仅 Gateway 使用)
+    """
 
     name: str  # "gateway" | "process"
     status: str = "stopped"  # "stopped" | "running" | "exited"
@@ -63,7 +151,7 @@ class ManagedProcess:
     port: Optional[int] = None  # 仅 Gateway
 
     def to_dict(self) -> dict:
-        """转换为字典"""
+        """转换为可序列化的字典（用于 API 响应）"""
         return {
             "status": self.status,
             "pid": self.pid,
@@ -125,33 +213,47 @@ class ProcessManager:
     """
 
     def __init__(self):
+        """
+        初始化进程管理器
+
+        创建 gateway 和 process 两个子进程的管理结构，包括：
+        - 进程状态对象 (ManagedProcess)
+        - Popen 句柄引用
+        - 日志回调列表和环形缓冲区
+        - Gateway 健康检查缓存
+        """
+        # 进程状态对象：记录每个子进程的运行元数据
         self.processes: Dict[str, ManagedProcess] = {
             "gateway": ManagedProcess(name="gateway"),
             "process": ManagedProcess(name="process"),
         }
+        # Popen 句柄：持有子进程引用，用于轮询退出状态和关闭 stdout
         self._popen: Dict[str, Optional[subprocess.Popen]] = {
             "gateway": None,
             "process": None,
         }
+        # 日志回调列表：每当读取到新日志行时通知所有注册的回调
         self._log_callbacks: Dict[str, List[Callable[[str, str], None]]] = {
             "gateway": [],
             "process": [],
         }
-        # 日志环形缓冲区
+        # 日志环形缓冲区：保留最近 N 行日志，供新连接的 WebSocket 客户端回放历史
         self._log_buffer: Dict[str, List[str]] = {
             "gateway": [],
             "process": [],
         }
         self._log_buffer_size = LOG_BUFFER_SIZE
+        # 异步日志读取任务：每个进程一个，持续从 stdout 读取日志行
         self._read_tasks: Dict[str, Optional[asyncio.Task]] = {
             "gateway": None,
             "process": None,
         }
+        # Gateway 健康检查缓存：避免频繁 HTTP 探测
         self._gateway_health_cache: Optional[dict] = None
         self._gateway_health_cache_time: float = 0.0
-        self._gateway_health_cache_ttl_ok_seconds: float = 2.0
-        self._gateway_health_cache_ttl_fail_seconds: float = 5.0
-        self._gateway_health_probe_timeout_seconds: float = 0.8
+        self._gateway_health_cache_ttl_ok_seconds: float = 2.0  # 探测成功时缓存 2 秒
+        self._gateway_health_cache_ttl_fail_seconds: float = 5.0  # 探测失败时缓存 5 秒
+        self._gateway_health_probe_timeout_seconds: float = 0.8  # 单次探测超时
 
     def _build_subprocess_cmd(self, subcommand: str, args: list[str]) -> list[str]:
         """
@@ -489,12 +591,30 @@ class ProcessManager:
             return None
 
     def _gateway_health_cache_ttl_seconds(self) -> float:
+        """
+        根据上次探测结果返回缓存 TTL
+
+        设计意图：探测失败时使用更长的 TTL，减少对不可用服务的无效探测。
+
+        Returns:
+            float: 缓存有效期 (秒)
+        """
         if self._gateway_health_cache is None:
             return self._gateway_health_cache_ttl_fail_seconds
         return self._gateway_health_cache_ttl_ok_seconds
 
     async def _get_gateway_health_cached(self) -> Optional[dict]:
+        """
+        异步获取 Gateway 健康状态（带缓存）
+
+        缓存未过期时直接返回缓存结果，否则通过 asyncio.to_thread
+        在线程池中执行同步探测，避免阻塞 event loop。
+
+        Returns:
+            dict | None: 健康状态数据，或 None (不可达)
+        """
         now = time.time()
+        # 缓存未过期，直接返回
         if (
             self._gateway_health_cache_time
             and (now - self._gateway_health_cache_time)
@@ -502,6 +622,7 @@ class ProcessManager:
         ):
             return self._gateway_health_cache
 
+        # 在线程池中执行同步 HTTP 探测，避免阻塞异步事件循环
         health = await asyncio.to_thread(
             self._probe_gateway_health_sync, self._gateway_health_probe_timeout_seconds
         )

@@ -1,3 +1,23 @@
+# =============================================================================
+# AI-DataFlux 示例配置文件
+#
+# 使用方式: cp config-example.yaml config.yaml  然后根据实际需求修改
+#
+# 配置结构:
+#   global          — 全局设置（日志、API 端点）
+#   gateway         — API 网关连接限制
+#   datasource      — 数据源类型及并发/引擎/重试配置
+#   mysql/excel/postgresql/sqlite/csv/feishu — 各数据源的连接参数
+#   columns_to_extract — 从数据源提取的输入字段列表
+#   columns_to_write   — AI 输出字段到数据源列名的映射
+#   validation      — 字段值枚举验证规则
+#   models          — AI 模型列表（含 API Key、权重、限流等）
+#   channels        — 模型通道（上游 API 地址、代理、SSL、IP 池）
+#   prompt          — 提示词模板及 JSON Schema 配置
+#   token_estimation — Token 估算模式（可选）
+#   routing         — 规则路由（可选，按字段值动态选择子配置）
+# =============================================================================
+
 # 全局配置
 global:
   log:
@@ -14,7 +34,7 @@ gateway:
 
 # 数据源类型配置
 datasource:
-  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite
+  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite, feishu_bitable, feishu_sheet
   
   # === 高性能引擎配置 ===
   # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
@@ -80,6 +100,24 @@ sqlite:
 csv:
   input_path: "./data/input.csv"
   output_path: "./data/output.csv"  # 可选，默认为 input_path
+
+# 飞书数据源配置（当type=feishu_bitable或feishu_sheet时有效）
+# 需要在飞书开放平台创建自建应用并获取 app_id 和 app_secret
+# 应用需要开通以下权限：
+#   - 多维表格: bitable:app:readonly, bitable:app
+#   - 电子表格: sheets:spreadsheet:readonly, sheets:spreadsheet
+feishu:
+  app_id: "cli_xxxxxxxxxxxxx"           # 飞书自建应用 App ID
+  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxx" # 飞书自建应用 App Secret
+  # === 多维表格专用（type=feishu_bitable）===
+  app_token: "bascxxxxxxxxxxxxx"         # 多维表格 App Token（URL 中获取）
+  table_id: "tblxxxxxxxxxxxxx"           # 数据表 ID
+  # === 电子表格专用（type=feishu_sheet）===
+  spreadsheet_token: "shtcnxxxxxxxxxxxxx"  # 电子表格 Token（URL 中获取）
+  sheet_id: "0"                          # 工作表 ID 或名称
+  # === 通用配置 ===
+  max_retries: 3                         # API 最大重试次数
+  qps_limit: 5                           # 每秒最大请求数（0=不限制）
 
 # 需要从表中提取的字段
 columns_to_extract:

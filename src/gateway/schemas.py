@@ -25,6 +25,43 @@ OpenAI 兼容性:
     这些模型遵循 OpenAI Chat Completions API 的规范，
     确保与 OpenAI SDK 和其他兼容工具的互操作性。
 
+类清单:
+
+    请求模型:
+        - ChatMessage(role, content, name?)
+            单条聊天消息，角色 + 内容
+
+        - ResponseFormat(type="text")
+            响应格式定义，支持 "text" / "json_object"
+
+        - ChatCompletionRequest(model, messages, temperature?, stream?, ...)
+            聊天补全请求体（OpenAI 兼容）
+            关键字段: model — 模型名称; messages — 消息列表; stream — 是否流式
+            验证器: convert_stop_to_list — 将 stop 字符串统一转为列表
+
+    响应模型:
+        - ChatCompletionResponseChoice(index, message, finish_reason?)
+            单个回复选项
+
+        - ChatCompletionResponseUsage(prompt_tokens?, completion_tokens?, total_tokens?)
+            Token 使用统计
+
+        - ChatCompletionResponse(id, created, model, choices, usage?)
+            完整聊天补全响应体（非流式）
+
+    管理接口模型:
+        - ModelInfo(id, name?, model, weight, success_rate, avg_response_time, available, channel?)
+            单个模型的配置和运行时状态
+
+        - ModelsResponse(models, total, available)
+            /admin/models 响应体
+
+        - HealthResponse(status, available_models, total_models, uptime)
+            /admin/health 响应体，status ∈ {"healthy", "degraded", "unhealthy"}
+
+依赖模块:
+    - pydantic: 数据验证和序列化框架
+
 使用示例:
     # 解析请求
     request = ChatCompletionRequest(**request_data)

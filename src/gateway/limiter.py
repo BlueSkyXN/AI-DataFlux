@@ -29,6 +29,33 @@
     - 每秒补充 5 个令牌
     - 短时间可处理 10 个请求，持续速率 5 QPS
 
+类与函数清单:
+
+    RWLock:
+        读写锁（多读单写）
+        ├── read_acquire() / read_release()     获取/释放读锁
+        ├── write_acquire() / write_release()   获取/释放写锁
+        ├── read_lock() -> ReadLock             返回读锁上下文管理器
+        └── write_lock() -> WriteLock           返回写锁上下文管理器
+        关键变量: _readers — 读者计数; _writers — 写者计数; _pending_writers — 等待写者计数
+
+    TokenBucket:
+        令牌桶限流器
+        ├── __init__(capacity, refill_rate)     初始化桶容量和补充速率
+        ├── consume(tokens=1.0) -> bool         消耗令牌（线程安全）
+        ├── get_tokens() -> float               获取当前令牌数
+        └── refill()                            根据时间补充令牌（内部调用）
+        关键变量: tokens — 当前令牌数; last_refill — 上次补充时间戳
+
+    ModelRateLimiter:
+        模型级限流管理器
+        ├── configure(models_config: list[dict]) -> None
+        │   从模型配置创建令牌桶，capacity = safe_rps * 2
+        ├── can_process(model_id) -> bool       预检查（不消耗令牌）
+        ├── acquire(model_id) -> bool           获取许可（消耗令牌）
+        └── get_status(model_id) -> dict | None 获取限流器状态
+        关键变量: limiters — model_id 到 TokenBucket 的映射
+
 使用示例:
     # 读写锁
     rwlock = RWLock()

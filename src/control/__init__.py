@@ -26,8 +26,14 @@ AI-DataFlux Control Server
        │ Process      │
        └──────────────┘
 
+公开 API (__all__):
+    run_control_server - 控制面板服务器启动入口
+
 使用方式:
     python cli.py gui  # 启动控制面板，自动打开浏览器
+
+模块依赖:
+    - .server: 控制面板服务器实现
 """
 
 from .server import run_control_server

@@ -34,6 +34,15 @@ AI-DataFlux 数据处理引擎主入口模块
     - src.core.UniversalAIProcessor: 核心处理器
     - src.config.load_config: 配置加载器（仅验证模式）
 
+函数清单:
+    main() -> int
+        数据处理引擎主入口函数
+        输入: 无 (通过 sys.argv 获取命令行参数)
+        输出: 退出码 (0=成功, 1=失败)
+        关键参数:
+            --config / -c: 配置文件路径 (默认: config.yaml)
+            --validate: 仅验证配置文件有效性
+
 作者: AI-DataFlux Team
 版本: 参见 src/__init__.py
 """

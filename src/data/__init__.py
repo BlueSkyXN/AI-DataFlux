@@ -10,6 +10,8 @@
     - SQLite: 本地轻量级数据库，适合开发测试
     - Excel: Excel 电子表格文件（.xlsx、.xls）
     - CSV: 逗号分隔值文件
+    - Feishu Bitable: 飞书多维表格
+    - Feishu Sheet: 飞书电子表格
 
 模块架构:
     ┌──────────────────────────────────────────────────┐
@@ -49,16 +51,25 @@
 
     pool.close()
 
+导出清单:
+    - BaseTaskPool: 数据源任务池抽象基类（来自 base.py）
+    - create_task_pool(config, columns_to_extract, columns_to_write) -> BaseTaskPool:
+        工厂函数，根据配置创建具体任务池实例（来自 factory.py）
+    - MYSQL_AVAILABLE (bool): MySQL 连接器是否可用
+    - EXCEL_ENABLED (bool): Excel 依赖（pandas + openpyxl）是否可用
+    - FEISHU_AVAILABLE (bool): 飞书依赖（aiohttp）是否可用
+
 依赖模块:
     - engines: DataFrame 引擎抽象（Pandas/Polars）
 """
 
 from .base import BaseTaskPool
-from .factory import create_task_pool, MYSQL_AVAILABLE, EXCEL_ENABLED
+from .factory import create_task_pool, EXCEL_ENABLED, FEISHU_AVAILABLE, MYSQL_AVAILABLE
 
 __all__ = [
     "BaseTaskPool",
     "create_task_pool",
     "MYSQL_AVAILABLE",
     "EXCEL_ENABLED",
+    "FEISHU_AVAILABLE",
 ]

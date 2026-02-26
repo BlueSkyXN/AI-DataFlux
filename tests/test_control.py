@@ -1,13 +1,44 @@
 """
 Control Server 测试
 
+被测模块: src/control/config_api.py, src/control/server.py, src/control/process_manager.py
+
 测试 Web GUI 控制面板的核心功能：
 - 配置文件 API (读取/写入)
 - 进程管理 (状态查询)
 - 路径安全验证
+
+测试类/函数清单:
+    TestConfigAPI                              配置文件 API 测试
+        test_validate_path_inside_project      验证项目内路径通过校验
+        test_validate_path_traversal_blocked   验证路径穿越（../）被阻止并返回 403
+        test_read_config_existing_file         验证读取存在的配置文件返回内容
+        test_read_config_missing_file          验证读取不存在的文件返回 404
+        test_read_config_blocks_non_yaml_file  验证读取非 YAML 文件返回 403
+        test_write_config_creates_backup       验证写入前创建 .bak 备份文件
+        test_write_config_blocks_non_yaml_file 验证写入非 YAML 文件返回 403
+    TestControlServerAuth                      控制面板鉴权测试
+        test_extract_bearer_token              验证 Bearer Token 解析
+        test_authorized_token_validation       验证 Token 校验逻辑
+        test_authorized_from_candidates        验证多来源 Token 任一通过即鉴权成功
+        test_mask_token_for_logs               验证 Token 脱敏显示
+        test_create_app_initializes_token      验证应用创建时初始化鉴权 Token
+        test_decode_base64url_token            验证 base64url Token 解码
+        test_extract_ws_token                  验证 WebSocket Token 提取（优先 b64）
+        test_test_feishu_connection_success    验证飞书连接测试成功路径
+        test_test_feishu_connection_api_error  验证飞书连接测试 API 错误路径
+    TestProcessManager                         进程管理器测试
+        test_initial_status                    验证初始状态为 stopped / pid=None
+        test_get_all_status                    验证获取所有进程状态
+        test_log_buffer                        验证日志缓冲区初始为空
+    TestManagedProcess                         ManagedProcess 数据类测试
+        test_to_dict                           验证转换为字典包含完整字段
+        test_default_values                    验证默认值正确
+    TestKillTree                               进程树清理测试
+        test_kill_tree_nonexistent_process     验证清理不存在的进程不抛异常
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import base64
@@ -97,7 +128,7 @@ class TestConfigAPI:
 
 
 class TestControlServerAuth:
-    """控制面鉴权测试"""
+    """控制面板鉴权测试"""
 
     @pytest.fixture
     def auth_app(self, monkeypatch):
@@ -166,6 +197,49 @@ class TestControlServerAuth:
         )
         assert protocol.startswith("dataflux-token-b64.")
         assert token == "unit-test-token"
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_connection_success(self):
+        """测试飞书连接测试成功路径"""
+        from src.control.server import _test_feishu_connection
+
+        with patch("src.data.feishu.client.FeishuClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.ensure_token = AsyncMock(return_value="token_1234567890")
+            mock_client.close = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            result = await _test_feishu_connection("cli_test", "sec_test")
+
+            assert result["success"] is True
+            assert result["message"] == "Connected successfully"
+            assert "token_preview" in result
+            mock_client_cls.assert_called_once_with(
+                app_id="cli_test",
+                app_secret="sec_test",
+                max_retries=0,
+            )
+            mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_connection_api_error(self):
+        """测试飞书连接测试 API 错误路径"""
+        from src.control.server import _test_feishu_connection
+        from src.data.feishu.client import FeishuAPIError
+
+        with patch("src.data.feishu.client.FeishuClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.ensure_token = AsyncMock(
+                side_effect=FeishuAPIError(code=1000, msg="invalid app_secret")
+            )
+            mock_client.close = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            result = await _test_feishu_connection("cli_test", "wrong_secret")
+
+            assert result["success"] is False
+            assert "invalid app_secret" in result["message"]
+            mock_client.close.assert_awaited_once()
 
 
 class TestProcessManager:

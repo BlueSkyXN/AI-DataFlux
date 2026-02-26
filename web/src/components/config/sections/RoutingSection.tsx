@@ -1,3 +1,12 @@
+/**
+ * 路由（子任务分发）配置分区组件
+ *
+ * 用途：配置基于字段值的任务路由功能，可将不同类别的数据
+ *       分发到不同的处理配置文件（profile）
+ *
+ * 导出：RoutingSection（默认导出）
+ *   Props: SectionProps
+ */
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
@@ -5,11 +14,16 @@ import FormField from '../shared/FormField';
 import TextInput from '../shared/TextInput';
 import ToggleSwitch from '../shared/ToggleSwitch';
 
+/** 单条子任务路由规则 */
 interface Subtask {
   match: string;
   profile: string;
 }
 
+/**
+ * 路由配置组件
+ * 启用后显示路由字段和子任务匹配规则列表
+ */
 export default function RoutingSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
@@ -17,6 +31,7 @@ export default function RoutingSection({ updateConfig, getConfig, language }: Se
   const field = (getConfig(['routing', 'field']) as string) ?? '';
   const subtasks = (getConfig(['routing', 'subtasks']) as Subtask[]) ?? [];
 
+  /** 更新指定子任务规则的字段值 */
   const handleSubtaskUpdate = (index: number, key: keyof Subtask, value: string) => {
     const next = [...subtasks];
     next[index] = { ...next[index], [key]: value };
@@ -53,6 +68,7 @@ export default function RoutingSection({ updateConfig, getConfig, language }: Se
             </FormField>
 
             {/* Subtasks */}
+            {/* 子任务规则列表：match（匹配值）→ profile（配置文件路径） */}
             <div className="mt-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">{t.cfgSubtasks}</label>
               <div className="space-y-2">

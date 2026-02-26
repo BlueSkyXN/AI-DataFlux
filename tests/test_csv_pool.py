@@ -1,6 +1,8 @@
 """
 CSV 数据源测试
 
+被测模块: src/data/excel.py (ExcelTaskPool CSV 模式), src/data/factory.py
+
 测试 CSV 文件处理功能，包括：
 - CSV 自动检测 (通过文件扩展名)
 - 编码处理 (UTF-8/GBK)
@@ -9,6 +11,26 @@ CSV 数据源测试
 
 CSV 数据源复用 ExcelTaskPool，通过文件扩展名自动检测。
 本测试验证 CSV 读写功能的正确性。
+
+测试类/函数清单:
+    TestCSVAutoDetection           CSV 自动检测测试
+        test_csv_auto_detection    验证 .csv 文件被正确检测为 CSV 模式
+        test_excel_not_detected_as_csv  验证 .xlsx 文件不被误检测为 CSV
+    TestCSVTaskPool                CSV 任务池功能测试
+        test_get_total_task_count  验证未处理任务计数
+        test_get_processed_task_count  验证已处理任务计数
+        test_get_id_boundaries     验证 ID 边界（从 0 开始的索引）
+        test_initialize_shard      验证分片加载未处理任务
+        test_get_task_batch        验证获取任务批次的数据格式
+        test_update_and_save       验证更新结果并保存到文件
+    TestCSVFactoryIntegration      CSV 工厂方法集成测试
+        test_create_csv_pool_via_factory  验证通过工厂创建 CSV 任务池
+        test_create_csv_pool_missing_path 验证缺少路径时抛出 ValueError
+    TestCSVEncodingHandling        CSV 编码处理测试
+        test_utf8_encoding         验证 UTF-8 多语言文本正确读取
+        test_special_characters    验证逗号、引号、换行等特殊字符处理
+    TestCSVLargeFile               CSV 大文件处理测试
+        test_large_csv_performance 验证 1000 行 CSV 文件正常加载
 """
 
 import pytest

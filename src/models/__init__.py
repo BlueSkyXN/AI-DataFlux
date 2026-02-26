@@ -28,6 +28,9 @@
         └── ContentError (内容错误)
             └── ValidationError (验证错误)
 
+公开 API (__all__):
+    ErrorType, AIDataFluxError, ConfigError, DataSourceError, APIError, TaskMetadata
+
 使用示例:
     from src.models import ErrorType, TaskMetadata, APIError
 
@@ -37,6 +40,10 @@
 
     # 抛出自定义异常
     raise APIError("连接超时", status_code=504)
+
+模块依赖:
+    - .errors: 错误类型枚举与异常类定义
+    - .task: 任务元数据数据类
 """
 
 from .errors import ErrorType, AIDataFluxError, ConfigError, DataSourceError, APIError

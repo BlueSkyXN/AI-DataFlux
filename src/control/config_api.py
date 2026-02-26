@@ -12,6 +12,47 @@
     - 使用 os.path.realpath 解析路径
     - 校验路径必须在项目目录内
     - 原子写入避免部分写入
+
+函数清单:
+    _validate_path(path) -> str
+        路径安全校验，防止路径穿越攻击
+        输入: path (str) - 相对于项目根目录的路径
+        输出: str - 解析后的绝对路径
+        异常: HTTPException(403) - 路径在项目目录外
+
+    _validate_read_target(path, real_path) -> None
+        读取目标类型校验，仅允许 YAML 文件
+        输入: path (str) - 原始路径, real_path (str) - 绝对路径
+        异常: HTTPException(403) - 非 YAML 文件
+
+    _validate_write_target(path, real_path) -> None
+        写入目标类型校验，仅允许 YAML 文件
+        输入: path (str) - 原始路径, real_path (str) - 绝对路径
+        异常: HTTPException(403) - 非 YAML 文件
+
+    read_config(path) -> str
+        读取配置文件内容 (raw text)
+        输入: path (str) - 相对路径
+        输出: str - 文件内容
+        异常: HTTPException(403/404)
+
+    write_config(path, content) -> dict
+        写入配置文件（自动备份 + 原子写入）
+        输入: path (str) - 相对路径, content (str) - 文件内容
+        输出: dict - {"success", "path", "backed_up"}
+        异常: HTTPException(403/500)
+
+    get_project_root() -> str
+        获取项目根目录路径
+
+关键变量:
+    PROJECT_ROOT: str - 项目根目录绝对路径
+    ALLOWED_CONFIG_EXTENSIONS: set - 允许操作的文件扩展名 {".yaml", ".yml"}
+
+模块依赖:
+    - os, shutil: 文件系统操作
+    - fastapi.HTTPException: HTTP 错误响应
+    - .runtime: 项目根目录解析
 """
 
 import os

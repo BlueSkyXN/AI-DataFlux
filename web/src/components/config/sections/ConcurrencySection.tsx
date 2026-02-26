@@ -1,18 +1,34 @@
+/**
+ * 并发与调度配置分区组件
+ *
+ * 用途：配置批处理并发参数，包括批大小、保存间隔、连接数限制、
+ *       分片策略、熔断器参数、各类错误重试次数上限
+ *
+ * 导出：ConcurrencySection（默认导出）
+ *   Props: SectionProps
+ */
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
 import FormField from '../shared/FormField';
 import NumberInput from '../shared/NumberInput';
 
+/**
+ * 并发配置组件
+ * 包含四个卡片区域：基础并发、分片设置、熔断器、重试限制
+ */
 export default function ConcurrencySection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
+  // 读取并发配置的辅助函数
   const get = (key: string) => getConfig(['datasource', 'concurrency', key]) as number | undefined;
+  // 更新并发配置的辅助函数
   const set = (key: string, v: number) => updateConfig(['datasource', 'concurrency', key], v);
 
   return (
     <div className="space-y-4">
       {/* Basic Concurrency */}
+      {/* 基础并发：批大小、保存间隔、最大连接数 */}
       <SectionCard title={t.cfgBasicConcurrency}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField label={t.cfgBatchSize} description={t.cfgBatchSizeDesc}>
@@ -31,6 +47,7 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
       </SectionCard>
 
       {/* Shard Settings */}
+      {/* 分片设置：控制数据分片的大小范围 */}
       <SectionCard title={t.cfgShardSettings}>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <FormField label={t.cfgShardSize}>
@@ -46,6 +63,7 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
       </SectionCard>
 
       {/* Circuit Breaker */}
+      {/* 熔断器：连续 API 错误时的全局暂停策略 */}
       <SectionCard title={t.cfgCircuitBreaker} description={t.cfgCircuitBreakerDesc}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField label={t.cfgApiPauseDuration} description={t.cfgApiPauseDurationDesc}>
@@ -58,6 +76,7 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
       </SectionCard>
 
       {/* Retry Limits */}
+      {/* 重试限制：各类错误的最大重试次数 */}
       <SectionCard title={t.cfgRetryLimits} description={t.cfgRetryLimitsDesc}>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <FormField label={t.cfgApiError}>

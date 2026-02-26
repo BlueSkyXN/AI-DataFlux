@@ -1,11 +1,22 @@
 """
 任务状态管理器单元测试
 
+被测模块: src/core/state/manager.py (TaskStateManager)
+
 测试 src/core/state/manager.py 的 TaskStateManager 类功能，包括：
 - 任务状态追踪 (开始/完成/查询)
 - 元数据管理 (创建/获取/删除)
 - 过期数据清理
 - 并发安全性
+
+测试类/函数清单:
+    TestTaskStateManager               状态管理器测试
+        test_try_start_task            验证首次启动成功、重复启动失败
+        test_complete_task             验证完成后可再次启动
+        test_get_active_count          验证活跃任务计数
+        test_metadata_lifecycle        验证元数据创建/缓存/删除/重建
+        test_cleanup_expired           验证过期元数据清理（超过 24 小时）
+        test_concurrency               验证 100 线程竞争只有 1 个成功启动
 """
 
 import time
@@ -16,6 +27,7 @@ from src.models.task import TaskMetadata
 
 
 class TestTaskStateManager:
+    """任务状态管理器测试"""
 
     @pytest.fixture
     def manager(self):

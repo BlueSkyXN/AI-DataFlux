@@ -1,3 +1,21 @@
+/**
+ * 主应用组件 — AI-DataFlux 控制面板入口
+ *
+ * 功能职责：
+ * - 顶部导航栏（Logo、标签页切换、语言切换、控制器连接状态）
+ * - 配置文件路径和工作目录的显示与编辑
+ * - 根据标签页渲染 Dashboard / ConfigEditor / Logs 子页面
+ * - 定时轮询控制服务器连接状态（5 秒间隔）
+ *
+ * 导出：默认导出 App 组件
+ *
+ * 依赖模块：
+ * - pages/Dashboard — 仪表盘页面
+ * - pages/ConfigEditor — 配置编辑页面
+ * - pages/Logs — 日志监控页面
+ * - i18n — 国际化翻译
+ * - api — 后端 API 调用
+ */
 import { useState, useEffect, useCallback } from 'react';
 import type { TabType } from './types';
 import Dashboard from './pages/Dashboard';
@@ -6,27 +24,48 @@ import Logs from './pages/Logs';
 import { getInitialLanguage, saveLanguagePreference, getTranslations, type Language } from './i18n';
 import { fetchStatus, fetchConfig } from './api';
 
+/**
+ * 主应用组件
+ *
+ * 管理全局状态：当前标签页、配置路径、工作目录、语言偏好、控制器连接状态。
+ * 渲染顶部导航栏 + 主内容区 + 底部页脚。
+ */
 function App() {
+  // --- 全局状态 ---
+  /** 当前激活的标签页 */
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  /** 配置文件相对路径 */
   const [configPath, setConfigPath] = useState('config.yaml');
+  /** 配置文件绝对路径（从服务端获取） */
   const [absoluteConfigPath, setAbsoluteConfigPath] = useState<string>('');
+  /** 当前界面语言 */
   const [language, setLanguage] = useState<Language>(getInitialLanguage());
+  /** 服务器工作目录 */
   const [workingDir, setWorkingDir] = useState<string>('');
+  /** 是否正在编辑配置路径 */
   const [isEditingConfigPath, setIsEditingConfigPath] = useState(false);
+  /** 是否正在编辑工作目录 */
   const [isEditingWorkingDir, setIsEditingWorkingDir] = useState(false);
+  /** 编辑中的临时配置路径 */
   const [tempConfigPath, setTempConfigPath] = useState('');
+  /** 编辑中的临时工作目录 */
   const [tempWorkingDir, setTempWorkingDir] = useState('');
+  /** 控制服务器是否连接 */
   const [controllerConnected, setControllerConnected] = useState<boolean>(false);
+  /** 当前页面主机地址 */
   const host = window.location.host;
 
+  /** 获取当前语言的翻译文本 */
   const t = getTranslations(language);
 
+  /** 导航标签页定义 */
   const tabs: { id: TabType; label: string }[] = [
     { id: 'dashboard', label: t.dashboard },
     { id: 'config', label: t.config },
     { id: 'monitor', label: t.monitor },
   ];
 
+  // 初始化：获取工作目录和配置文件绝对路径，并每 5 秒轮询连接状态
   // Fetch working directory and absolute config path from status
   useEffect(() => {
     const getInitialData = async () => {
@@ -54,39 +93,47 @@ function App() {
     return () => clearInterval(interval);
   }, [configPath]);
 
+  /** 切换语言并持久化偏好到 localStorage */
   const handleLanguageChange = (lang: Language) => {
     setLanguage(lang);
     saveLanguagePreference(lang);
   };
 
+  /** 进入配置路径编辑模式 */
   const handleStartEditConfigPath = () => {
     setTempConfigPath(configPath);
     setIsEditingConfigPath(true);
   };
 
+  /** 确认保存配置路径 */
   const handleSaveConfigPath = () => {
     setConfigPath(tempConfigPath);
     setIsEditingConfigPath(false);
   };
 
+  /** 取消配置路径编辑 */
   const handleCancelEditConfigPath = () => {
     setIsEditingConfigPath(false);
   };
 
+  /** 进入工作目录编辑模式 */
   const handleStartEditWorkingDir = () => {
     setTempWorkingDir(workingDir);
     setIsEditingWorkingDir(true);
   };
 
+  /** 确认保存工作目录 */
   const handleSaveWorkingDir = () => {
     setWorkingDir(tempWorkingDir);
     setIsEditingWorkingDir(false);
   };
 
+  /** 取消工作目录编辑 */
   const handleCancelEditWorkingDir = () => {
     setIsEditingWorkingDir(false);
   };
 
+  /** 弹出文件选择对话框，选择 YAML 配置文件 */
   const handleChooseFile = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -101,6 +148,7 @@ function App() {
     input.click();
   }, []);
 
+  /** 弹出文件夹选择对话框，选择工作目录 */
   const handleChooseFolder = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';

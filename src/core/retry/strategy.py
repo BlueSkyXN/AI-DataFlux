@@ -4,6 +4,38 @@
 本模块实现 AI-DataFlux 的核心重试决策逻辑，根据错误类型和
 任务状态智能决定下一步行动。
 
+类/函数清单:
+    RetryAction (Enum):
+        枚举值: RETRY, FAIL, PAUSE_THEN_RETRY
+
+    RetryDecision (dataclass):
+        - action: RetryAction 决策动作
+        - pause_duration: float 暂停时长 (秒)，仅 PAUSE_THEN_RETRY 有效
+        - reload_data: bool 是否需要重新加载数据源数据
+
+    RetryStrategy:
+        - __init__(max_retries, api_pause_duration=2.0, api_error_trigger_window=2.0)
+          输入: Dict[ErrorType, int] 重试上限, float 暂停时长, float 触发窗口
+        - decide(error_type, metadata) -> RetryDecision
+          核心决策方法，根据错误类型和重试计数返回决策
+          输入: ErrorType 错误类型, TaskMetadata 任务元数据
+          输出: RetryDecision (action + pause_duration + reload_data)
+        - record_pause() -> None
+          更新 last_pause_end_time 为当前时间
+
+关键变量:
+    - max_retries: Dict[ErrorType, int] 各错误类型最大重试次数
+    - api_pause_duration: float 熔断暂停时长 (默认 2.0 秒)
+    - api_error_trigger_window: float 熔断触发窗口 (默认 2.0 秒)
+    - last_pause_end_time: float 上次暂停结束时间戳 (初始 0.0)
+
+模块依赖:
+    - time: 时间戳获取 (熔断窗口计算)
+    - dataclasses: RetryDecision 数据类
+    - enum: RetryAction 枚举
+    - src.models.errors.ErrorType: 错误类型枚举 (API, CONTENT, SYSTEM)
+    - src.models.task.TaskMetadata: 任务元数据 (get_retry_count 获取重试计数)
+
 设计理念:
     不同类型的错误有不同的恢复策略:
     - API 错误: 可能是临时的网络/服务问题，暂停后重试

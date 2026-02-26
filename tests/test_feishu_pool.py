@@ -1,0 +1,761 @@
+"""
+飞书数据源测试
+
+被测模块: src/data/feishu/bitable.py, src/data/feishu/sheet.py, src/data/factory.py
+
+测试飞书多维表格（Bitable）和电子表格（Sheet）TaskPool 的核心功能，
+包括工厂函数注册、配置验证、快照读取、ID 映射、写回等。
+
+由于飞书 API 需要真实的 app_id/app_secret，以下测试通过 Mock 隔离网络调用。
+
+测试类/函数清单:
+    TestFeishuFactoryIntegration                           飞书工厂集成测试
+        test_feishu_available_flag                         验证飞书可用性标志
+        test_create_feishu_bitable_missing_config          验证缺少 Bitable 配置抛 ValueError
+        test_create_feishu_sheet_missing_config             验证缺少 Sheet 配置抛 ValueError
+        test_create_feishu_bitable_accepts_resource_in_feishu_section  验证资源参数兼容 feishu 节
+        test_create_feishu_sheet_accepts_numeric_sheet_id   验证数字 sheet_id 被转为字符串
+        test_unsupported_type_includes_feishu               验证错误消息包含飞书选项
+    TestFeishuClient                                       飞书客户端基础测试
+        test_client_import                                 验证模块导入和异常层级
+        test_client_init                                   验证客户端初始化参数
+        test_client_error_hierarchy                        验证错误类继承关系
+    TestFeishuClientConstants                              客户端常量和辅助函数测试
+        test_batch_limits_match_official                   验证批量操作上限对齐官方文档
+        test_is_too_large_error_by_code                    验证按错误码检测超大请求
+        test_is_too_large_error_by_message                 验证按消息字符串检测超大请求
+        test_parse_range                                   验证范围字符串解析
+    TestFeishuBitableTaskPool                              Bitable 任务池测试
+        test_get_total_task_count                          验证未处理任务计数
+        test_get_processed_task_count                      验证已处理任务计数
+        test_get_id_boundaries                             验证 ID 边界
+        test_initialize_shard                              验证分片初始化
+        test_get_task_batch                                验证获取任务批次
+        test_reload_task_data                              验证重新加载任务数据
+        test_id_mapping                                    验证 ID 映射表（整数索引 ↔ record_id）
+        test_field_not_empty                               验证字段非空判断
+        test_convert_field_value                           验证字段值转换（富文本/数字/None）
+        test_sample_unprocessed_rows                       验证采样未处理行
+        test_sample_processed_rows                         验证采样已处理行
+        test_update_task_results_syncs_snapshot             验证写回后同步更新内存快照
+        test_update_task_results_write_failure_does_not_raise  验证写回失败不中断主流程
+    TestFeishuSheetTaskPool                                Sheet 任务池测试
+        test_get_total_task_count                          验证未处理任务计数
+        test_get_processed_task_count                      验证已处理任务计数
+        test_get_id_boundaries                             验证 ID 边界
+        test_initialize_shard                              验证分片初始化
+        test_get_task_batch                                验证获取任务批次
+        test_reload_task_data                              验证重新加载任务数据
+        test_sample_unprocessed_rows                       验证采样未处理行
+        test_sample_processed_rows                         验证采样已处理行
+        test_update_task_results_syncs_snapshot             验证写回后同步更新内存快照
+        test_update_task_results_handles_ragged_rows        验证行尾空单元格省略时也能更新
+    TestColIndexToLetter                                   列号转换测试
+        test_single_letters                                验证单字母列号（A-Z）
+        test_double_letters                                验证双字母列号（AA-BA）
+    TestFeishuQueueOperations                              队列操作测试（继承自 BaseTaskPool）
+        test_has_tasks                                     验证队列非空检查
+        test_get_remaining_count                           验证剩余任务数
+        test_add_task_to_front                             验证任务放回队头
+        test_add_task_to_back                              验证任务放回队尾
+        test_clear_tasks                                   验证清空队列
+"""
+
+import pytest
+
+
+# ==================== 工厂集成测试 ====================
+
+
+class TestFeishuFactoryIntegration:
+    """飞书数据源工厂集成测试"""
+
+    def test_feishu_available_flag(self):
+        """测试飞书可用性标志"""
+        from src.data.factory import FEISHU_AVAILABLE
+
+        assert isinstance(FEISHU_AVAILABLE, bool)
+        # aiohttp 已在 requirements.txt 中，应该可用
+        assert FEISHU_AVAILABLE is True
+
+    def test_create_feishu_bitable_missing_config(self):
+        """测试缺少飞书多维表格配置字段"""
+        from src.data.factory import create_task_pool
+
+        config = {
+            "datasource": {"type": "feishu_bitable"},
+            "feishu": {
+                "app_id": "cli_test",
+                # 缺少 app_secret, app_token, table_id
+            },
+        }
+
+        with pytest.raises(ValueError, match="app_secret"):
+            create_task_pool(
+                config=config,
+                columns_to_extract=["question"],
+                columns_to_write={"answer": "ai_answer"},
+            )
+
+    def test_create_feishu_sheet_missing_config(self):
+        """测试缺少飞书电子表格配置字段"""
+        from src.data.factory import create_task_pool
+
+        config = {
+            "datasource": {"type": "feishu_sheet"},
+            "feishu": {
+                "app_id": "cli_test",
+                "app_secret": "secret",
+                # 缺少 spreadsheet_token, sheet_id
+            },
+        }
+
+        with pytest.raises(ValueError, match="spreadsheet_token"):
+            create_task_pool(
+                config=config,
+                columns_to_extract=["question"],
+                columns_to_write={"answer": "ai_answer"},
+            )
+
+    def test_create_feishu_bitable_accepts_resource_in_feishu_section(self):
+        """测试资源参数放在 feishu 节也可创建任务池（兼容 GUI 写入路径）"""
+        from src.data.factory import create_task_pool
+        from src.data.feishu.bitable import FeishuBitableTaskPool
+
+        config = {
+            "datasource": {"type": "feishu_bitable"},
+            "feishu": {
+                "app_id": "cli_test",
+                "app_secret": "secret",
+                "app_token": "basc_test",
+                "table_id": "tbl_test",
+            },
+        }
+
+        pool = create_task_pool(
+            config=config,
+            columns_to_extract=["question"],
+            columns_to_write={"answer": "ai_answer"},
+        )
+        assert isinstance(pool, FeishuBitableTaskPool)
+        assert pool.app_token == "basc_test"
+        assert pool.table_id == "tbl_test"
+
+    def test_create_feishu_sheet_accepts_numeric_sheet_id(self):
+        """测试 sheet_id=0（YAML 数字）可被识别并转成字符串"""
+        from src.data.factory import create_task_pool
+        from src.data.feishu.sheet import FeishuSheetTaskPool
+
+        config = {
+            "datasource": {"type": "feishu_sheet"},
+            "feishu": {
+                "app_id": "cli_test",
+                "app_secret": "secret",
+                "spreadsheet_token": "shtcn_test",
+                "sheet_id": 0,  # YAML 未加引号时会解析为 int
+            },
+        }
+
+        pool = create_task_pool(
+            config=config,
+            columns_to_extract=["question"],
+            columns_to_write={"answer": "ai_answer"},
+        )
+        assert isinstance(pool, FeishuSheetTaskPool)
+        assert pool.sheet_id == "0"
+
+    def test_unsupported_type_includes_feishu(self):
+        """测试不支持类型的错误消息包含飞书选项"""
+        from src.data.factory import create_task_pool
+
+        config = {"datasource": {"type": "unknown_db"}}
+
+        with pytest.raises(ValueError, match="feishu_bitable"):
+            create_task_pool(
+                config=config,
+                columns_to_extract=["question"],
+                columns_to_write={"answer": "ai_answer"},
+            )
+
+
+# ==================== 客户端测试 ====================
+
+
+class TestFeishuClient:
+    """飞书客户端基础测试"""
+
+    def test_client_import(self):
+        """测试客户端模块可导入"""
+        from src.data.feishu.client import (
+            FeishuClient,
+            FeishuAPIError,
+            FeishuRateLimitError,
+            FeishuPermissionError,
+        )
+
+        assert callable(FeishuClient)
+        assert issubclass(FeishuRateLimitError, FeishuAPIError)
+        assert issubclass(FeishuPermissionError, FeishuAPIError)
+
+    def test_client_init(self):
+        """测试客户端初始化"""
+        from src.data.feishu.client import FeishuClient
+
+        client = FeishuClient(
+            app_id="cli_test",
+            app_secret="test_secret",
+            max_retries=5,
+            qps_limit=10,
+        )
+
+        assert client.app_id == "cli_test"
+        assert client.app_secret == "test_secret"
+        assert client.max_retries == 5
+        assert client.qps_limit == 10
+        assert client._token is None
+
+    def test_client_error_hierarchy(self):
+        """测试错误类层级"""
+        from src.data.feishu.client import (
+            FeishuAPIError,
+            FeishuRateLimitError,
+            FeishuPermissionError,
+        )
+
+        err = FeishuAPIError(code=100, msg="test error", url="https://test.com")
+        assert err.code == 100
+        assert "test error" in str(err)
+
+        rate_err = FeishuRateLimitError(msg="rate limit", retry_after=2.0)
+        assert rate_err.code == 429
+        assert rate_err.retry_after == 2.0
+        assert isinstance(rate_err, FeishuAPIError)
+
+        perm_err = FeishuPermissionError(code=99991403, msg="no permission")
+        assert isinstance(perm_err, FeishuAPIError)
+
+
+# ==================== 常量与辅助函数测试 ====================
+
+
+class TestFeishuClientConstants:
+    """飞书客户端常量和辅助函数测试"""
+
+    def test_batch_limits_match_official(self):
+        """测试批量操作上限对齐官方文档"""
+        from src.data.feishu.client import (
+            BITABLE_BATCH_CREATE_LIMIT,
+            BITABLE_BATCH_UPDATE_LIMIT,
+            BITABLE_BATCH_DELETE_LIMIT,
+        )
+
+        assert BITABLE_BATCH_CREATE_LIMIT == 1000
+        assert BITABLE_BATCH_UPDATE_LIMIT == 1000
+        assert BITABLE_BATCH_DELETE_LIMIT == 500
+
+    def test_is_too_large_error_by_code(self):
+        """测试 _is_too_large_error 按错误码检测"""
+        from src.data.feishu.client import FeishuAPIError, _is_too_large_error
+
+        assert _is_too_large_error(FeishuAPIError(code=90221, msg="TooLargeResponse"))
+        assert _is_too_large_error(FeishuAPIError(code=90227, msg="TooLargeRequest"))
+        assert not _is_too_large_error(FeishuAPIError(code=99991403, msg="no perm"))
+
+    def test_is_too_large_error_by_message(self):
+        """测试 _is_too_large_error 按消息字符串检测"""
+        from src.data.feishu.client import _is_too_large_error
+
+        assert _is_too_large_error(Exception("error 90221 occurred"))
+        assert _is_too_large_error(Exception("TooLargeResponse"))
+        assert _is_too_large_error(Exception("data exceeded limit"))
+        assert not _is_too_large_error(Exception("random error"))
+
+    def test_parse_range(self):
+        """测试范围字符串解析"""
+        from src.data.feishu.client import _parse_range
+
+        # 正常范围
+        result = _parse_range("Sheet1!A1:Z1000")
+        assert result == ("Sheet1", "A", 1, "Z", 1000)
+
+        # 双字母列
+        result = _parse_range("0!A1:CV10000")
+        assert result == ("0", "A", 1, "CV", 10000)
+
+        # 无法解析
+        assert _parse_range("Sheet1!A1") is None
+        assert _parse_range("invalid") is None
+
+
+# ==================== Bitable TaskPool 测试 ====================
+
+
+class TestFeishuBitableTaskPool:
+    """飞书多维表格任务池测试"""
+
+    @pytest.fixture
+    def mock_snapshot(self):
+        """模拟飞书多维表格记录快照"""
+        return [
+            {
+                "record_id": "recAAABBB001",
+                "fields": {
+                    "question": "什么是 AI？",
+                    "context": "人工智能概述",
+                    "ai_answer": "",
+                    "ai_category": "",
+                },
+            },
+            {
+                "record_id": "recAAABBB002",
+                "fields": {
+                    "question": "什么是机器学习？",
+                    "context": "ML 基础",
+                    "ai_answer": "",
+                    "ai_category": "",
+                },
+            },
+            {
+                "record_id": "recAAABBB003",
+                "fields": {
+                    "question": "什么是深度学习？",
+                    "context": "DL 概述",
+                    "ai_answer": "已有回答",
+                    "ai_category": "technical",
+                },
+            },
+        ]
+
+    @pytest.fixture
+    def bitable_pool(self, mock_snapshot):
+        """创建带模拟快照的 Bitable 任务池"""
+        from src.data.feishu.bitable import FeishuBitableTaskPool
+
+        pool = FeishuBitableTaskPool(
+            app_id="cli_test",
+            app_secret="test_secret",
+            app_token="basc_test",
+            table_id="tbl_test",
+            columns_to_extract=["question", "context"],
+            columns_to_write={"answer": "ai_answer", "category": "ai_category"},
+        )
+
+        # 注入模拟快照，跳过实际 API 调用
+        pool._snapshot = mock_snapshot
+        pool._snapshot_loaded = True
+        pool._id_map = {i: rec["record_id"] for i, rec in enumerate(mock_snapshot)}
+        pool._reverse_map = {rec["record_id"]: i for i, rec in enumerate(mock_snapshot)}
+
+        return pool
+
+    def test_get_total_task_count(self, bitable_pool):
+        """测试未处理任务计数"""
+        # 3 条记录，其中 1 条已处理
+        assert bitable_pool.get_total_task_count() == 2
+
+    def test_get_processed_task_count(self, bitable_pool):
+        """测试已处理任务计数"""
+        assert bitable_pool.get_processed_task_count() == 1
+
+    def test_get_id_boundaries(self, bitable_pool):
+        """测试 ID 边界"""
+        min_id, max_id = bitable_pool.get_id_boundaries()
+        assert min_id == 0
+        assert max_id == 2  # 3 条记录，索引 0-2
+
+    def test_initialize_shard(self, bitable_pool):
+        """测试分片初始化"""
+        loaded = bitable_pool.initialize_shard(0, 0, 2)
+        assert loaded == 2  # 只加载未处理的 2 条
+
+    def test_get_task_batch(self, bitable_pool):
+        """测试获取任务批次"""
+        bitable_pool.initialize_shard(0, 0, 2)
+        batch = bitable_pool.get_task_batch(10)
+        assert len(batch) == 2
+
+        # 验证任务数据
+        task_id, data = batch[0]
+        assert task_id == 0
+        assert data["question"] == "什么是 AI？"
+        assert data["context"] == "人工智能概述"
+
+    def test_reload_task_data(self, bitable_pool):
+        """测试重新加载任务数据"""
+        data = bitable_pool.reload_task_data(0)
+        assert data is not None
+        assert data["question"] == "什么是 AI？"
+
+        # 超出范围返回 None
+        assert bitable_pool.reload_task_data(100) is None
+
+    def test_id_mapping(self, bitable_pool):
+        """测试 ID 映射表"""
+        assert bitable_pool._id_map[0] == "recAAABBB001"
+        assert bitable_pool._id_map[1] == "recAAABBB002"
+        assert bitable_pool._reverse_map["recAAABBB001"] == 0
+
+    def test_field_not_empty(self):
+        """测试字段非空判断"""
+        from src.data.feishu.bitable import FeishuBitableTaskPool
+
+        assert FeishuBitableTaskPool._field_not_empty("hello") is True
+        assert FeishuBitableTaskPool._field_not_empty("") is False
+        assert FeishuBitableTaskPool._field_not_empty("  ") is False
+        assert FeishuBitableTaskPool._field_not_empty(None) is False
+        assert FeishuBitableTaskPool._field_not_empty([]) is False
+        assert FeishuBitableTaskPool._field_not_empty(["a"]) is True
+        assert FeishuBitableTaskPool._field_not_empty(42) is True
+
+    def test_convert_field_value(self):
+        """测试字段值转换"""
+        from src.data.feishu.bitable import FeishuBitableTaskPool
+
+        assert FeishuBitableTaskPool._convert_field_value(None) == ""
+        assert FeishuBitableTaskPool._convert_field_value("hello") == "hello"
+        assert FeishuBitableTaskPool._convert_field_value(42) == "42"
+        assert FeishuBitableTaskPool._convert_field_value(3.14) == "3.14"
+        assert (
+            FeishuBitableTaskPool._convert_field_value([{"text": "A"}, {"text": "B"}])
+            == "A, B"
+        )
+        assert FeishuBitableTaskPool._convert_field_value({"text": "link"}) == "link"
+
+    def test_sample_unprocessed_rows(self, bitable_pool):
+        """测试采样未处理行"""
+        samples = bitable_pool.sample_unprocessed_rows(10)
+        assert len(samples) == 2
+        assert "question" in samples[0]
+
+    def test_sample_processed_rows(self, bitable_pool):
+        """测试采样已处理行"""
+        samples = bitable_pool.sample_processed_rows(10)
+        assert len(samples) == 1
+
+    def test_update_task_results_syncs_snapshot(self, bitable_pool, mock_snapshot):
+        """测试写回后同步更新内存快照"""
+        import unittest.mock as mock
+
+        # 原始快照：task_id=0,1 未处理，task_id=2 已处理
+        # 写回前确认有 2 条未处理
+        assert bitable_pool.get_total_task_count() == 2
+
+        # 模拟写回结果
+        results = {
+            0: {"answer": "AI 是人工智能", "category": "tech"},
+        }
+
+        # Mock client 的 bitable_batch_update 方法
+        async def mock_batch_update(app_token, table_id, records):
+            return records  # 模拟成功写入
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=mock_batch_update,
+        ):
+            bitable_pool.update_task_results(results)
+
+        # 验证快照已更新
+        assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "AI 是人工智能"
+        assert bitable_pool._snapshot[0]["fields"]["ai_category"] == "tech"
+
+        # 验证已处理行不会被重复加载
+        # 写回后只剩 task_id=1 未处理（原本 2 条未处理，写回了 1 条）
+        assert bitable_pool.get_total_task_count() == 1
+        loaded = bitable_pool.initialize_shard(1, 0, 2)
+        assert loaded == 1
+
+    @pytest.mark.asyncio
+    async def test_batch_update_sync_uses_reverse_map_lookup(self, bitable_pool):
+        """测试快照同步使用 reverse_map 定位，不线性遍历全量快照"""
+        import unittest.mock as mock
+
+        class NonIterableSnapshot(list):
+            def __iter__(self):
+                raise AssertionError("快照同步不应遍历全量 snapshot")
+
+        bitable_pool._snapshot = NonIterableSnapshot(
+            [
+                {
+                    "record_id": "recAAABBB001",
+                    "fields": {"ai_answer": "", "ai_category": ""},
+                },
+                {
+                    "record_id": "recAAABBB002",
+                    "fields": {"ai_answer": "", "ai_category": ""},
+                },
+            ]
+        )
+        bitable_pool._reverse_map = {"recAAABBB001": 0, "recAAABBB002": 1}
+
+        async def mock_batch_update(app_token, table_id, records):
+            return records
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=mock_batch_update,
+        ):
+            await bitable_pool._batch_update(
+                [
+                    {
+                        "record_id": "recAAABBB002",
+                        "fields": {"ai_answer": "updated"},
+                    }
+                ]
+            )
+
+        assert bitable_pool._snapshot[1]["fields"]["ai_answer"] == "updated"
+
+    def test_update_task_results_write_failure_does_not_raise(self, bitable_pool):
+        """测试写回失败不会抛出异常中断主流程"""
+        import unittest.mock as mock
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=Exception("network down"),
+        ):
+            bitable_pool.update_task_results(
+                {0: {"answer": "AI 是人工智能", "category": "tech"}}
+            )
+
+        # 写回失败后快照应保持未更新
+        assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == ""
+        assert bitable_pool.get_total_task_count() == 2
+
+
+# ==================== Sheet TaskPool 测试 ====================
+
+
+class TestFeishuSheetTaskPool:
+    """飞书电子表格任务池测试"""
+
+    @pytest.fixture
+    def mock_sheet_data(self):
+        """模拟电子表格数据"""
+        return {
+            "header": ["question", "context", "ai_answer", "ai_category"],
+            "rows": [
+                ["什么是 AI？", "人工智能概述", "", ""],
+                ["什么是 ML？", "机器学习基础", "", ""],
+                ["什么是 DL？", "深度学习概述", "已有回答", "technical"],
+            ],
+        }
+
+    @pytest.fixture
+    def sheet_pool(self, mock_sheet_data):
+        """创建带模拟快照的 Sheet 任务池"""
+        from src.data.feishu.sheet import FeishuSheetTaskPool
+
+        pool = FeishuSheetTaskPool(
+            app_id="cli_test",
+            app_secret="test_secret",
+            spreadsheet_token="shtcn_test",
+            sheet_id="Sheet1",
+            columns_to_extract=["question", "context"],
+            columns_to_write={"answer": "ai_answer", "category": "ai_category"},
+        )
+
+        # 注入模拟快照
+        pool._header_row = mock_sheet_data["header"]
+        pool._data_rows = mock_sheet_data["rows"]
+        pool._col_name_to_index = {
+            name: idx for idx, name in enumerate(mock_sheet_data["header"])
+        }
+        pool._snapshot_loaded = True
+
+        return pool
+
+    def test_get_total_task_count(self, sheet_pool):
+        """测试未处理任务计数"""
+        assert sheet_pool.get_total_task_count() == 2
+
+    def test_get_processed_task_count(self, sheet_pool):
+        """测试已处理任务计数"""
+        assert sheet_pool.get_processed_task_count() == 1
+
+    def test_get_id_boundaries(self, sheet_pool):
+        """测试 ID 边界"""
+        min_id, max_id = sheet_pool.get_id_boundaries()
+        assert min_id == 0
+        assert max_id == 2
+
+    def test_initialize_shard(self, sheet_pool):
+        """测试分片初始化"""
+        loaded = sheet_pool.initialize_shard(0, 0, 2)
+        assert loaded == 2
+
+    def test_get_task_batch(self, sheet_pool):
+        """测试获取任务批次"""
+        sheet_pool.initialize_shard(0, 0, 2)
+        batch = sheet_pool.get_task_batch(10)
+        assert len(batch) == 2
+
+        task_id, data = batch[0]
+        assert task_id == 0
+        assert data["question"] == "什么是 AI？"
+
+    def test_reload_task_data(self, sheet_pool):
+        """测试重新加载任务数据"""
+        data = sheet_pool.reload_task_data(0)
+        assert data is not None
+        assert data["question"] == "什么是 AI？"
+
+        assert sheet_pool.reload_task_data(100) is None
+
+    def test_sample_unprocessed_rows(self, sheet_pool):
+        """测试采样未处理行"""
+        samples = sheet_pool.sample_unprocessed_rows(10)
+        assert len(samples) == 2
+
+    def test_sample_processed_rows(self, sheet_pool):
+        """测试采样已处理行"""
+        samples = sheet_pool.sample_processed_rows(10)
+        assert len(samples) == 1
+
+    def test_update_task_results_syncs_snapshot(self, sheet_pool, mock_sheet_data):
+        """测试写回后同步更新内存快照"""
+        import unittest.mock as mock
+
+        # 原始快照：row_idx=0,1 未处理，row_idx=2 已处理
+        # 写回前确认有 2 条未处理
+        assert sheet_pool.get_total_task_count() == 2
+
+        results = {
+            0: {"answer": "AI 是人工智能", "category": "tech"},
+        }
+
+        # Mock client 的 sheet_write_range 方法
+        async def mock_write_range(token, range_str, values):
+            pass  # 模拟成功
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_write_range",
+            side_effect=mock_write_range,
+        ):
+            sheet_pool.update_task_results(results)
+
+        # 验证快照已更新（ai_answer 是第 3 列索引 2，ai_category 是第 4 列索引 3）
+        assert sheet_pool._data_rows[0][2] == "AI 是人工智能"
+        assert sheet_pool._data_rows[0][3] == "tech"
+
+        # 验证已处理行不会被重复加载
+        # 写回后只剩 row_idx=1 未处理（原本 2 条未处理，写回了 1 条）
+        assert sheet_pool.get_total_task_count() == 1
+        loaded = sheet_pool.initialize_shard(1, 0, 2)
+        assert loaded == 1
+
+    def test_update_task_results_handles_ragged_rows(self):
+        """测试行尾空单元格被省略时也能同步更新快照"""
+        import unittest.mock as mock
+        from src.data.feishu.sheet import FeishuSheetTaskPool
+
+        pool = FeishuSheetTaskPool(
+            app_id="cli_test",
+            app_secret="test_secret",
+            spreadsheet_token="shtcn_test",
+            sheet_id="Sheet1",
+            columns_to_extract=["question"],
+            columns_to_write={"answer": "ai_answer"},
+        )
+
+        # 表头有 ai_answer，但数据行只返回了第一列（飞书常见行为）
+        pool._header_row = ["question", "ai_answer"]
+        pool._col_name_to_index = {"question": 0, "ai_answer": 1}
+        pool._data_rows = [["什么是 AI？"]]
+        pool._snapshot_loaded = True
+
+        async def mock_write_range(token, range_str, values):
+            return {}
+
+        with mock.patch.object(
+            pool.client,
+            "sheet_write_range",
+            side_effect=mock_write_range,
+        ):
+            pool.update_task_results({0: {"answer": "AI 是人工智能"}})
+
+        assert pool._data_rows[0][1] == "AI 是人工智能"
+        assert pool.get_total_task_count() == 0
+
+
+class TestColIndexToLetter:
+    """列号转换测试"""
+
+    def test_single_letters(self):
+        """测试单字母列号"""
+        from src.data.feishu.sheet import _col_index_to_letter
+
+        assert _col_index_to_letter(0) == "A"
+        assert _col_index_to_letter(1) == "B"
+        assert _col_index_to_letter(25) == "Z"
+
+    def test_double_letters(self):
+        """测试双字母列号"""
+        from src.data.feishu.sheet import _col_index_to_letter
+
+        assert _col_index_to_letter(26) == "AA"
+        assert _col_index_to_letter(27) == "AB"
+        assert _col_index_to_letter(51) == "AZ"
+        assert _col_index_to_letter(52) == "BA"
+
+
+# ==================== 队列操作测试 ====================
+
+
+class TestFeishuQueueOperations:
+    """飞书任务池队列操作测试（继承自 BaseTaskPool）"""
+
+    @pytest.fixture
+    def bitable_pool_with_tasks(self):
+        """创建有任务的 Bitable 池"""
+        from src.data.feishu.bitable import FeishuBitableTaskPool
+
+        pool = FeishuBitableTaskPool(
+            app_id="cli_test",
+            app_secret="test_secret",
+            app_token="basc_test",
+            table_id="tbl_test",
+            columns_to_extract=["q"],
+            columns_to_write={"a": "answer"},
+        )
+
+        pool._snapshot_loaded = True
+        pool._snapshot = []
+        pool._id_map = {}
+        pool._reverse_map = {}
+
+        # 手动设置任务
+        pool.tasks = [
+            (0, {"q": "Q1"}),
+            (1, {"q": "Q2"}),
+        ]
+
+        return pool
+
+    def test_has_tasks(self, bitable_pool_with_tasks):
+        """测试队列非空检查"""
+        assert bitable_pool_with_tasks.has_tasks() is True
+
+    def test_get_remaining_count(self, bitable_pool_with_tasks):
+        """测试剩余任务数"""
+        assert bitable_pool_with_tasks.get_remaining_count() == 2
+
+    def test_add_task_to_front(self, bitable_pool_with_tasks):
+        """测试任务放回队头"""
+        bitable_pool_with_tasks.add_task_to_front(99, {"q": "urgent"})
+        assert bitable_pool_with_tasks.tasks[0] == (99, {"q": "urgent"})
+        assert bitable_pool_with_tasks.get_remaining_count() == 3
+
+    def test_add_task_to_back(self, bitable_pool_with_tasks):
+        """测试任务放回队尾"""
+        bitable_pool_with_tasks.add_task_to_back(99, {"q": "delayed"})
+        assert bitable_pool_with_tasks.tasks[-1] == (99, {"q": "delayed"})
+
+    def test_clear_tasks(self, bitable_pool_with_tasks):
+        """测试清空队列"""
+        bitable_pool_with_tasks.clear_tasks()
+        assert bitable_pool_with_tasks.has_tasks() is False

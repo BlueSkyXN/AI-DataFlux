@@ -39,10 +39,36 @@ API 路由:
     3. 服务实例处理请求（模型选择、API 调用等）
     4. 返回响应（JSON 或 SSE 流）
 
+函数清单:
+    - get_service() -> FluxApiService
+        获取全局服务实例，未初始化时抛出 RuntimeError
+
+    - lifespan(app: FastAPI) -> AsyncGenerator
+        应用生命周期管理器，负责 startup/shutdown
+
+    - create_app(config_path: str) -> FastAPI
+        工厂函数：创建 FastAPI 应用，初始化服务，注册路由
+        输入: config_path — YAML 配置文件路径
+        输出: 配置完成的 FastAPI 实例
+
+    - _register_routes(app: FastAPI) -> None
+        注册所有 API 路由和 HTTP 中间件（内部函数）
+
+    - run_server(config_path, host, port, workers, reload) -> None
+        便捷函数：创建应用并启动 uvicorn 服务器
+        输入: config_path, host="0.0.0.0", port=8787, workers=1, reload=False
+
+    - main() -> None
+        命令行入口，解析参数并调用 run_server
+
+关键变量:
+    - _service (FluxApiService | None): 全局服务单例，lifespan 管理其生命周期
+
 依赖模块:
     - FastAPI: Web 框架
     - uvicorn: ASGI 服务器
-    - FluxApiService: 核心服务逻辑
+    - FluxApiService: 核心服务逻辑 (service.py)
+    - schemas: 请求/响应数据模型 (schemas.py)
 """
 
 import argparse

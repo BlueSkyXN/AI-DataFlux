@@ -28,6 +28,67 @@ MySQL 数据源任务池实现模块
     │  └─────────────┘                                        │
     └─────────────────────────────────────────────────────────┘
 
+类清单:
+    MySQLConnectionPoolManager:
+        MySQL 连接池管理器（单例模式），管理全局唯一的连接池实例。
+        类方法:
+            - get_pool(config, pool_name, pool_size) -> MySQLConnectionPool
+                获取或创建连接池实例（双检锁线程安全）
+            - close_pool() -> None
+                关闭连接池并释放所有资源（幂等操作）
+
+    MySQLTaskPool(BaseTaskPool):
+        MySQL 数据源任务池，从数据库表读取/写入任务数据。
+
+        公开方法（BaseTaskPool 接口实现）:
+            - __init__(connection_config, columns_to_extract, columns_to_write,
+                       table_name, pool_size, require_all_input_fields)
+                初始化：检查依赖 → 配置列 → 获取连接池
+            - get_total_task_count() -> int
+                COUNT(*) 统计未处理任务数
+            - get_processed_task_count() -> int
+                COUNT(*) 统计已处理任务数
+            - get_id_boundaries() -> tuple[int, int]
+                查询 MIN(id)/MAX(id) 获取 ID 边界
+            - initialize_shard(shard_id, min_id, max_id) -> int
+                SELECT 指定 ID 范围的未处理记录到内存队列
+            - get_task_batch(batch_size) -> list[tuple]
+                从内存队列弹出一批任务
+            - update_task_results(results) -> None
+                逐条 UPDATE 写回结果（同一事务）
+            - reload_task_data(record_id) -> dict | None
+                SELECT 重新加载指定记录的输入数据
+            - close() -> None
+                关闭全局连接池
+
+        Token 估算方法:
+            - sample_unprocessed_rows(sample_size) -> list[dict]
+            - sample_processed_rows(sample_size) -> list[dict]
+            - fetch_all_rows(columns) -> list[dict]
+            - fetch_all_processed_rows(columns) -> list[dict]
+
+        内部方法:
+            - _get_connection() -> Connection
+                从连接池获取数据库连接
+            - execute_with_connection(callback, is_write) -> Any
+                封装连接获取/归还/事务管理的通用执行器
+            - _build_unprocessed_condition() -> str
+                构建未处理任务的 WHERE 条件
+            - _build_processed_condition() -> str
+                构建已处理任务的 WHERE 条件
+
+        关键属性:
+            - table_name (str): 目标数据表名
+            - pool: MySQLConnectionPool 实例
+            - select_columns (list[str]): 查询列（id + 输入列）
+            - write_colnames (list[str]): 写入列名列表
+            - write_aliases (list[str]): 写入别名列表
+
+    模块依赖:
+        - base.BaseTaskPool: 抽象基类
+        - mysql.connector: MySQL 连接器（可选依赖）
+        - mysql.connector.pooling: 连接池管理
+
 连接池配置:
     - pool_size: 连接池大小，默认为 batch_size/10（最小 5）
     - pool_reset_session: 归还时重置会话状态

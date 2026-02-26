@@ -27,6 +27,32 @@
                 └── ValidationError (验证错误)
                     └─ 字段值不在允许范围内
 
+类清单:
+    ErrorType(str, Enum)
+        错误类型枚举: API, CONTENT, SYSTEM
+        继承 str 以支持直接字符串操作
+
+    AIDataFluxError(Exception)
+        基础异常类，提供 message + details 统一接口
+        属性: message (str), details (dict)
+
+    ConfigError(AIDataFluxError)
+        配置错误异常
+
+    DataSourceError(AIDataFluxError)
+        数据源错误异常
+
+    APIError(AIDataFluxError)
+        API 调用错误异常
+        额外属性: status_code (int | None), error_type (ErrorType.API)
+
+    ContentError(AIDataFluxError)
+        内容处理错误异常
+        属性: error_type (ErrorType.CONTENT)
+
+    ValidationError(ContentError)
+        字段验证错误异常（ContentError 子类）
+
 使用示例:
     from src.models.errors import ErrorType, APIError, ConfigError
 
@@ -43,6 +69,10 @@
         ...
     except AIDataFluxError as e:
         print(f"错误: {e.message}, 详情: {e.details}")
+
+模块依赖:
+    - enum.Enum: 枚举基类
+    - typing.Any: 类型注解
 """
 
 from enum import Enum

@@ -1,9 +1,24 @@
+# =============================================================================
+# 测试工作流 — 代码质量检查 + 多平台单元测试 + 集成测试
+#
+# 触发条件:
+#   - 推送到主分支且修改了源码/测试/依赖文件
+#   - Pull Request 修改了源码/测试/Python 文件
+#   - 手动触发（可运行集成测试）
+#
+# 任务组成:
+#   1. lint         — 代码质量检查（Ruff + Black + mypy + 语法检查）
+#   2. unit-tests   — 多平台多版本单元测试矩阵（7个OS × 5个Python版本）
+#   3. cli-test     — CLI 命令功能测试
+#   4. perf-libs    — 高性能库（Polars/fastexcel/xlsxwriter）可用性测试
+#   5. integration  — 集成测试（仅手动触发时运行）
+# =============================================================================
 name: Test
 
 on:
   push:
     branches: [main, master, dev]
-    paths:
+    paths:                                 # 仅在相关文件变更时触发
       - 'src/**'
       - 'tests/**'
       - 'cli.py'
@@ -17,13 +32,15 @@ on:
       - 'src/**'
       - 'tests/**'
       - '*.py'
-  workflow_dispatch:
+  workflow_dispatch:                       # 手动触发（可运行集成测试）
 
 env:
-  PYTHONIOENCODING: 'utf-8'
+  PYTHONIOENCODING: 'utf-8'                # 确保跨平台 Python I/O 编码一致
 
 jobs:
-  # 代码质量检查
+  # =========================================================================
+  # 代码质量检查 — Ruff 静态检查 + Black 格式检查 + mypy 类型检查 + 语法检查
+  # =========================================================================
   lint:
     name: Code Quality
     runs-on: ubuntu-latest
@@ -47,14 +64,19 @@ jobs:
       - name: Run Black (check)
         run: black --check src/ tests/ cli.py main.py gateway.py
 
-      - name: Type check (allow missing types)
+      - name: Type check (allow missing types)   # mypy 类型检查（宽松模式，允许失败）
         run: mypy src/ --ignore-missing-imports || true
 
-      - name: Syntax check
+      - name: Syntax check                         # 确保所有 Python 文件语法正确
         run: |
           python -m py_compile cli.py main.py gateway.py
           find src -name "*.py" -exec python -m py_compile {} \;
 
+  # =========================================================================
+  # 单元测试矩阵 — 覆盖 7 个 OS × 5 个 Python 版本（含 ARM 架构）
+  # 测试平台: Ubuntu 22.04/24.04(x64+ARM), Windows 2022/2025, macOS 15(Intel+ARM), macOS 26
+  # Python 版本: 3.10 ~ 3.14
+  # =========================================================================
   # 单元测试
   unit-tests:
     name: Py ${{ matrix.python }} on ${{ matrix.os }}
@@ -121,25 +143,25 @@ jobs:
           allow-prereleases: true
           cache: 'pip'
 
-      - name: Install core dependencies
+      - name: Install core dependencies            # 安装核心依赖和测试框架
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-core.txt
           python -m pip install pytest pytest-asyncio pytest-cov pytest-mock
 
-      - name: Install optional dependencies
+      - name: Install optional dependencies        # 安装可选性能依赖（允许失败，某些平台可能缺少预编译 wheel）
         # 部分平台可能缺少某些依赖的预编译 wheel，允许失败
         continue-on-error: true
         run: |
           python -m pip install -r requirements-optional.txt
 
-      - name: Verify dependencies availability
+      - name: Verify dependencies availability      # 运行依赖检查脚本
         run: python .github/scripts/check_deps.py
 
-      - name: Run unit tests
+      - name: Run unit tests                       # 运行单元测试（排除集成测试，含覆盖率报告）
         run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term
 
-      - name: Upload coverage
+      - name: Upload coverage                      # 仅在特定环境上传覆盖率报告到 Codecov
         if: matrix.os == 'ubuntu-22.04' && matrix.python == '3.11'
         uses: codecov/codecov-action@v4
         with:
@@ -147,6 +169,9 @@ jobs:
           flags: unittests
           fail_ci_if_error: false
 
+  # =========================================================================
+  # CLI 功能测试 — 验证所有 CLI 命令正常工作
+  # =========================================================================
   # CLI 功能测试
   cli-test:
     name: CLI Tests
@@ -163,7 +188,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Test CLI
+      - name: Test CLI                             # 测试所有 CLI 子命令和配置验证
         run: |
           python cli.py version
           python cli.py check
@@ -173,6 +198,9 @@ jobs:
           python cli.py gui --help
           python cli.py process --config config-example.yaml --validate
 
+  # =========================================================================
+  # 高性能库测试 — 验证 Polars/fastexcel/xlsxwriter 等可选库的集成
+  # =========================================================================
   # 高性能库测试
   perf-libs:
     name: Performance Libraries
@@ -214,6 +242,10 @@ jobs:
               print(f'PolarsEngine: {engine.name}')
           "
 
+  # =========================================================================
+  # 集成测试（可选）— 仅在手动触发 (workflow_dispatch) 时运行
+  # 需要外部服务依赖（如 API 端点），因此不在普通 CI 中运行
+  # =========================================================================
   # 集成测试 (可选)
   integration-test:
     name: Integration Tests

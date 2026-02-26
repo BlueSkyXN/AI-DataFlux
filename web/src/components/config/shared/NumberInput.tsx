@@ -1,3 +1,10 @@
+/**
+ * 数字输入框组件
+ *
+ * 用途：带范围限制和步长控制的数字输入，自动根据步长选择整数/浮点解析
+ *
+ * Props: value - 当前值 | onChange - 值变更回调 | min/max/step - 范围和步长
+ */
 interface NumberInputProps {
   value: number | undefined;
   onChange: (value: number) => void;
@@ -8,6 +15,7 @@ interface NumberInputProps {
   disabled?: boolean;
 }
 
+/** 数字输入框，step < 1 时使用 parseFloat，否则使用 parseInt */
 export default function NumberInput({ value, onChange, min, max, step, placeholder, disabled }: NumberInputProps) {
   return (
     <input

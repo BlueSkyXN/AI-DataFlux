@@ -1,3 +1,10 @@
+/**
+ * 下拉选择框组件
+ *
+ * 用途：渲染原生 select 下拉菜单，用于枚举值选择
+ *
+ * Props: value - 当前选中值 | options - 选项列表 | onChange - 选择回调
+ */
 interface SelectDropdownProps {
   value: string;
   options: { value: string; label: string }[];
@@ -5,6 +12,7 @@ interface SelectDropdownProps {
   disabled?: boolean;
 }
 
+/** 下拉选择框 */
 export default function SelectDropdown({ value, options, onChange, disabled }: SelectDropdownProps) {
   return (
     <select

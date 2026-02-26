@@ -1,3 +1,12 @@
+/**
+ * 全局设置配置分区组件
+ *
+ * 用途：配置 API 网关 URL、日志设置（级别/格式/输出方式/文件路径）、
+ *       网关连接参数（最大连接数、每主机最大连接数）
+ *
+ * 导出：GlobalSection（默认导出）
+ *   Props: SectionProps
+ */
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
@@ -6,6 +15,10 @@ import TextInput from '../shared/TextInput';
 import NumberInput from '../shared/NumberInput';
 import SelectDropdown from '../shared/SelectDropdown';
 
+/**
+ * 全局设置组件
+ * 包含三个卡片：API 网关 URL、日志设置、网关连接参数
+ */
 export default function GlobalSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
@@ -20,6 +33,7 @@ export default function GlobalSection({ updateConfig, getConfig, language }: Sec
   return (
     <div className="space-y-4">
       {/* API URL */}
+      {/* API 网关地址 */}
       <SectionCard title={t.cfgApiGatewayUrl} description={t.cfgApiGatewayUrlDesc}>
         <FormField label="Flux API URL" required>
           <TextInput
@@ -32,6 +46,7 @@ export default function GlobalSection({ updateConfig, getConfig, language }: Sec
       </SectionCard>
 
       {/* Log Settings */}
+      {/* 日志设置 */}
       <SectionCard title={t.cfgLogSettings}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField label={t.cfgLogLevel}>
@@ -80,6 +95,7 @@ export default function GlobalSection({ updateConfig, getConfig, language }: Sec
       </SectionCard>
 
       {/* Gateway Connection */}
+      {/* 网关连接参数 */}
       <SectionCard title={t.cfgGatewayConnection} description={t.cfgGatewayConnectionDesc}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField label={t.cfgMaxConnections}>

@@ -38,6 +38,12 @@ API 端点:
 
 依赖模块:
     - src.gateway.app: FastAPI 应用和服务器配置
+    - src.gateway.app.main: 网关主入口函数 (解析命令行参数并启动 uvicorn 服务)
+
+入口逻辑:
+    __main__ 块调用 src.gateway.app.main()，该函数:
+        输入: 无 (通过 sys.argv 获取 --config, --port, --host, --workers, --reload 参数)
+        输出: 退出码 (0=成功, None 时转为 0)
 
 作者: AI-DataFlux Team
 版本: 参见 src/__init__.py

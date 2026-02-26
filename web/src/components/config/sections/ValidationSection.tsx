@@ -1,3 +1,12 @@
+/**
+ * 字段校验规则配置分区组件
+ *
+ * 用途：配置输出字段的枚举校验规则，启用后可为每个字段
+ *       定义允许的值列表，AI 返回的值不在列表中则视为错误
+ *
+ * 导出：ValidationSection（默认导出）
+ *   Props: SectionProps
+ */
 import { useState } from 'react';
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
@@ -6,6 +15,10 @@ import FormField from '../shared/FormField';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import StringListEditor from '../shared/StringListEditor';
 
+/**
+ * 字段校验配置组件
+ * 提供启用开关及字段规则编辑器（每个字段可配置允许的值列表）
+ */
 export default function ValidationSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
   const [newFieldName, setNewFieldName] = useState('');
@@ -13,6 +26,7 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
   const enabled = (getConfig(['validation', 'enabled']) as boolean) ?? false;
   const fieldRules = (getConfig(['validation', 'field_rules']) as Record<string, string[]>) ?? {};
 
+  /** 添加新的校验字段 */
   const handleAddField = () => {
     const name = newFieldName.trim();
     if (!name || name in fieldRules) return;
@@ -20,12 +34,14 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
     setNewFieldName('');
   };
 
+  /** 删除指定校验字段及其规则 */
   const handleRemoveField = (fieldName: string) => {
     const next = { ...fieldRules };
     delete next[fieldName];
     updateConfig(['validation', 'field_rules'], next);
   };
 
+  /** 更新指定字段的允许值列表 */
   const handleUpdateValues = (fieldName: string, values: string[]) => {
     updateConfig(['validation', 'field_rules'], { ...fieldRules, [fieldName]: values });
   };
@@ -68,6 +84,7 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
             ))}
 
             {/* Add new field */}
+            {/* 添加新的校验字段 */}
             <div className="flex gap-2">
               <input
                 type="text"

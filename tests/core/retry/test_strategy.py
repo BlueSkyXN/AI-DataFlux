@@ -1,11 +1,23 @@
 """
 重试策略单元测试
 
+被测模块: src/core/retry/strategy.py (RetryStrategy, RetryAction)
+
 测试 src/core/retry/strategy.py 的 RetryStrategy 类功能，包括：
 - 重试决策逻辑 (RETRY/FAIL/PAUSE_THEN_RETRY)
 - 错误类型分类处理
 - API 熔断机制
 - 最大重试次数限制
+
+测试类/函数清单:
+    TestRetryStrategy                          重试策略测试
+        test_decide_retry_success              验证首次 API 错误触发 PAUSE_THEN_RETRY
+        test_decide_retry_after_pause          验证暂停窗口内直接 RETRY 不再暂停
+        test_decide_fail_max_retries           验证超过最大重试次数返回 FAIL
+        test_decide_content_error              验证内容错误直接 RETRY 且不重载数据
+        test_decide_content_error_fail         验证内容错误超限返回 FAIL
+        test_decide_system_error               验证系统错误 RETRY 并重载数据
+        test_default_max_retries               验证未配置类型默认最大重试 1 次
 """
 
 import pytest
@@ -15,6 +27,7 @@ from src.models.task import TaskMetadata
 
 
 class TestRetryStrategy:
+    """重试策略测试"""
 
     @pytest.fixture
     def strategy(self):

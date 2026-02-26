@@ -1,11 +1,32 @@
 """
 Token 估算器测试
 
+被测模块: src/core/token_estimator.py (TokenEstimator, normalize_mode)
+
 测试 src/core/token_estimator.py 的核心功能，包括：
 - 模式规范化 (in/out/io)
 - Token 计数算法
 - tiktoken 编码选择
 - 批量估算性能
+
+测试类/函数清单:
+    TestNormalizeMode                              模式规范化测试
+        test_normalize_legacy_input               验证 "input" → "in"
+        test_normalize_legacy_input_output        验证 "input_output" → "io"
+        test_normalize_new_modes                  验证 in/out/io 保持不变
+        test_normalize_case_insensitive           验证大小写不敏感
+        test_normalize_unknown_mode               验证未知模式回退到 "in"
+    TestTokenEstimator                            Token 估算器测试
+        test_create_prompt                        验证提示词模板替换
+        test_build_messages                       验证消息构建（system + user）
+        test_count_message_tokens_uses_combined_text  验证消息合并后计数
+        test_estimate_output_tokens_for_record    验证输出 token 估算
+        test_compute_stats                        验证统计计算（avg/min/max/total）
+        test_tiktoken_not_available               验证 tiktoken 不可用时抛 ImportError
+        test_mode_out_skips_input_estimation      验证 out 模式跳过输入估算
+        test_mode_io_estimates_both               验证 io 模式同时估算输入和输出
+    TestTokenEstimatorIntegration                  集成测试
+        test_sample_unprocessed_rows              验证从 Excel 采样未处理行
 """
 
 import pytest

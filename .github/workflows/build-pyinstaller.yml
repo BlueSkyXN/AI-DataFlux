@@ -1,14 +1,29 @@
+# =============================================================================
+# PyInstaller 构建工作流 — 将 Python 打包为单文件可执行程序
+#
+# 触发条件:
+#   - 推送 v* 标签时（创建 Release）
+#   - 推送到主分支且修改了源码/依赖/前端文件
+#   - Pull Request 修改了相关文件
+#   - 手动触发（可指定版本号）
+#
+# 构建产物（两种变体）:
+#   - Full 版: 包含 Web GUI 控制面板（web/dist），适合需要图形界面的用户
+#   - CLI-only 版: 仅命令行工具，体积更小，适合服务器部署
+#
+# 支持平台: Linux (amd64/arm64)、macOS (arm64)、Windows (amd64)
+# =============================================================================
 name: Build with PyInstaller
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*'                              # 版本标签触发 Release 发布
     branches:
       - main
       - master
       - dev
-    paths:
+    paths:                                 # 仅在相关文件变更时触发
       - 'src/**'
       - 'cli.py'
       - 'main.py'
@@ -21,27 +36,31 @@ on:
       - 'src/**'
       - '*.py'
       - 'web/**'
-  workflow_dispatch:
+  workflow_dispatch:                       # 支持手动触发
     inputs:
       version:
         description: 'Version tag for release (e.g., v2.0.0)'
         required: false
         default: ''
 
+# 全局环境变量
 env:
   APP_NAME: AI-DataFlux
   PYTHON_VERSION: '3.11'
   NODE_VERSION: '20'
 
 jobs:
+  # =========================================================================
+  # 构建任务 — 跨平台打包（Full + CLI-only 两种变体）
+  # =========================================================================
   build:
     name: Build ${{ matrix.build_type }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: false                     # 某平台/变体失败不影响其他继续构建
       matrix:
         include:
-          # Full 版本（包含 GUI）
+          # Full 版本（包含 Web GUI 控制面板）
           - os: ubuntu-24.04
             build_type: full
             artifact_name: AI-DataFlux-linux-amd64-full
@@ -55,7 +74,7 @@ jobs:
             build_type: full
             artifact_name: AI-DataFlux-windows-amd64-full.exe
 
-          # CLI-only 版本（不含 GUI）
+          # CLI-only 版本（不含 Web GUI，体积更小）
           - os: ubuntu-24.04
             build_type: cli-only
             artifact_name: AI-DataFlux-linux-amd64-cli
@@ -73,38 +92,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --- 前端构建（仅 Full 版本需要）---
       - name: Set up Node.js
-        if: matrix.build_type == 'full'
+        if: matrix.build_type == 'full'    # CLI-only 版本跳过前端构建
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      - name: Build frontend
+      - name: Build frontend              # 构建 Web GUI → web/dist/
         if: matrix.build_type == 'full'
         run: |
           cd web
           npm ci
           npm run build
 
+      # --- Python 环境与依赖 ---
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install dependencies        # 安装运行时依赖 + PyInstaller 打包工具
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # --- 构建前验证 ---
       - name: Verify CLI
         run: |
           python cli.py version
           python cli.py check
 
+      # --- PyInstaller 打包（区分 Full/CLI-only 和平台）---
       - name: Build with PyInstaller (Unix - Full)
         if: runner.os != 'Windows' && matrix.build_type == 'full'
         run: |
@@ -129,6 +152,7 @@ jobs:
           if (Test-Path "web/dist") { Remove-Item -Recurse -Force "web/dist" }
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
 
+      # --- 重命名并上传构建产物 ---
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -139,29 +163,32 @@ jobs:
         run: |
           move dist\${{ env.APP_NAME }}.exe dist\${{ matrix.artifact_name }}
 
-      - name: Upload artifact
+      - name: Upload artifact               # 上传到 GitHub Artifacts，保留30天
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}
           retention-days: 30
 
+  # =========================================================================
+  # 发布任务 — 仅在推送版本标签时触发
+  # =========================================================================
   release:
     name: Create Release
-    needs: build
+    needs: build                           # 等待所有平台和变体构建完成
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')  # 仅版本标签触发
     
     steps:
-      - name: Download all artifacts
+      - name: Download all artifacts       # 下载所有平台的构建产物
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
 
-      - name: Display artifacts
+      - name: Display artifacts            # 列出所有下载的文件用于确认
         run: find artifacts/ -type f
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release        # 创建 Release 并上传所有构建产物
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.APP_NAME }} ${{ github.ref_name }}

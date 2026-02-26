@@ -1,5 +1,13 @@
+/**
+ * 可折叠数组项卡片组件
+ *
+ * 用途：以卡片形式展示数组中的单个条目（如模型、渠道），
+ *       支持折叠/展开、删除、复制操作
+ *
+ * Props: title - 卡片标题 | subtitle - 副标题 | onRemove - 删除回调
+ *        onDuplicate - 复制回调（可选）| defaultCollapsed - 默认折叠状态
+ */
 import { useState } from 'react';
-
 interface ArrayItemCardProps {
   title: string;
   subtitle?: string;
@@ -9,12 +17,14 @@ interface ArrayItemCardProps {
   children: React.ReactNode;
 }
 
+/** 可折叠数组项卡片，点击头部切换展开/收起 */
 export default function ArrayItemCard({ title, subtitle, onRemove, onDuplicate, defaultCollapsed = true, children }: ArrayItemCardProps) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
 
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden">
       {/* Header */}
+      {/* 卡片头部：标题 + 操作按钮 */}
       <div
         className="flex items-center gap-3 px-4 py-3 bg-gray-50 cursor-pointer select-none"
         onClick={() => setCollapsed(!collapsed)}
@@ -56,6 +66,7 @@ export default function ArrayItemCard({ title, subtitle, onRemove, onDuplicate, 
         </div>
       </div>
       {/* Body */}
+      {/* 卡片内容区：仅在展开时渲染 */}
       {!collapsed && (
         <div className="p-4 space-y-4">
           {children}

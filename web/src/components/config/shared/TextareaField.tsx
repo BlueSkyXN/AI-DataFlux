@@ -1,3 +1,11 @@
+/**
+ * 多行文本输入框组件
+ *
+ * 用途：用于系统提示词、模板等长文本内容的编辑
+ *
+ * Props: value - 文本内容 | onChange - 变更回调 | rows - 行数
+ *        monospace - 是否等宽字体 | placeholder - 占位文本
+ */
 interface TextareaFieldProps {
   value: string;
   onChange: (value: string) => void;
@@ -7,6 +15,7 @@ interface TextareaFieldProps {
   disabled?: boolean;
 }
 
+/** 多行文本输入框 */
 export default function TextareaField({ value, onChange, placeholder, rows = 6, monospace = true, disabled }: TextareaFieldProps) {
   return (
     <textarea

@@ -28,11 +28,35 @@ AI-DataFlux 旧版主程序 (Legacy)
 
 Warning:
     此文件已弃用，不再维护。请使用新版组件化架构。
+
+文件索引:
+    类:
+        ErrorType (L65)           — 错误类型枚举（API/内容/系统三类）
+        TaskMetadata (L73)        — 任务内部状态管理（重试计数、错误历史）
+        JsonValidator (L119)      — JSON 字段值验证器（枚举校验）
+        ShardedTaskManager (L179) — 分片任务管理器（分片加载、进度追踪、内存监控）
+        UniversalAIProcessor (L439) — 主处理器（编排整个 AI 数据处理流程）
+
+    函数:
+        load_config (L398)        — 加载 YAML 配置文件
+        init_logging (L409)       — 初始化日志系统
+        validate_config_file (L1172) — 配置文件基本校验
+        main (L1201)              — 命令行入口
+
+    核心流程 (UniversalAIProcessor):
+        create_prompt (L582)                     — 从记录数据构建提示词
+        extract_json_from_response (L601)        — 从 AI 响应中提取/验证 JSON
+        build_json_schema (L646)                 — 构建 JSON Schema（可选）
+        call_ai_api_async (L667)                 — 异步调用 Flux API
+        process_one_record_async (L719)          — 处理单条记录（调 API + 解析）
+        process_shard_async_continuous (L767)     — 连续任务流核心循环
+        process_tasks (L1150)                    — 同步入口，启动异步处理
 """
 
 # AI_DataFlux.py (Main Orchestrator - Modified for Continuous Task Flow)
 
 # --- Standard Imports ---
+# 标准库导入
 import yaml
 import aiohttp
 import asyncio
@@ -50,6 +74,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Set, Tuple # Keep ABC if type hinting BaseTaskPool
 
 # --- Import from Flux_Data.py ---
+# 从数据源模块导入任务池工厂和可用性标志
 try:
     # Import the factory function and availability flags
     from Flux_Data import create_task_pool, MYSQL_AVAILABLE, EXCEL_ENABLED
@@ -63,7 +88,14 @@ except ImportError as e:
 
 # --- ErrorType Enum (Keep Here) ---
 class ErrorType:
-    """Defines categories for errors encountered during processing."""
+    """
+    错误类型枚举 — 定义处理过程中遇到的错误分类
+
+    三种错误类型决定了不同的重试策略:
+    - API_ERROR: 网络/超时/HTTP 错误 → 触发全局暂停 + 重试
+    - CONTENT_ERROR: AI 响应解析/验证失败 → 重试（不暂停）
+    - SYSTEM_ERROR: 内部异常 → 重试（不暂停）
+    """
     API_ERROR = "api_error"       # Error calling Flux-Api.py OR Flux-Api returned non-200 OR Timeout
     CONTENT_ERROR = "content_error" # AI response content parsing/validation failed (Now triggers retry)
     SYSTEM_ERROR = "system_error"   # Internal errors (e.g., data reload failure, unexpected exceptions)
@@ -71,7 +103,14 @@ class ErrorType:
 
 # --- TaskMetadata Class for Internal State Management ---
 class TaskMetadata:
-    """Manages internal state and retry information for tasks, completely separated from business data."""
+    """
+    任务内部状态管理 — 与业务数据完全分离
+
+    设计原则:
+    - 仅存储重试计数、错误历史等内部状态
+    - 不缓存业务数据（重试时从数据源重新加载，防止内存泄漏）
+    - 通过 record_id 与业务数据关联
+    """
 
     def __init__(self, record_id: Any):
         self.record_id = record_id
@@ -117,7 +156,12 @@ class TaskMetadata:
 
 # --- JsonValidator Class ---
 class JsonValidator:
-    """Validates specific field values within a parsed JSON object against configured rules."""
+    """
+    JSON 字段值验证器
+
+    根据配置的枚举规则验证 AI 返回的 JSON 中特定字段的值。
+    例如: category 字段只允许 ["technical", "business", "general"]。
+    """
     def __init__(self):
         self.enabled = False
         self.field_rules: Dict[str, List[Any]] = {}
@@ -177,7 +221,15 @@ class JsonValidator:
 
 # --- ShardedTaskManager Class ---
 class ShardedTaskManager:
-    """Manages the process of loading and tracking progress across data shards."""
+    """
+    分片任务管理器 — 管理数据分片的加载和处理进度
+
+    核心职责:
+    - 根据数据量和内存动态计算最优分片大小
+    - 按 ID 范围逐片加载数据到内存
+    - 跟踪处理进度、重试统计、内存使用
+    - 处理结束时输出统计报告
+    """
     def __init__(
         self,
         task_pool: BaseTaskPool,
@@ -437,7 +489,16 @@ def init_logging(log_config: Optional[Dict[str, Any]]):
 
 # --- Main Processor Class ---
 class UniversalAIProcessor:
-    """Orchestrates the entire AI data processing workflow."""
+    """
+    AI 数据处理主编排器
+
+    负责编排整个处理流程:
+    1. 加载配置 → 初始化日志/数据源/验证器/分片管理器
+    2. 构建提示词 → 调用 Flux API → 解析 JSON 响应
+    3. 连续任务流模式: 动态填充任务池，任务完成即回写，避免批次锁定
+    4. 错误分类重试: API 错误触发全局暂停，内容/系统错误直接重试
+    5. 重试时从数据源重新加载原始数据，防止内存泄漏
+    """
     def __init__(self, config_path: str):
         """Loads config, initializes components."""
         try: self.config = load_config(config_path)
@@ -763,7 +824,10 @@ class UniversalAIProcessor:
             return {"_error": f"unexpected_error: {str(e)}", "_error_type": ErrorType.SYSTEM_ERROR}
         # --- END MODIFIED METHOD ---
 
-    # --- 修改后的连续任务流处理方法，增加任务状态追踪 ---
+    # --- 连续任务流核心循环 ---
+    # 设计模式: 不同于传统 "加载批次 → 等待全部完成 → 写回" 的方式，
+    # 连续任务流持续填充任务池到最大并发数，任一任务完成即立刻处理结果并回写，
+    # 同时补充新任务，保持并发度最大化。
     async def process_shard_async_continuous(self):
         """连续任务流模式的异步处理方法，避免批次锁定，增加任务状态跟踪"""
         if not self.task_manager.initialize():

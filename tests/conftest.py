@@ -1,10 +1,28 @@
 """
 pytest fixtures - 测试共享资源
 
+被测模块: 无（纯基础设施）
+
 Fixtures 是 pytest 的核心概念，用于:
 1. 提供测试数据
 2. 设置/清理测试环境
 3. 在多个测试间共享资源
+
+Fixtures 清单:
+    配置类:
+        - sample_config        提供示例配置字典（含 global/datasource/prompt 等）
+        - sample_config_file   将 sample_config 写入临时 YAML 文件
+    数据类:
+        - sample_dataframe     提供 5 行示例 DataFrame（含空值场景）
+        - sample_excel_file    将 sample_dataframe 写入临时 Excel 文件
+    引擎类:
+        - pandas_engine        PandasEngine 实例（pandas 不可用则跳过）
+        - polars_engine        PolarsEngine 实例（polars 不可用则跳过）
+    临时目录类:
+        - temp_dir             提供 pytest 临时目录
+        - clean_temp_dir       提供独立的干净临时目录（自动清理）
+    Mock 类:
+        - mock_api_response    模拟 OpenAI 兼容的 API 响应体
 """
 
 import importlib.util

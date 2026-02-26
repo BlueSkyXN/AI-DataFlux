@@ -1,3 +1,13 @@
+/**
+ * AI 模型配置分区组件
+ *
+ * 用途：管理 AI 模型列表，支持新增、删除、复制模型条目
+ *       每个模型可配置 ID、名称、模型标识、渠道绑定、API Key、超时、
+ *       权重、温度、安全 RPS、JSON Schema 支持等参数
+ *
+ * 导出：ModelsSection（默认导出）
+ *   Props: SectionProps
+ */
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
@@ -8,6 +18,7 @@ import SelectDropdown from '../shared/SelectDropdown';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import ArrayItemCard from '../shared/ArrayItemCard';
 
+/** 单个模型的配置数据结构 */
 interface ModelConfig {
   id: number;
   name: string;
@@ -22,6 +33,7 @@ interface ModelConfig {
   supports_advanced_params: boolean;
 }
 
+/** 新模型的默认配置值 */
 const defaultModel: ModelConfig = {
   id: 1,
   name: '',
@@ -36,6 +48,10 @@ const defaultModel: ModelConfig = {
   supports_advanced_params: false,
 };
 
+/**
+ * 模型配置组件
+ * 以可折叠卡片列表展示所有模型，支持增删改复制操作
+ */
 export default function ModelsSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
@@ -43,6 +59,7 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
   const channels = (getConfig(['channels']) as Record<string, { name?: string }>) ?? {};
 
   // Build channel options for dropdown
+  // 构建渠道下拉选项列表
   const channelOptions = Object.entries(channels).map(([id, ch]) => ({
     value: id,
     label: ch.name ? `${id} - ${ch.name}` : id,
@@ -51,21 +68,25 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
     channelOptions.push({ value: '1', label: '1' });
   }
 
+  /** 更新指定模型的某个字段 */
   const handleUpdate = (index: number, field: keyof ModelConfig, value: unknown) => {
     const next = [...models];
     next[index] = { ...next[index], [field]: value };
     updateConfig(['models'], next);
   };
 
+  /** 新增模型，自动分配递增 ID */
   const handleAdd = () => {
     const maxId = models.reduce((max, m) => Math.max(max, m.id ?? 0), 0);
     updateConfig(['models'], [...models, { ...defaultModel, id: maxId + 1 }]);
   };
 
+  /** 删除指定索引的模型 */
   const handleRemove = (index: number) => {
     updateConfig(['models'], models.filter((_, i) => i !== index));
   };
 
+  /** 复制指定模型，插入到原模型下方 */
   const handleDuplicate = (index: number) => {
     const maxId = models.reduce((max, m) => Math.max(max, m.id ?? 0), 0);
     const copy = { ...models[index], id: maxId + 1, name: `${models[index].name}-copy` };

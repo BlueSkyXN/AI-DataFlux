@@ -4,6 +4,52 @@
 本模块实现任务处理状态的线程安全管理。在连续任务流模式下，
 多个协程可能同时处理任务，状态管理器确保一致性和防重复。
 
+类/函数清单:
+    TaskStateManager:
+        - __init__() -> None
+          初始化: 创建 _tasks_in_progress (Set) 和 _task_metadata (Dict)
+          及对应的 threading.Lock
+
+        - try_start_task(task_id: Any) -> bool
+          原子操作: 检查并标记任务为处理中
+          输入: Any 任务唯一 ID | 输出: bool True=成功标记, False=已在处理中
+
+        - complete_task(task_id: Any) -> None
+          从 _tasks_in_progress 中移除任务 (discard，无需存在)
+          输入: Any 任务 ID
+
+        - is_task_in_progress(task_id: Any) -> bool
+          查询任务是否正在处理中
+          输入: Any 任务 ID | 输出: bool
+
+        - get_active_count() -> int
+          返回 _tasks_in_progress 集合大小 (当前并发数)
+          输出: int
+
+        - get_metadata(task_id: Any) -> TaskMetadata
+          获取元数据，不存在则自动创建 TaskMetadata(task_id)
+          输入: Any 任务 ID | 输出: TaskMetadata
+
+        - remove_metadata(task_id: Any) -> None
+          从 _task_metadata 中删除 (pop，安全删除)
+          输入: Any 任务 ID
+
+        - cleanup_expired(max_age_hours: int = 24) -> int
+          遍历 _task_metadata，删除 created_at 早于阈值的条目
+          输入: int 最大保留小时数 | 输出: int 清理数量
+
+关键变量:
+    - _tasks_in_progress: Set[Any] 正在处理的任务 ID 集合
+    - _progress_lock: threading.Lock 保护 _tasks_in_progress
+    - _task_metadata: Dict[Any, TaskMetadata] 任务 ID → 元数据映射
+    - _metadata_lock: threading.Lock 保护 _task_metadata
+
+模块依赖:
+    - logging: 清理日志
+    - threading: Lock 线程安全锁
+    - time: 过期计算时间戳
+    - src.models.task.TaskMetadata: 任务元数据 (含 created_at, retry 计数)
+
 设计目标:
     ┌─────────────────────────────────────────────────────────────────┐
     │                     TaskStateManager                             │

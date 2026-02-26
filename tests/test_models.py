@@ -1,11 +1,40 @@
 """
 模型数据结构测试
 
+被测模块: src/models/task.py (TaskMetadata, ErrorRecord), src/models/errors.py (ErrorType)
+
 测试 src/models/ 中的数据模型，包括：
 - TaskMetadata: 任务元数据生命周期
 - ErrorType: 错误类型枚举
 - 重试计数管理
 - 时间戳追踪
+
+测试类/函数清单:
+    TestTaskMetadata                           TaskMetadata 数据类测试
+        test_create_task_metadata              验证创建元数据默认值
+        test_increment_retry                   验证递增重试次数
+        test_increment_retry_multiple_times    验证多次递增同一错误类型
+        test_increment_retry_different_types   验证不同错误类型独立计数
+        test_add_error_to_history              验证添加错误到历史记录
+        test_error_history_limit               验证错误历史最多保留 5 条
+        test_reset_retry_count                 验证重置指定类型重试次数
+        test_reset_all                         验证重置所有状态
+        test_total_retries_property            验证总重试次数属性
+        test_has_errors_property               验证是否有错误属性
+        test_last_error_property               验证最近错误属性
+    TestErrorRecord                            ErrorRecord 数据类测试
+        test_create_error_record               验证创建错误记录
+    TestErrorType                              ErrorType 枚举测试
+        test_error_types                       验证枚举值
+        test_error_type_from_string            验证从字符串创建枚举
+        test_error_type_comparison             验证枚举比较
+        test_error_type_in_dict                验证枚举作为字典键
+    TestTaskMetadataEdgeCases                  边界情况测试
+        test_metadata_with_string_record_id    验证字符串 record_id
+        test_metadata_with_none_record_id      验证 None record_id
+        test_created_at_timestamp              验证创建时间戳范围
+        test_last_retry_at_updates             验证最后重试时间递增
+        test_get_retry_count_unknown_type      验证未递增类型返回 0
 """
 
 import time

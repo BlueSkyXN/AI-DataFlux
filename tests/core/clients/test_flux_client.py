@@ -1,12 +1,22 @@
 """
 Flux AI 客户端单元测试
 
+被测模块: src/core/clients/flux_client.py (FluxAIClient)
+
 测试 src/core/clients/flux_client.py 的 FluxAIClient 类功能，包括：
 - API 调用成功场景
 - HTTP 错误处理
 - 超时处理
 - 响应解析
 - JSON 模式支持
+
+测试类/函数清单:
+    TestFluxAIClient                   Flux AI 客户端测试
+        test_call_success              验证成功调用返回内容并传递正确 model
+        test_call_api_error            验证 500 错误抛出 ClientResponseError
+        test_call_invalid_json         验证 200 但 JSON 无效时抛出异常
+        test_call_timeout              验证超时抛出 TimeoutError
+        test_url_normalization         验证 URL 自动补全 /v1/chat/completions
 """
 
 import asyncio
@@ -21,6 +31,7 @@ FluxAIClient = flux_client_module.FluxAIClient
 
 
 class TestFluxAIClient:
+    """Flux AI 客户端测试"""
 
     @pytest.fixture
     def client(self):
@@ -93,6 +104,7 @@ class TestFluxAIClient:
         assert "timed out" in str(exc.value)
 
     def test_url_normalization(self):
+        """测试 URL 自动补全 /v1/chat/completions 路径"""
         c1 = FluxAIClient("http://api.com")
         assert c1.api_url == "http://api.com/v1/chat/completions"
 

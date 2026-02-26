@@ -1,6 +1,8 @@
 """
 CLI 入口测试
 
+被测模块: cli.py
+
 测试 cli.py 的各个子命令，包括：
 - version: 版本信息显示
 - check: 依赖库检查
@@ -8,6 +10,19 @@ CLI 入口测试
 - process: 主处理流程 (配置验证)
 - token: Token 估算命令
 - gui: Web GUI 控制面板
+
+测试类/函数清单:
+    TestCLI                        CLI 命令测试
+        test_version               验证 version 命令输出包含版本号
+        test_check                 验证 check 命令输出包含依赖库名
+        test_help                  验证 --help 列出所有子命令
+        test_process_help          验证 process --help 显示 --config/--validate 参数
+        test_gateway_help          验证 gateway --help 显示 --port/--host 参数
+        test_gui_help              验证 gui --help 显示 --port/--no-browser 参数
+        test_process_validate      验证有效配置文件通过 --validate 检查
+        test_process_invalid_config 验证无效配置文件导致非零退出码
+        test_no_command            验证无命令时显示帮助信息
+        test_token_help            验证 token --help 显示 --mode 及模式选项
 """
 
 import subprocess

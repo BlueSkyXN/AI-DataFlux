@@ -40,6 +40,42 @@ Unicode 检测逻辑:
     │ 复选 (未选)   │ ❌         │ [--]       │
     └──────────────┴────────────┴────────────┘
 
+函数清单:
+    _safe_print(text) -> None
+        安全打印，编码错误时回退到 ASCII 替代符
+        输入: text (str) - 要打印的文本
+
+    _configure_windows_console() -> None
+        配置 Windows 控制台 UTF-8 支持（仅 win32 平台生效）
+
+    supports_unicode() -> bool
+        检测控制台是否支持 Unicode 输出
+        输出: bool - 是否支持
+        环境变量覆盖: FORCE_ASCII, FORCE_UNICODE
+
+    print_status(available, name, state_true, state_false) -> None
+        打印带复选图标的状态行
+        输入: available (bool), name (str), state_true (str), state_false (str)
+
+    print_error(message) -> None
+        打印错误消息的快捷函数
+
+    print_tip(message) -> None
+        打印提示消息的快捷函数
+
+类:
+    Console
+        跨平台控制台输出类（惰性检测 Unicode 支持）
+        属性: ok, error, info, tip, warn, check, cross (符号属性)
+        方法: print_ok(), print_error(), print_info(), print_tip(), print_warn()
+              reset() - 重置 Unicode 检测缓存
+
+关键变量:
+    console: Console - 全局单例实例
+
+模块依赖:
+    - sys, os, locale: 平台检测与编码查询
+
 使用示例:
     from src.utils.console import console, print_status
 

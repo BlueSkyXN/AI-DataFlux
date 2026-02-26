@@ -1,11 +1,26 @@
 """
 配置加载测试
 
+被测模块: src/config/settings.py
+
 测试 src/config/settings.py 的配置加载功能，包括：
 - 有效配置文件加载
 - 配置字段验证
 - 错误配置处理 (文件不存在、格式错误)
 - 默认配置深度合并
+
+测试类/函数清单:
+    TestConfigLoading              配置加载测试
+        test_load_valid_config     验证有效 YAML 文件可正常加载并包含必要字段
+        test_load_config_example   验证 config-example.yaml 可正常加载
+        test_config_missing_file   验证不存在的文件抛出 FileNotFoundError
+        test_config_invalid_yaml   验证格式错误的 YAML 抛出异常
+    TestConfigValidation           配置验证测试
+        test_datasource_type       验证数据源类型为合法值
+        test_engine_options        验证引擎/读写器选项为合法值
+        test_concurrency_config    验证并发配置为正整数
+        test_columns_config        验证列配置为有效列表/字典
+        test_prompt_config         验证提示词配置包含 template 或 system_prompt
 """
 
 import pytest

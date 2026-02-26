@@ -4,6 +4,20 @@ AI 客户端抽象基类
 本模块定义 AI 客户端的抽象接口，所有具体的 AI 服务客户端
 都应继承此基类并实现 call 方法。
 
+类/函数清单:
+    BaseAIClient (ABC 抽象基类):
+        - call(session, messages, model, temperature, **kwargs) -> str  [抽象方法]
+          调用 AI API 获取响应
+          输入: aiohttp.ClientSession 会话, List[Dict] 消息列表,
+                str 模型名称, float|None 温度系数, **kwargs 扩展参数
+          输出: str AI 响应内容文本
+          异常: aiohttp.ClientResponseError, aiohttp.ClientError, TimeoutError
+
+模块依赖:
+    - abc (ABC, abstractmethod): 抽象基类机制
+    - typing (Dict, List): 类型注解
+    - aiohttp: 异步 HTTP 客户端 (用于类型声明和会话管理)
+
 设计目的:
     - 统一不同 AI 服务的调用接口
     - 便于单元测试 (可注入 Mock 实现)

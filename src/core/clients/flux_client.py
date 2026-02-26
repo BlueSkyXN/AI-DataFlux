@@ -4,6 +4,30 @@ Flux AI 客户端实现
 本模块实现与 Flux API Gateway (OpenAI 兼容) 的通信客户端。
 Flux Gateway 是本项目的 API 网关组件，提供多模型路由和负载均衡。
 
+类/函数清单:
+    FluxAIClient (继承 BaseAIClient):
+        - __init__(api_url, timeout=600) -> None
+          初始化客户端，自动补全 API 路径并配置超时
+          输入: str API 端点 URL, int 总超时秒数
+          关键变量: self.api_url (补全后的完整 URL),
+                    self.request_timeout (aiohttp.ClientTimeout 实例)
+
+        - call(session, messages, model, temperature, use_json_schema, **kwargs) -> str
+          发送 Chat Completions 请求并解析响应
+          输入: aiohttp.ClientSession 会话, List[Dict] 消息列表,
+                str 模型名, float|None 温度系数, bool JSON Schema 开关
+          输出: str AI 生成的文本内容
+          异常: aiohttp.ClientResponseError (HTTP错误/响应无效),
+                TimeoutError (超时), aiohttp.ClientError (网络错误)
+
+模块依赖:
+    - asyncio: 异步超时异常处理
+    - json: 响应 JSON 解析
+    - logging: 请求/响应日志
+    - time: 耗时计算
+    - aiohttp: 异步 HTTP 客户端
+    - .base.BaseAIClient: 抽象基类
+
 通信协议:
     - 使用 OpenAI Chat Completions API 格式
     - POST /v1/chat/completions

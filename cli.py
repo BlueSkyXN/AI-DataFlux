@@ -41,6 +41,38 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
     - src.data.engines: 数据引擎
     - src.utils.console: 控制台输出工具
 
+函数清单:
+    辅助函数:
+        _validate_port(value: str) -> int
+            验证端口号范围 (1024-65535)
+            输入: 端口号字符串 | 输出: 验证通过的端口号整数
+        _validate_config_path(value: str) -> str
+            验证配置文件路径格式 (.yaml/.yml 扩展名)
+            输入: 文件路径字符串 | 输出: 验证通过的路径字符串
+        _check_rlimit() -> None
+            检查 Unix 文件描述符限制，低于 256 时输出警告
+
+    子命令处理函数 (均接收 argparse.Namespace 参数，返回 int 退出码):
+        cmd_process(args) -> int
+            执行数据处理：支持 --validate 仅验证模式和完整处理模式
+        cmd_gateway(args) -> int
+            启动 API 网关服务：配置监听地址、端口、工作进程数
+        cmd_version(args) -> int
+            显示 AI-DataFlux 版本号
+        cmd_check(args) -> int
+            检查可选高性能库 (polars/calamine/xlsxwriter) 安装状态
+        cmd_token(args) -> int
+            估算 Token 用量：支持 in/out/io 三种模式
+        cmd_gui(args) -> int
+            启动 Web GUI 控制面板 (仅完整版可用)
+
+    主入口:
+        main() -> int
+            CLI 主入口：创建参数解析器、注册子命令、分发执行
+
+关键变量:
+    resource: Unix 资源限制模块 (Windows 下为 None)
+
 作者: AI-DataFlux Team
 版本: 参见 src/__init__.py
 """

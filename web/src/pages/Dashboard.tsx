@@ -1,13 +1,43 @@
+/**
+ * 仪表盘页面组件
+ *
+ * 功能职责：
+ * - 展示 Gateway（API 网关）和 Process（数据处理器）的运行状态
+ * - 提供启动/停止操作按钮（停止前弹出确认对话框）
+ * - 显示 PID、端口、模型数量、运行时间、处理进度等关键指标
+ * - 处理进度条可视化
+ * - 2 秒间隔自动轮询刷新状态
+ * - 支持检测外部独立运行的 Gateway/Process 实例
+ *
+ * 导出：默认导出 Dashboard 组件
+ *
+ * 内部组件：
+ * - LoadingSpinner — 加载中旋转图标
+ * - ConfirmDialog — 停止操作确认对话框
+ * - StatusLight — 状态指示灯（绿/黄/灰）
+ *
+ * 内部函数：
+ * - formatDuration() — 秒数格式化为人类可读时长
+ *
+ * 依赖模块：
+ * - api — fetchStatus / startGateway / stopGateway / startProcess / stopProcess
+ * - i18n — 国际化翻译 + 字符串插值
+ * - types — StatusResponse 类型
+ */
 import { useEffect, useState, useCallback } from 'react';
 import type { StatusResponse } from '../types';
 import { fetchStatus, startGateway, stopGateway, startProcess, stopProcess } from '../api';
 import { getTranslations, interpolate, type Language } from '../i18n';
 
+/** Dashboard 组件的 Props 类型 */
 interface DashboardProps {
+  /** 配置文件路径（启动服务时传递给后端） */
   configPath: string;
+  /** 当前界面语言 */
   language: Language;
 }
 
+/** 加载中旋转动画图标 */
 // Loading spinner component
 function LoadingSpinner() {
   return (
@@ -18,6 +48,12 @@ function LoadingSpinner() {
   );
 }
 
+/**
+ * 确认对话框组件
+ *
+ * 用于停止 Gateway/Process 前的二次确认，防止误操作。
+ * 包含半透明遮罩层和居中对话框卡片。
+ */
 // Confirmation dialog component
 function ConfirmDialog({
   open,
@@ -66,6 +102,16 @@ function ConfirmDialog({
   );
 }
 
+/**
+ * 状态指示灯组件
+ *
+ * 根据进程状态显示不同颜色：
+ * - running（运行中）→ 绿色 + 呼吸动画
+ * - exited（已退出）→ 黄色
+ * - stopped（已停止）→ 灰色
+ *
+ * @param status - 进程状态字符串
+ */
 function StatusLight({ status }: { status: string }) {
   let colorClass = 'bg-gray-400';
   let glowClass = '';
@@ -84,23 +130,38 @@ function StatusLight({ status }: { status: string }) {
   );
 }
 
+/**
+ * 将秒数格式化为人类可读时长
+ * @param seconds - 秒数
+ * @returns 格式化字符串，如 '5s'、'3m 20s'、'1h 30m'
+ */
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+/**
+ * 仪表盘主组件
+ *
+ * 管理 Gateway 和 Process 的状态轮询、启停操作、确认对话框。
+ * 展示两个卡片式面板，分别显示网关和处理器的运行信息。
+ */
 export default function Dashboard({ configPath, language }: DashboardProps) {
   const t = getTranslations(language);
+  /** 系统状态数据 */
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  /** 各服务的操作加载状态 */
   const [loading, setLoading] = useState<{ gateway: boolean; process: boolean }>({ gateway: false, process: false });
+  /** 错误信息 */
   const [error, setError] = useState<string | null>(null);
+  /** 停止确认对话框状态 */
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
     target: 'gateway' | 'process' | null;
   }>({ open: false, target: null });
 
-  // Fetch status periodically
+  // Fetch status periodically — 每 2 秒轮询系统状态
   const refreshStatus = useCallback(async () => {
     try {
       const data = await fetchStatus();
@@ -117,7 +178,8 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     return () => clearInterval(interval);
   }, [refreshStatus]);
 
-  // Handlers
+  // Handlers — 服务启停操作
+  /** 启动网关 */
   const handleStartGateway = async () => {
     setLoading(prev => ({ ...prev, gateway: true }));
     try {
@@ -130,6 +192,7 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     }
   };
 
+  /** 停止网关（确认后执行） */
   const handleStopGateway = async () => {
     setConfirmDialog({ open: false, target: null });
     setLoading(prev => ({ ...prev, gateway: true }));
@@ -143,6 +206,7 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     }
   };
 
+  /** 启动数据处理器 */
   const handleStartProcess = async () => {
     setLoading(prev => ({ ...prev, process: true }));
     try {
@@ -155,6 +219,7 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     }
   };
 
+  /** 停止数据处理器（确认后执行） */
   const handleStopProcess = async () => {
     setConfirmDialog({ open: false, target: null });
     setLoading(prev => ({ ...prev, process: true }));
@@ -168,17 +233,19 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     }
   };
 
+  // --- 从状态数据中提取关键指标 ---
   const gatewayStatus = status?.gateway?.managed?.status || 'stopped';
   const processStatus = status?.process?.managed?.status || 'stopped';
   const gatewayHealth = status?.gateway?.health;
   const processProgressRaw = status?.process?.progress;
   // Keep aligned with backend PROGRESS_TIMEOUT_SECONDS (15s)
+  // 与后端 PROGRESS_TIMEOUT_SECONDS (15秒) 保持一致，超时则视为过期数据
   const processProgressIsFresh = Boolean(
     processProgressRaw && (Date.now() / 1000) - processProgressRaw.ts <= 15
   );
   const processProgress = processProgressIsFresh ? processProgressRaw : undefined;
 
-  // Calculate runtime
+  // Calculate runtime — 计算运行时长
   const gatewayRuntime = status?.gateway?.managed?.start_time
     ? (Date.now() / 1000) - status.gateway.managed.start_time
     : 0;
@@ -187,6 +254,7 @@ export default function Dashboard({ configPath, language }: DashboardProps) {
     : 0;
 
   // Show "External" label if not managed but health check passes
+  // 非受控但健康检查通过时显示「外部」标签（表示独立运行的实例）
   const gatewayIsExternal = gatewayStatus !== 'running' && Boolean(gatewayHealth);
   const processIsExternal = processStatus !== 'running' && Boolean(processProgress);
 

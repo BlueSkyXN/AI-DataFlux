@@ -1,11 +1,27 @@
 """
 JSON 验证器测试
 
+被测模块: src/core/validator.py (JsonValidator)
+
 测试 src/core/validator.py 的字段验证功能，包括：
 - 枚举值验证
 - 多字段规则配置
 - 验证启用/禁用
 - 无效值检测与报告
+
+测试类/函数清单:
+    TestJsonValidator                  JSON 验证器测试
+        test_valid_values              验证合法枚举值通过
+        test_invalid_value             验证非法枚举值被检出
+        test_missing_field             验证缺失字段不算错误（只验证已有字段）
+        test_disabled_validator        验证禁用时总返回 True
+        test_empty_data                验证空数据通过
+        test_case_sensitivity          验证大小写敏感
+        test_extra_fields              验证额外字段被忽略
+    TestValidatorEdgeCases             边界情况测试
+        test_numeric_values            验证数字类型不匹配字符串规则
+        test_empty_rules               验证空规则时所有数据有效
+        test_not_configured            验证未配置时默认禁用
 """
 
 import pytest

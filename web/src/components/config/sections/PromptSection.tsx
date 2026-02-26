@@ -1,3 +1,12 @@
+/**
+ * Prompt 提示词配置分区组件
+ *
+ * 用途：配置 AI 请求的提示词相关参数，包括必填字段列表、温度、
+ *       JSON Schema 开关、系统提示词、用户提示模板
+ *
+ * 导出：PromptSection（默认导出）
+ *   Props: SectionProps
+ */
 import type { SectionProps } from '../SectionRenderer';
 import { getTranslations } from '../../../i18n';
 import SectionCard from '../shared/SectionCard';
@@ -7,6 +16,10 @@ import ToggleSwitch from '../shared/ToggleSwitch';
 import TextareaField from '../shared/TextareaField';
 import StringListEditor from '../shared/StringListEditor';
 
+/**
+ * 提示词配置组件
+ * 包含基本设置、系统提示词、模板三个卡片区域
+ */
 export default function PromptSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
@@ -20,6 +33,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
   return (
     <div className="space-y-4">
       {/* Basic Settings */}
+      {/* 基本设置：必填字段、温度、开关选项 */}
       <SectionCard title={t.cfgPromptSettings}>
         <FormField label={t.cfgRequiredFields} description={t.cfgRequiredFieldsDesc}>
           <StringListEditor
@@ -55,6 +69,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
       </SectionCard>
 
       {/* System Prompt */}
+      {/* 系统提示词：设定 AI 的角色和行为 */}
       <SectionCard title={t.cfgSystemPrompt}>
         <TextareaField
           value={systemPrompt}
@@ -66,6 +81,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
       </SectionCard>
 
       {/* Template */}
+      {/* 用户模板：使用 {record_json} 等占位符构建提示词 */}
       <SectionCard title={t.cfgTemplate} description={t.cfgTemplateDesc}>
         <TextareaField
           value={template}

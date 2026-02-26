@@ -1,11 +1,39 @@
 """
 SQLite 数据源任务池单元测试
 
+被测模块: src/data/sqlite.py (SQLiteTaskPool, SQLiteConnectionManager)
+
 测试 src/data/sqlite.py 的 SQLiteTaskPool 类功能，包括：
 - SQLiteConnectionManager 连接管理
 - 线程本地连接隔离
 - WAL 模式配置
 - 任务读取与批量写入
+
+测试类/函数清单:
+    TestSQLiteConnectionManager                    连接管理器测试
+        test_set_db_path                           验证设置数据库路径
+        test_get_connection_without_path_raises     验证未设置路径时抛 ValueError
+        test_close_connection                      验证关闭连接
+    TestSQLiteTaskPool                             任务池测试
+        test_initialization                        验证初始化参数存储
+        test_initialization_file_not_found         验证数据库文件不存在时抛异常
+        test_initialization_table_not_found        验证表不存在时抛异常
+        test_initialization_rejects_invalid_identifier  验证非法标识符被拒绝
+        test_get_total_task_count                  验证未处理任务数
+        test_get_processed_task_count              验证已处理任务数
+        test_get_id_boundaries                     验证 ID 边界
+        test_initialize_shard                      验证分片初始化
+        test_get_task_batch                        验证获取任务批次
+        test_update_task_results                   验证更新结果写入数据库
+        test_update_task_results_skip_error        验证跳过带 _error 标记的结果
+        test_reload_task_data                      验证重载任务数据
+        test_reload_task_data_not_found            验证重载不存在记录返回 None
+        test_sample_unprocessed_rows               验证采样未处理行
+        test_sample_processed_rows                 验证采样已处理行
+        test_fetch_all_rows                        验证获取所有行
+        test_fetch_all_processed_rows              验证获取所有已处理行
+    TestSQLiteTaskPoolWithRequireAny                require_all=False 测试
+        test_require_any_input_field               验证任一输入列非空即可
 """
 
 import pytest
