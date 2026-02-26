@@ -45,6 +45,7 @@ ClientSession 实例，避免重复创建连接，提高请求效率。
     - 关闭连接池后不能再获取 Session
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -90,6 +91,7 @@ class SessionPool:
         self.max_connections = max_connections
         self.max_connections_per_host = max_connections_per_host
         self._resolver = resolver
+        self._create_lock = asyncio.Lock()
 
     async def get_or_create(
         self, ssl_verify: bool = True, proxy: str = ""
@@ -115,7 +117,22 @@ class SessionPool:
 
         key = (ssl_verify, proxy)
 
-        if key not in self.sessions:
+        existing = self.sessions.get(key)
+        if existing is not None:
+            if not existing.closed:
+                return existing
+            self.sessions.pop(key, None)
+
+        async with self._create_lock:
+            if self._closed:
+                raise RuntimeError("SessionPool 已关闭")
+
+            existing = self.sessions.get(key)
+            if existing is not None:
+                if not existing.closed:
+                    return existing
+                self.sessions.pop(key, None)
+
             # 创建新的 Session
             # 注意：如果有自定义解析器，禁用 DNS 缓存以确保每次新连接都走解析器轮询
             connector = aiohttp.TCPConnector(
@@ -135,8 +152,7 @@ class SessionPool:
             logging.debug(
                 f"创建新的 ClientSession: ssl_verify={ssl_verify}, proxy={proxy or 'None'}"
             )
-
-        return self.sessions[key]
+            return session
 
     async def close_all(self) -> None:
         """
@@ -145,17 +161,18 @@ class SessionPool:
         释放所有连接资源，包括 Session 和自定义解析器。
         关闭后不能再获取 Session。
         """
-        self._closed = True
+        async with self._create_lock:
+            self._closed = True
+            sessions_to_close = list(self.sessions.items())
+            self.sessions.clear()
 
         # 关闭所有 Session
-        for key, session in self.sessions.items():
+        for key, session in sessions_to_close:
             try:
                 await session.close()
                 logging.debug(f"已关闭 ClientSession: {key}")
             except Exception as e:
                 logging.warning(f"关闭 ClientSession 时出错: {e}")
-
-        self.sessions.clear()
 
         # 关闭自定义解析器
         if self._resolver:

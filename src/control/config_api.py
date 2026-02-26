@@ -27,6 +27,7 @@ from . import runtime
 # - 打包：优先 cwd（看起来像项目根），否则可执行文件目录
 # - 可通过环境变量覆盖
 PROJECT_ROOT = str(runtime.get_project_root())
+ALLOWED_CONFIG_EXTENSIONS = {".yaml", ".yml"}
 
 
 def _validate_path(path: str) -> str:
@@ -72,12 +73,41 @@ def read_config(path: str) -> str:
         HTTPException: 404 - 文件不存在
     """
     real_path = _validate_path(path)
+    _validate_read_target(path, real_path)
 
     if not os.path.isfile(real_path):
         raise HTTPException(404, f"File not found: {path}")
 
     with open(real_path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _validate_write_target(path: str, real_path: str) -> None:
+    """
+    校验写入目标是否属于允许的配置文件类型
+
+    仅允许写入 YAML 配置文件，降低“任意文件改写”风险。
+    """
+    ext = os.path.splitext(real_path)[1].lower()
+    if ext not in ALLOWED_CONFIG_EXTENSIONS:
+        raise HTTPException(
+            403,
+            f"Write blocked: only YAML config files are allowed ({path})",
+        )
+
+
+def _validate_read_target(path: str, real_path: str) -> None:
+    """
+    校验读取目标是否属于允许的配置文件类型
+
+    仅允许读取 YAML 配置文件，降低非必要文件暴露面。
+    """
+    ext = os.path.splitext(real_path)[1].lower()
+    if ext not in ALLOWED_CONFIG_EXTENSIONS:
+        raise HTTPException(
+            403,
+            f"Read blocked: only YAML config files are allowed ({path})",
+        )
 
 
 def write_config(path: str, content: str) -> dict:
@@ -97,6 +127,7 @@ def write_config(path: str, content: str) -> dict:
         HTTPException: 403 - 路径在项目目录外
     """
     real_path = _validate_path(path)
+    _validate_write_target(path, real_path)
     backed_up = False
 
     # 如果文件已存在，创建备份

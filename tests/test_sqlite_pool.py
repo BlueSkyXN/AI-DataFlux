@@ -139,6 +139,16 @@ class TestSQLiteTaskPool:
             # 确保关闭连接，否则 Windows 下 fixture 清理文件会报 PermissionError
             SQLiteConnectionManager.close_connection()
 
+    def test_initialization_rejects_invalid_identifier(self, temp_db):
+        """测试非法标识符会被拒绝"""
+        with pytest.raises(ValueError, match="非法标识符"):
+            SQLiteTaskPool(
+                db_path=temp_db,
+                table_name="tasks;drop",
+                columns_to_extract=["input_text"],
+                columns_to_write={"result": "output_result"},
+            )
+
     def test_get_total_task_count(self, task_pool):
         """测试获取未处理任务数"""
         # require_all_input_fields=True，只有 id=1,2 满足条件

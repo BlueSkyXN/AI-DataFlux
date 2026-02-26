@@ -226,9 +226,11 @@ def _register_routes(app: FastAPI) -> None:
             # 非流式响应：直接返回 JSON
             return result
 
-        except Exception as e:
-            logging.error(f"聊天补全请求失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception:
+            logging.exception("聊天补全请求失败")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @app.get("/v1/models")
     async def list_models():

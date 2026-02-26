@@ -133,6 +133,19 @@ python cli.py gui --no-browser
 
 控制面板默认运行在 `http://127.0.0.1:8790`，仅监听本地地址。
 
+控制面安全策略（默认开启）：
+
+- `/api/*` 与 `/api/logs` 需要 `Authorization: Bearer <token>`
+- 若未设置 `DATAFLUX_CONTROL_TOKEN`，启动时会自动生成临时 token（自动打开浏览器时会附带 `#token=...`）
+- `/api/logs` 的浏览器鉴权通过 `Sec-WebSocket-Protocol: dataflux-token-b64.<base64url>` 透传
+- 配置读写接口仅允许 `.yaml/.yml` 文件，禁止访问/改写脚本等非配置文件
+
+如需固定 token（推荐）：
+
+```bash
+DATAFLUX_CONTROL_TOKEN=your-strong-token python cli.py gui --no-browser
+```
+
 **详细文档**：[Web GUI 控制面板指南](./docs/GUI.md)
 
 ### 规则路由

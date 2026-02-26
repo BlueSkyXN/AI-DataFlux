@@ -92,17 +92,20 @@ python cli.py gui
 - **端口分配**：Control Server 使用 `8790`，Gateway 保持 `8787`
 - **前端托管**：FastAPI 直接 serve `web/dist/` 静态文件
 - **退出行为**：Ctrl+C 关闭 Control Server 时，子进程跟着停止
-- **仅本地访问**：只监听 127.0.0.1，不做鉴权
+- **仅本地访问**：只监听 127.0.0.1，且 API/WS 默认启用 Bearer Token 鉴权
 
 ## API 接口
 
 控制面板提供以下 REST API 接口：
 
+> 认证说明：所有 `/api/*` 请求都需要 `Authorization: Bearer <token>`。
+> `python cli.py gui` 自动打开浏览器时会携带 `#token=...`，前端会自动透传。
+
 ### 配置文件 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/config?path=config.yaml` | 读取配置文件内容 |
+| `GET` | `/api/config?path=config.yaml` | 读取配置文件内容（仅允许 `.yaml/.yml`） |
 | `PUT` | `/api/config` | 写入配置文件（自动备份） |
 | `POST` | `/api/config/validate` | 校验 YAML 语法（仅解析，不做业务校验） |
 
@@ -170,8 +173,8 @@ python cli.py gui
 
 | 协议 | 路径 | 说明 |
 |------|------|------|
-| `WS` | `/api/logs?target=gateway` | Gateway 日志流 |
-| `WS` | `/api/logs?target=process` | Process 日志流 |
+| `WS` | `/api/logs?target=gateway` | Gateway 日志流（鉴权 token 通过 `Sec-WebSocket-Protocol: dataflux-token-b64.<base64url>` 透传） |
+| `WS` | `/api/logs?target=process` | Process 日志流（鉴权 token 通过 `Sec-WebSocket-Protocol: dataflux-token-b64.<base64url>` 透传） |
 
 ### 响应示例
 
@@ -240,6 +243,7 @@ STOPPED  ──start──▶  RUNNING  ──进程退出──▶  EXITED
 - **自动备份**：写入前自动创建 `.bak` 备份文件
 - **原子写入**：通过临时文件确保写入完整性
 - **路径保护**：防止路径穿越攻击
+- **写入白名单**：仅允许写入 `.yaml/.yml` 配置文件
 
 ## 日志查看
 
@@ -312,6 +316,7 @@ $env:VITE_CONTROL_SERVER="http://127.0.0.1:9000"; npm run dev
 |---------|------|
 | `VITE_CONTROL_SERVER` | 前端开发时，Vite 代理的 Control Server 地址 |
 | `DATAFLUX_GUI_CORS_ORIGINS` | 逗号分隔的允许跨域来源（开发调试用） |
+| `DATAFLUX_CONTROL_TOKEN` | 控制面鉴权 Token；未设置时服务会自动生成临时 token |
 | `DATAFLUX_PROJECT_ROOT` / `AI_DATAFLUX_PROJECT_ROOT` | 覆盖“项目根目录”（打包运行或非仓库目录启动时有用） |
 
 示例：
@@ -337,8 +342,10 @@ DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
 ## 安全说明
 
 - 控制面板仅监听 `127.0.0.1`，不对外暴露
-- 不实现身份验证，假设本地环境是受信任的
+- 控制面 API 与日志 WebSocket 默认要求 Bearer Token 鉴权
 - 配置文件路径经过校验，防止目录穿越
+- 配置写入仅允许 `.yaml/.yml` 文件，阻断脚本类文件改写
+- 配置读取仅允许 `.yaml/.yml` 文件，减少非必要文件暴露面
 - 写操作要求 `Content-Type: application/json`，用于降低 localhost CSRF 风险
 - 建议不要在公网环境运行
 
@@ -360,6 +367,7 @@ A: 在 Dashboard 页面启动 Gateway 前，可以在配置中修改端口，或
 
 ```bash
 curl -X POST http://127.0.0.1:8790/api/gateway/start \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"port": 8888}'
 ```
@@ -370,6 +378,7 @@ A: 出于 localhost CSRF 缓解策略，所有写操作都必须带 `Content-Typ
 
 ```bash
 curl -X POST http://127.0.0.1:8790/api/gateway/stop \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{}'
 ```

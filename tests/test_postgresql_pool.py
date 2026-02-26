@@ -167,6 +167,26 @@ class TestPostgreSQLTaskPoolMocked:
         assert "output_result" in pool.write_colnames
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
+    def test_initialization_rejects_invalid_identifier(self, mock_pool_manager):
+        """测试非法标识符会被拒绝"""
+        from src.data.postgresql import PostgreSQLTaskPool
+
+        with pytest.raises(ValueError, match="非法标识符"):
+            PostgreSQLTaskPool(
+                connection_config={
+                    "host": "localhost",
+                    "port": 5432,
+                    "user": "test",
+                    "password": "test",
+                    "database": "testdb",
+                },
+                columns_to_extract=["input-text"],
+                columns_to_write={"result": "output_result"},
+                table_name="tasks",
+                schema_name="public",
+            )
+
+    @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.extras")
     @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
     def test_get_total_task_count(self, mock_sql, mock_extras, mock_pool_manager):

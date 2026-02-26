@@ -9,9 +9,72 @@ import type {
 } from './types';
 
 const API_BASE = '';  // Use relative URLs (proxied in dev, served by same host in prod)
+const CONTROL_TOKEN_SESSION_KEY = 'dataflux-control-token';
+let controlTokenCache: string | null = null;
+
+function getControlToken(): string {
+  if (controlTokenCache !== null) {
+    return controlTokenCache;
+  }
+
+  const hash = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const params = new URLSearchParams(hash);
+  const hashToken = (params.get('token') ?? '').trim();
+  if (hashToken) {
+    controlTokenCache = hashToken;
+    window.sessionStorage.setItem(CONTROL_TOKEN_SESSION_KEY, hashToken);
+    params.delete('token');
+    const nextHash = params.toString();
+    const nextUrl = `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`;
+    window.history.replaceState({}, '', nextUrl);
+    return controlTokenCache;
+  }
+
+  const sessionToken = (window.sessionStorage.getItem(CONTROL_TOKEN_SESSION_KEY) ?? '').trim();
+  controlTokenCache = sessionToken;
+  return controlTokenCache;
+}
+
+function withAuthHeaders(headers: Record<string, string> = {}): Record<string, string> {
+  const token = getControlToken();
+  if (!token) {
+    return headers;
+  }
+  return {
+    ...headers,
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+function buildLogsWsUrl(target: 'gateway' | 'process'): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/api/logs?target=${target}`;
+}
+
+function encodeTokenForWsProtocol(token: string): string {
+  const bytes = new TextEncoder().encode(token);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  const base64 = window.btoa(binary);
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function buildLogsWsProtocols(): string[] | undefined {
+  const token = getControlToken();
+  if (!token) {
+    return undefined;
+  }
+  return [`dataflux-token-b64.${encodeTokenForWsProtocol(token)}`];
+}
 
 export async function fetchStatus(): Promise<StatusResponse> {
-  const response = await fetch(`${API_BASE}/api/status`);
+  const response = await fetch(`${API_BASE}/api/status`, {
+    headers: withAuthHeaders(),
+  });
   if (!response.ok) {
     throw new Error(`Failed to fetch status: ${response.status}`);
   }
@@ -19,7 +82,9 @@ export async function fetchStatus(): Promise<StatusResponse> {
 }
 
 export async function fetchConfig(path: string): Promise<ConfigResponse> {
-  const response = await fetch(`${API_BASE}/api/config?path=${encodeURIComponent(path)}`);
+  const response = await fetch(`${API_BASE}/api/config?path=${encodeURIComponent(path)}`, {
+    headers: withAuthHeaders(),
+  });
   if (!response.ok) {
     throw new Error(`Failed to fetch config: ${response.status}`);
   }
@@ -29,7 +94,7 @@ export async function fetchConfig(path: string): Promise<ConfigResponse> {
 export async function saveConfig(path: string, content: string): Promise<ConfigWriteResponse> {
   const response = await fetch(`${API_BASE}/api/config`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ path, content }),
   });
   if (!response.ok) {
@@ -41,7 +106,7 @@ export async function saveConfig(path: string, content: string): Promise<ConfigW
 export async function validateConfig(content: string): Promise<ConfigValidateResponse> {
   const response = await fetch(`${API_BASE}/api/config/validate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ content }),
   });
   if (!response.ok) {
@@ -57,7 +122,7 @@ export async function startGateway(
 ): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/gateway/start`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ config_path: configPath, port, workers }),
   });
   if (!response.ok) {
@@ -69,7 +134,7 @@ export async function startGateway(
 export async function stopGateway(): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/gateway/stop`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: '{}',
   });
   if (!response.ok) {
@@ -81,7 +146,7 @@ export async function stopGateway(): Promise<ManagedProcessStatus> {
 export async function startProcess(configPath: string = 'config.yaml'): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/process/start`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ config_path: configPath }),
   });
   if (!response.ok) {
@@ -93,7 +158,7 @@ export async function startProcess(configPath: string = 'config.yaml'): Promise<
 export async function stopProcess(): Promise<ManagedProcessStatus> {
   const response = await fetch(`${API_BASE}/api/process/stop`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: '{}',
   });
   if (!response.ok) {
@@ -108,9 +173,8 @@ export function connectLogs(
   onMessage: (line: string) => void,
   onError?: (error: Event) => void
 ): WebSocket {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/api/logs?target=${target}`;
-  const ws = new WebSocket(wsUrl);
+  const wsUrl = buildLogsWsUrl(target);
+  const ws = new WebSocket(wsUrl, buildLogsWsProtocols());
   
   ws.onmessage = (event) => {
     onMessage(event.data);
@@ -172,11 +236,10 @@ export class AutoReconnectWebSocket {
   private connect(): void {
     if (this.isClosed) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/logs?target=${this.options.target}`;
+    const wsUrl = buildLogsWsUrl(this.options.target);
     
     try {
-      this.ws = new WebSocket(wsUrl);
+      this.ws = new WebSocket(wsUrl, buildLogsWsProtocols());
     } catch {
       this.scheduleReconnect();
       return;

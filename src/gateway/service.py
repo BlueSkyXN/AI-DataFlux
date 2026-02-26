@@ -625,7 +625,7 @@ class FluxApiService:
             SSE 格式的字符串 (data: {...}\n\n)
         """
         buffer = ""
-        has_yielded = False
+        has_business_output = False
         chunk_count = 0
         last_activity_time = time.time()
         returned_successfully = False
@@ -635,7 +635,6 @@ class FluxApiService:
         # 发送初始保活消息
         try:
             yield ": keeping connection alive\n\n"
-            has_yielded = True
             logging.debug(f"[{model.id}] 已发送初始连接保持消息")
         except Exception as e:
             logging.warning(f"[{model.id}] 发送初始消息失败: {e}")
@@ -692,7 +691,7 @@ class FluxApiService:
                                 "}"
                             ):
                                 yield f"data: {data_content}\n\n"
-                                has_yielded = True
+                                has_business_output = True
                             else:
                                 logging.warning(
                                     f"[{model.id}] 流包含非JSON数据块: {data_content[:100]}..."
@@ -727,12 +726,12 @@ class FluxApiService:
                         and data_content.endswith("}")
                     ):
                         yield f"data: {data_content}\n\n"
-                        has_yielded = True
+                        has_business_output = True
                         returned_successfully = True
                         logging.info(f"[{model.id}] 成功处理最终缓冲区内容")
 
             # 如果流正常结束但没有收到 [DONE]，也发送 [DONE] 保证客户端能正常结束
-            if has_yielded and not returned_successfully:
+            if has_business_output and not returned_successfully:
                 logging.warning(f"[{model.id}] 未收到 [DONE] 但流已结束，补发 [DONE]")
                 yield "data: [DONE]\n\n"
                 returned_successfully = True
@@ -740,7 +739,7 @@ class FluxApiService:
         except aiohttp.ClientPayloadError as e:
             logging.error(f"[{model.id}] 流处理 ClientPayloadError: {e}")
             error_payload = {
-                "error": {"message": f"流响应体错误: {e}", "type": "stream_error"}
+                "error": {"message": "上游流响应体错误", "type": "stream_error"}
             }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -751,7 +750,7 @@ class FluxApiService:
         except aiohttp.ClientConnectionError as e:
             logging.error(f"[{model.id}] 流处理 ClientConnectionError: {e}")
             error_payload = {
-                "error": {"message": f"流连接错误: {e}", "type": "stream_error"}
+                "error": {"message": "上游流连接错误", "type": "stream_error"}
             }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -762,7 +761,7 @@ class FluxApiService:
         except asyncio.TimeoutError as e:
             logging.error(f"[{model.id}] 流处理 TimeoutError: {e}")
             error_payload = {
-                "error": {"message": f"流读取超时: {e}", "type": "stream_error"}
+                "error": {"message": "上游流读取超时", "type": "stream_error"}
             }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -773,7 +772,7 @@ class FluxApiService:
         except aiohttp.ClientError as e:
             logging.error(f"[{model.id}] 流处理 ClientError: {e}")
             error_payload = {
-                "error": {"message": f"流客户端错误: {e}", "type": "stream_error"}
+                "error": {"message": "上游流客户端错误", "type": "stream_error"}
             }
             try:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -785,7 +784,7 @@ class FluxApiService:
             logging.exception(f"[{model.id}] 处理流时发生未知错误", exc_info=e)
             error_payload = {
                 "error": {
-                    "message": f"未知流处理错误: {e}",
+                    "message": "内部流处理错误",
                     "type": "internal_stream_error",
                 }
             }
@@ -798,17 +797,23 @@ class FluxApiService:
         finally:
             # 根据处理结果更新模型状态和指标
             response_time = time.time() - start_time
-            stream_fully_successful = returned_successfully
-            stream_partially_successful = has_yielded and not returned_successfully
+            stream_fully_successful = returned_successfully and has_business_output
+            stream_partially_successful = has_business_output and not returned_successfully
+            stream_no_business_output = returned_successfully and not has_business_output
 
             if stream_fully_successful:
                 self.dispatcher.mark_model_success(model.id)
                 logging.info(f"[{model.id}] 流处理完全成功。耗时:{response_time:.2f}s")
-            elif stream_partially_successful:
+            elif stream_partially_successful or stream_no_business_output:
                 self.dispatcher.mark_model_failed(model.id, ErrorType.CONTENT)
-                logging.warning(
-                    f"[{model.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s"
-                )
+                if stream_no_business_output:
+                    logging.warning(
+                        f"[{model.id}] 流仅收到保活/结束信号，未产生业务输出。耗时:{response_time:.2f}s"
+                    )
+                else:
+                    logging.warning(
+                        f"[{model.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s"
+                    )
             else:  # no data yielded
                 self.dispatcher.mark_model_failed(model.id, ErrorType.API)
                 logging.error(
@@ -819,7 +824,7 @@ class FluxApiService:
             self.dispatcher.update_model_metrics(
                 model.id,
                 response_time,
-                stream_fully_successful or stream_partially_successful,
+                stream_fully_successful,
             )
 
             # 确保关闭响应连接

@@ -19,11 +19,16 @@ Control Server 主模块
 """
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
+import re
+import secrets
 import webbrowser
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, List
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import (
@@ -48,6 +53,90 @@ from .runtime import find_web_dist_dir, get_project_root
 PROJECT_ROOT = str(get_project_root())
 WEB_DIST_PATH = find_web_dist_dir(get_project_root())
 WEB_DIST_DIR = str(WEB_DIST_PATH) if WEB_DIST_PATH else ""
+_CONTROL_AUTH_TOKEN: str | None = None
+_CONTROL_AUTH_TOKEN_SOURCE = "env"
+_BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def get_control_auth_token() -> str:
+    """获取控制面鉴权 Token（优先环境变量，缺省时自动生成）"""
+    global _CONTROL_AUTH_TOKEN, _CONTROL_AUTH_TOKEN_SOURCE
+
+    if _CONTROL_AUTH_TOKEN is None:
+        token = os.environ.get("DATAFLUX_CONTROL_TOKEN", "").strip()
+        if token:
+            _CONTROL_AUTH_TOKEN = token
+            _CONTROL_AUTH_TOKEN_SOURCE = "env"
+        else:
+            _CONTROL_AUTH_TOKEN = secrets.token_urlsafe(32)
+            _CONTROL_AUTH_TOKEN_SOURCE = "generated"
+
+    return _CONTROL_AUTH_TOKEN
+
+
+def _extract_bearer_token(auth_header: str) -> str:
+    """从 Authorization 头提取 Bearer token"""
+    prefix = "Bearer "
+    if not auth_header.startswith(prefix):
+        return ""
+    return auth_header[len(prefix) :].strip()
+
+
+def _is_authorized_token(token: str) -> bool:
+    """校验控制面 Token"""
+    if not token:
+        return False
+    return secrets.compare_digest(token, get_control_auth_token())
+
+
+def _is_authorized_from_candidates(*tokens: str) -> bool:
+    """多个来源 token 任一合法即通过"""
+    return any(_is_authorized_token(token) for token in tokens)
+
+
+def _mask_token(token: str) -> str:
+    """返回脱敏后的 token 文本（用于日志）"""
+    if not token:
+        return "***"
+    if len(token) <= 6:
+        return "***"
+    return f"{token[:3]}...{token[-3:]}"
+
+
+def _decode_base64url_token(encoded: str) -> str:
+    """解码 base64url token，失败时返回空字符串"""
+    if not encoded or not _BASE64URL_PATTERN.fullmatch(encoded):
+        return ""
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        return decoded.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return ""
+
+
+def _extract_ws_token(protocol_header: str) -> tuple[str, str]:
+    """
+    从 Sec-WebSocket-Protocol 提取 token
+
+    优先新格式 dataflux-token-b64.<base64url>，同时兼容旧格式 dataflux-token.<raw-token>。
+    """
+    for protocol in (p.strip() for p in protocol_header.split(",") if p.strip()):
+        if protocol.startswith("dataflux-token-b64."):
+            encoded_token = protocol[len("dataflux-token-b64.") :]
+            decoded_token = _decode_base64url_token(encoded_token)
+            if decoded_token:
+                return protocol, decoded_token
+            continue
+        if protocol.startswith("dataflux-token."):
+            raw_token = protocol[len("dataflux-token.") :]
+            if raw_token:
+                return protocol, raw_token
+    return "", ""
 
 
 # ========== Pydantic Models ==========
@@ -92,9 +181,14 @@ class LogConnectionManager:
             "process": [],
         }
 
-    async def connect(self, websocket: WebSocket, target: str):
+    async def connect(
+        self,
+        websocket: WebSocket,
+        target: str,
+        subprotocol: str | None = None,
+    ):
         """接受连接"""
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         if target in self.active_connections:
             self.active_connections[target].append(websocket)
 
@@ -178,10 +272,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app_state = app.state
     if getattr(app_state, "open_browser", False):
         port = getattr(app_state, "port", 8790)
-        url = f"http://127.0.0.1:{port}"
-        logging.info(f"Opening browser: {url}")
+        control_token = getattr(app_state, "control_auth_token", "")
+        token_fragment = f"#token={quote(control_token)}" if control_token else ""
+        browser_url = f"http://127.0.0.1:{port}{token_fragment}"
+        logging.info(f"Opening browser: http://127.0.0.1:{port}")
         browser_task = asyncio.create_task(
-            _open_browser_when_ready(url=url, host="127.0.0.1", port=port)
+            _open_browser_when_ready(url=browser_url, host="127.0.0.1", port=port)
         )
         browser_task.add_done_callback(
             lambda t: t.exception() if t.done() and not t.cancelled() else None
@@ -211,6 +307,7 @@ def create_control_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+    control_auth_token = get_control_auth_token()
 
     # CORS (仅开发态需要；生产态同源不需要)
     cors_env = os.environ.get("DATAFLUX_GUI_CORS_ORIGINS", "").strip()
@@ -237,18 +334,27 @@ def create_control_app() -> FastAPI:
     # 防止 localhost CSRF：所有写操作要求 application/json
     @app.middleware("http")
     async def require_json_for_api_writes(request: Request, call_next):
-        if request.url.path.startswith("/api/") and request.method in (
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-        ):
-            content_type = request.headers.get("content-type", "")
-            if not content_type.startswith("application/json"):
+        if request.url.path.startswith("/api/"):
+            if request.method == "OPTIONS":
+                return await call_next(request)
+
+            auth_token = _extract_bearer_token(request.headers.get("authorization", ""))
+            if not (
+                auth_token and secrets.compare_digest(auth_token, control_auth_token)
+            ):
                 return JSONResponse(
-                    status_code=415,
-                    content={"detail": "Content-Type must be application/json"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                    content={"detail": "Unauthorized"},
                 )
+
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                content_type = request.headers.get("content-type", "")
+                if not content_type.startswith("application/json"):
+                    return JSONResponse(
+                        status_code=415,
+                        content={"detail": "Content-Type must be application/json"},
+                    )
         return await call_next(request)
 
     # ========== Config API ==========
@@ -328,14 +434,25 @@ def create_control_app() -> FastAPI:
 
     @app.websocket("/api/logs")
     async def websocket_logs(
-        websocket: WebSocket, target: str = Query(default="gateway")
+        websocket: WebSocket,
+        target: str = Query(default="gateway"),
     ):
         """WebSocket 日志流"""
+        auth_header_token = _extract_bearer_token(
+            websocket.headers.get("authorization", "")
+        )
+        protocol_header = websocket.headers.get("sec-websocket-protocol", "")
+        ws_subprotocol, ws_protocol_token = _extract_ws_token(protocol_header)
+
+        if not _is_authorized_from_candidates(auth_header_token, ws_protocol_token):
+            await websocket.close(code=1008)  # Policy Violation
+            return
+
         if target not in ("gateway", "process"):
             await websocket.close(code=1008)  # Policy Violation
             return
 
-        await ws_manager.connect(websocket, target)
+        await ws_manager.connect(websocket, target, ws_subprotocol or None)
 
         # 发送历史日志
         manager = get_process_manager()
@@ -439,12 +556,27 @@ def run_control_server(
 
     # 创建应用
     app = create_control_app()
+    control_auth_token = get_control_auth_token()
 
     # 设置应用状态 (用于 lifespan 中打开浏览器)
     app.state.open_browser = open_browser
     app.state.port = port
+    app.state.control_auth_token = control_auth_token
+
+    if _CONTROL_AUTH_TOKEN_SOURCE == "env":
+        logging.info("Control API 鉴权已启用 (token 来源: DATAFLUX_CONTROL_TOKEN)")
+    else:
+        if not open_browser:
+            raise RuntimeError(
+                "未配置 DATAFLUX_CONTROL_TOKEN 且禁用了自动打开浏览器，"
+                "请显式设置 DATAFLUX_CONTROL_TOKEN 后重试"
+            )
+        logging.warning(
+            "未配置 DATAFLUX_CONTROL_TOKEN，已生成临时控制面 token（掩码）: %s",
+            _mask_token(control_auth_token),
+        )
 
     logging.info(f"Starting Control Server on http://{host}:{port}")
 
     # 启动服务
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)

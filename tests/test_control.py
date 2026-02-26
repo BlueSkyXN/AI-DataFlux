@@ -10,6 +10,7 @@ Control Server 测试
 from unittest.mock import patch
 
 import pytest
+import base64
 
 
 class TestConfigAPI:
@@ -52,6 +53,20 @@ class TestConfigAPI:
 
         assert exc_info.value.status_code == 404
 
+    def test_read_config_blocks_non_yaml_file(self, tmp_path):
+        """测试读取非 YAML 文件会被阻止"""
+        from fastapi import HTTPException
+        from src.control.config_api import read_config
+
+        test_file = tmp_path / "secrets.txt"
+        test_file.write_text("secret")
+
+        with patch("src.control.config_api.PROJECT_ROOT", str(tmp_path)):
+            with pytest.raises(HTTPException) as exc_info:
+                read_config("secrets.txt")
+
+        assert exc_info.value.status_code == 403
+
     def test_write_config_creates_backup(self, tmp_path):
         """测试写入配置文件会创建备份"""
         from src.control.config_api import write_config
@@ -68,6 +83,89 @@ class TestConfigAPI:
         assert result["backed_up"] is True
         assert (tmp_path / "test_config.yaml.bak").exists()
         assert (tmp_path / "test_config.yaml").read_text() == "new: content"
+
+    def test_write_config_blocks_non_yaml_file(self, tmp_path):
+        """测试写入非 YAML 文件会被阻止"""
+        from fastapi import HTTPException
+        from src.control.config_api import write_config
+
+        with patch("src.control.config_api.PROJECT_ROOT", str(tmp_path)):
+            with pytest.raises(HTTPException) as exc_info:
+                write_config("malicious.py", "print('bad')")
+
+        assert exc_info.value.status_code == 403
+
+
+class TestControlServerAuth:
+    """控制面鉴权测试"""
+
+    @pytest.fixture
+    def auth_app(self, monkeypatch):
+        from src.control import server as control_server
+
+        monkeypatch.setenv("DATAFLUX_CONTROL_TOKEN", "unit-test-token")
+        monkeypatch.setattr(control_server, "_CONTROL_AUTH_TOKEN", None)
+        monkeypatch.setattr(control_server, "_CONTROL_AUTH_TOKEN_SOURCE", "env")
+        return control_server
+
+    def test_extract_bearer_token(self, auth_app):
+        """测试 Bearer Token 解析"""
+        assert auth_app._extract_bearer_token("Bearer abc123") == "abc123"
+        assert auth_app._extract_bearer_token("Basic abc123") == ""
+
+    def test_authorized_token_validation(self, auth_app):
+        """测试 Token 校验"""
+        assert auth_app._is_authorized_token("unit-test-token") is True
+        assert auth_app._is_authorized_token("invalid-token") is False
+        assert auth_app._is_authorized_token("") is False
+
+    def test_authorized_from_candidates(self, auth_app):
+        """测试多来源 token 任一通过即可鉴权成功"""
+        assert (
+            auth_app._is_authorized_from_candidates("invalid-token", "unit-test-token")
+            is True
+        )
+        assert (
+            auth_app._is_authorized_from_candidates("unit-test-token", "invalid-token")
+            is True
+        )
+        assert (
+            auth_app._is_authorized_from_candidates("invalid-token", "also-invalid")
+            is False
+        )
+
+    def test_mask_token_for_logs(self, auth_app):
+        """测试日志 token 脱敏"""
+        assert auth_app._mask_token("abcdefghijkl") == "abc...jkl"
+        assert auth_app._mask_token("short") == "***"
+
+    def test_create_app_initializes_token(self, auth_app):
+        """测试创建应用时会初始化鉴权 Token"""
+        app = auth_app.create_control_app()
+        assert app is not None
+        assert auth_app.get_control_auth_token() == "unit-test-token"
+
+    def test_decode_base64url_token(self, auth_app):
+        """测试 base64url token 解码"""
+        encoded = base64.urlsafe_b64encode("unit-test-token".encode("utf-8")).decode(
+            "ascii"
+        )
+        encoded = encoded.rstrip("=")
+        assert auth_app._decode_base64url_token(encoded) == "unit-test-token"
+        assert auth_app._decode_base64url_token(encoded + "!") == ""
+        assert auth_app._decode_base64url_token("bad%%%") == ""
+
+    def test_extract_ws_token(self, auth_app):
+        """测试 WebSocket token 提取（优先 b64）"""
+        encoded = base64.urlsafe_b64encode("unit-test-token".encode("utf-8")).decode(
+            "ascii"
+        )
+        encoded = encoded.rstrip("=")
+        protocol, token = auth_app._extract_ws_token(
+            f"chat, dataflux-token-b64.{encoded}, other"
+        )
+        assert protocol.startswith("dataflux-token-b64.")
+        assert token == "unit-test-token"
 
 
 class TestProcessManager:

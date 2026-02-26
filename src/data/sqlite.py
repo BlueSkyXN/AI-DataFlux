@@ -83,12 +83,15 @@ WAL 模式优化:
 """
 
 import logging
+import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
 from .base import BaseTaskPool
+
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SQLiteConnectionManager:
@@ -289,10 +292,17 @@ class SQLiteTaskPool(BaseTaskPool):
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite 数据库文件不存在: {self.db_path}")
 
-        self.table_name = table_name
-        self.select_columns = list(set(["id"] + self.columns_to_extract))
+        self.table_name = self._validate_identifier(table_name, "table_name")
+        self.columns_to_extract = self._validate_identifiers(
+            self.columns_to_extract,
+            "columns_to_extract",
+        )
         self.write_aliases = list(self.columns_to_write.keys())
-        self.write_colnames = list(self.columns_to_write.values())
+        self.write_colnames = self._validate_identifiers(
+            list(self.columns_to_write.values()),
+            "columns_to_write",
+        )
+        self.select_columns = list(set(["id"] + self.columns_to_extract))
 
         # 设置全局数据库路径
         SQLiteConnectionManager.set_db_path(str(self.db_path))
@@ -330,6 +340,19 @@ class SQLiteTaskPool(BaseTaskPool):
             raise ValueError(f"表 '{self.table_name}' 在数据库中不存在")
 
         cursor.close()
+
+    @staticmethod
+    def _validate_identifier(identifier: str, field_name: str) -> str:
+        """校验 SQL 标识符，仅允许字母/数字/下划线"""
+        if not IDENTIFIER_PATTERN.fullmatch(identifier):
+            raise ValueError(
+                f"{field_name} 包含非法标识符: {identifier!r}，仅允许字母/数字/下划线，且不能以数字开头"
+            )
+        return identifier
+
+    def _validate_identifiers(self, identifiers: list[str], field_name: str) -> list[str]:
+        """批量校验 SQL 标识符"""
+        return [self._validate_identifier(col, field_name) for col in identifiers]
 
     # ==================== 核心接口实现 ====================
 
@@ -760,7 +783,8 @@ class SQLiteTaskPool(BaseTaskPool):
             if not columns:
                 return []
 
-            cols_str = ", ".join(f"[{c}]" for c in columns)
+            safe_columns = self._validate_identifiers(columns, "columns")
+            cols_str = ", ".join(f"[{c}]" for c in safe_columns)
             sql = f"SELECT {cols_str} FROM [{self.table_name}]"
 
             logging.info("正在查询所有记录")
@@ -770,7 +794,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
             results = []
             for row in rows:
-                record_dict = {col: row[col] for col in columns}
+                record_dict = {col: row[col] for col in safe_columns}
                 results.append(record_dict)
 
             logging.info(f"已获取 {len(results)} 条记录 (忽略处理状态)")
@@ -797,7 +821,8 @@ class SQLiteTaskPool(BaseTaskPool):
             if not columns:
                 return []
 
-            cols_str = ", ".join(f"[{c}]" for c in columns)
+            safe_columns = self._validate_identifiers(columns, "columns")
+            cols_str = ", ".join(f"[{c}]" for c in safe_columns)
             where_clause = self._build_processed_condition()
             sql = f"SELECT {cols_str} FROM [{self.table_name}] WHERE {where_clause}"
 
@@ -808,7 +833,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
             results = []
             for row in rows:
-                record_dict = {col: row[col] for col in columns}
+                record_dict = {col: row[col] for col in safe_columns}
                 results.append(record_dict)
 
             logging.info(f"已获取 {len(results)} 条已处理记录")

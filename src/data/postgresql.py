@@ -74,10 +74,13 @@ PostgreSQL 数据源任务池实现模块
 """
 
 import logging
+import re
 import threading
 from typing import Any
 
 from .base import BaseTaskPool
+
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # ==================== 条件导入 psycopg2 ====================
 # psycopg2 是可选依赖，不可用时提供占位符类
@@ -300,11 +303,18 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
 
-        self.table_name = table_name
-        self.schema_name = schema_name
-        self.select_columns = list(set(["id"] + self.columns_to_extract))
+        self.table_name = self._validate_identifier(table_name, "table_name")
+        self.schema_name = self._validate_identifier(schema_name, "schema_name")
+        self.columns_to_extract = self._validate_identifiers(
+            self.columns_to_extract,
+            "columns_to_extract",
+        )
         self.write_aliases = list(self.columns_to_write.keys())
-        self.write_colnames = list(self.columns_to_write.values())
+        self.write_colnames = self._validate_identifiers(
+            list(self.columns_to_write.values()),
+            "columns_to_write",
+        )
+        self.select_columns = list(set(["id"] + self.columns_to_extract))
 
         # 获取连接池
         try:
@@ -715,6 +725,19 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
     # ==================== 内部方法 ====================
 
+    @staticmethod
+    def _validate_identifier(identifier: str, field_name: str) -> str:
+        """校验 SQL 标识符，仅允许字母/数字/下划线"""
+        if not IDENTIFIER_PATTERN.fullmatch(identifier):
+            raise ValueError(
+                f"{field_name} 包含非法标识符: {identifier!r}，仅允许字母/数字/下划线，且不能以数字开头"
+            )
+        return identifier
+
+    def _validate_identifiers(self, identifiers: list[str], field_name: str) -> list[str]:
+        """批量校验 SQL 标识符"""
+        return [self._validate_identifier(col, field_name) for col in identifiers]
+
     def _build_unprocessed_condition(self) -> str:
         """
         构建未处理任务的 WHERE 条件
@@ -877,7 +900,8 @@ class PostgreSQLTaskPool(BaseTaskPool):
             if not columns:
                 return []
 
-            cols_identifiers = [sql.Identifier(c) for c in columns]
+            safe_columns = self._validate_identifiers(columns, "columns")
+            cols_identifiers = [sql.Identifier(c) for c in safe_columns]
 
             query = sql.SQL("SELECT {} FROM {}.{}").format(
                 sql.SQL(", ").join(cols_identifiers),
@@ -891,7 +915,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
             results = []
             for row in rows:
-                record_dict = {col: row.get(col) for col in columns}
+                record_dict = {col: row.get(col) for col in safe_columns}
                 results.append(record_dict)
 
             logging.info(f"已获取 {len(results)} 条记录 (忽略处理状态)")
@@ -918,7 +942,8 @@ class PostgreSQLTaskPool(BaseTaskPool):
             if not columns:
                 return []
 
-            cols_identifiers = [sql.Identifier(c) for c in columns]
+            safe_columns = self._validate_identifiers(columns, "columns")
+            cols_identifiers = [sql.Identifier(c) for c in safe_columns]
             where_clause = self._build_processed_condition()
 
             query = sql.SQL("SELECT {} FROM {}.{} WHERE {}").format(
@@ -934,7 +959,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
             results = []
             for row in rows:
-                record_dict = {col: row.get(col) for col in columns}
+                record_dict = {col: row.get(col) for col in safe_columns}
                 results.append(record_dict)
 
             logging.info(f"已获取 {len(results)} 条已处理记录")
