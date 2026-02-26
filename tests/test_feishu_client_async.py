@@ -37,6 +37,7 @@ from src.data.feishu.client import (
     TOKEN_URL,
 )
 
+
 # 模拟 HTTP 响应对象，用于替代 aiohttp.ClientResponse
 class MockResponse:
     def __init__(self, status=200, data=None, headers=None, text_content=""):
@@ -57,6 +58,7 @@ class MockResponse:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
+
 @pytest.fixture
 def client():
     """创建一个测试用的 FeishuClient"""
@@ -64,8 +66,9 @@ def client():
         app_id="cli_test",
         app_secret="test_secret",
         max_retries=2,  # 减少重试次数以加快测试
-        qps_limit=0     # 禁用本地限流以免拖慢测试
+        qps_limit=0,  # 禁用本地限流以免拖慢测试
     )
+
 
 @pytest.mark.asyncio
 class TestFeishuClientAsync:
@@ -74,11 +77,7 @@ class TestFeishuClientAsync:
     async def test_ensure_token_success(self, client):
         """测试成功获取 Token"""
         mock_resp = MockResponse(
-            data={
-                "code": 0,
-                "tenant_access_token": "fake_token_123",
-                "expire": 7200
-            }
+            data={"code": 0, "tenant_access_token": "fake_token_123", "expire": 7200}
         )
 
         with patch("aiohttp.ClientSession.post", return_value=mock_resp):
@@ -94,7 +93,9 @@ class TestFeishuClientAsync:
         client._token_expires_at = time.time() + 3600  # 1小时后过期
 
         # 即使 post 抛出异常，也不应该被调用
-        with patch("aiohttp.ClientSession.post", side_effect=Exception("Should not be called")):
+        with patch(
+            "aiohttp.ClientSession.post", side_effect=Exception("Should not be called")
+        ):
             token = await client.ensure_token()
 
         assert token == "cached_token"
@@ -105,11 +106,7 @@ class TestFeishuClientAsync:
         client._token_expires_at = time.time() + 100  # 剩余 100s < 300s
 
         mock_resp = MockResponse(
-            data={
-                "code": 0,
-                "tenant_access_token": "new_token",
-                "expire": 7200
-            }
+            data={"code": 0, "tenant_access_token": "new_token", "expire": 7200}
         )
 
         with patch("aiohttp.ClientSession.post", return_value=mock_resp):
@@ -122,12 +119,7 @@ class TestFeishuClientAsync:
         client._token = "valid_token"
         client._token_expires_at = time.time() + 3600
 
-        mock_resp = MockResponse(
-            data={
-                "code": 0,
-                "data": {"key": "value"}
-            }
-        )
+        mock_resp = MockResponse(data={"code": 0, "data": {"key": "value"}})
 
         with patch("aiohttp.ClientSession.request", return_value=mock_resp) as mock_req:
             data = await client._request("GET", "http://test.com")
@@ -145,7 +137,7 @@ class TestFeishuClientAsync:
         # 第一次 429，第二次 200
         responses = [
             MockResponse(status=429, headers={"x-ogw-ratelimit-reset": "0.1"}),
-            MockResponse(status=200, data={"code": 0, "data": "success"})
+            MockResponse(status=200, data={"code": 0, "data": "success"}),
         ]
 
         # 注意：Mock side_effect 也可以是 iterator
@@ -172,11 +164,15 @@ class TestFeishuClientAsync:
         client._token_expires_at = time.time() + 3600
 
         # 1. 业务请求返回 Token 失效
-        resp_token_invalid = MockResponse(data={"code": 99991661, "msg": "Token invalid"})
+        resp_token_invalid = MockResponse(
+            data={"code": 99991661, "msg": "Token invalid"}
+        )
         # 2. Token 刷新请求 (ensure_token) -> 在 _request 内部逻辑中，
         #    ensure_token 会被调用，这里我们需要 mock ensure_token 里的 post 或者直接 mock ensure_token
         #    为了完整集成测试，我们让 ensure_token 发起 post 请求
-        resp_token_refresh = MockResponse(data={"code": 0, "tenant_access_token": "new_token", "expire": 7200})
+        resp_token_refresh = MockResponse(
+            data={"code": 0, "tenant_access_token": "new_token", "expire": 7200}
+        )
         # 3. 业务请求重试成功
         resp_success = MockResponse(data={"code": 0, "data": "success"})
 
@@ -197,9 +193,9 @@ class TestFeishuClientAsync:
 
             async def mock_request(self, *args, **kwargs):
                 # 解析参数
-                if len(args) == 1: # session.post(url)
+                if len(args) == 1:  # session.post(url)
                     url = args[0]
-                elif len(args) >= 2: # session.request(method, url)
+                elif len(args) >= 2:  # session.request(method, url)
                     url = args[1]
                 else:
                     # 可能通过 kwargs 传参
@@ -215,13 +211,14 @@ class TestFeishuClientAsync:
                 elif auth == "Bearer new_token":
                     return resp_success
                 else:
-                    return MockResponse(status=400) # Should not happen
+                    return MockResponse(status=400)  # Should not happen
 
         def side_effect(*args, **kwargs):
             return AsyncContextManagerMock(*args, **kwargs)
 
-        with patch("aiohttp.ClientSession.request", side_effect=side_effect), \
-             patch("aiohttp.ClientSession.post", side_effect=side_effect):
+        with patch("aiohttp.ClientSession.request", side_effect=side_effect), patch(
+            "aiohttp.ClientSession.post", side_effect=side_effect
+        ):
 
             data = await client._request("GET", "http://test.com")
 
@@ -238,8 +235,10 @@ class TestFeishuClientAsync:
         # 2. 成功
         resp_success = MockResponse(data={"code": 0, "data": "ok"})
 
-        with patch("aiohttp.ClientSession.request", side_effect=[resp_limit, resp_success]):
-             data = await client._request("GET", "http://test.com")
+        with patch(
+            "aiohttp.ClientSession.request", side_effect=[resp_limit, resp_success]
+        ):
+            data = await client._request("GET", "http://test.com")
 
         assert data == "ok"
 
@@ -285,17 +284,18 @@ class TestFeishuClientAsync:
         # 3. 6-10 -> OK
 
         with patch.object(client, "_request") as mock_req:
+
             def side_effect(method, url, params=None, **kwargs):
                 # 从 URL 解析 range
                 # url 格式 .../values/range_str
                 range_str = url.split("/values/")[-1]
 
                 if "A1:A10" in range_str:
-                     raise FeishuAPIError(code=90221, msg="TooLargeResponse")
+                    raise FeishuAPIError(code=90221, msg="TooLargeResponse")
                 elif "A1:A5" in range_str:
-                    return {"valueRange": {"values": [["1"]]*5}}
+                    return {"valueRange": {"values": [["1"]] * 5}}
                 elif "A6:A10" in range_str:
-                    return {"valueRange": {"values": [["2"]]*5}}
+                    return {"valueRange": {"values": [["2"]] * 5}}
                 return {}
 
             mock_req.side_effect = side_effect

@@ -187,7 +187,7 @@ class FeishuClient:
         self._last_request_time: float = 0
         self._min_interval = 1.0 / qps_limit if qps_limit > 0 else 0
         self._rate_limit_lock = asyncio.Lock()  # 保护速率控制状态
-        self._semaphore = asyncio.Semaphore(concurrency) # 限制并发请求数
+        self._semaphore = asyncio.Semaphore(concurrency)  # 限制并发请求数
 
         # HTTP 会话（延迟创建）
         self._session: aiohttp.ClientSession | None = None
@@ -413,7 +413,9 @@ class FeishuClient:
                     if attempt < self.max_retries:
                         self._logger.warning("Token 失效，正在刷新 ...")
                         continue
-                    raise FeishuAPIError(code=biz_code, msg=body.get("msg", ""), url=url)
+                    raise FeishuAPIError(
+                        code=biz_code, msg=body.get("msg", ""), url=url
+                    )
 
                 # 业务层频控（非 HTTP 429，而是 code=99991400）→ 等待后重试
                 if biz_code == 99991400:
@@ -439,11 +441,9 @@ class FeishuClient:
                     )
 
                 # Sheet 单元格超限 (Sheet 写入常见)
-                if biz_code == 131002: # 单元格数量超过限制
+                if biz_code == 131002:  # 单元格数量超过限制
                     raise FeishuAPIError(
-                        code=biz_code,
-                        msg=f"单元格超限: {body.get('msg')}",
-                        url=url
+                        code=biz_code, msg=f"单元格超限: {body.get('msg')}", url=url
                     )
 
                 # 其他错误

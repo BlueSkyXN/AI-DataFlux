@@ -856,7 +856,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
             )
         return identifier
 
-    def _validate_identifiers(self, identifiers: list[str], field_name: str) -> list[str]:
+    def _validate_identifiers(
+        self, identifiers: list[str], field_name: str
+    ) -> list[str]:
         """批量校验 SQL 标识符"""
         return [self._validate_identifier(col, field_name) for col in identifiers]
 

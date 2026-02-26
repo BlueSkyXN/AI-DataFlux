@@ -896,8 +896,12 @@ class FluxApiService:
             # 根据处理结果更新模型状态和指标
             response_time = time.time() - start_time
             stream_fully_successful = returned_successfully and has_business_output
-            stream_partially_successful = has_business_output and not returned_successfully
-            stream_no_business_output = returned_successfully and not has_business_output
+            stream_partially_successful = (
+                has_business_output and not returned_successfully
+            )
+            stream_no_business_output = (
+                returned_successfully and not has_business_output
+            )
 
             if stream_fully_successful:
                 self.dispatcher.mark_model_success(model.id)

@@ -621,9 +621,7 @@ def _create_feishu_bitable_pool(
             "缺少飞书多维表格配置: feishu.app_token 或 datasource.app_token"
         )
     if table_id is None:
-        raise ValueError(
-            "缺少飞书多维表格配置: feishu.table_id 或 datasource.table_id"
-        )
+        raise ValueError("缺少飞书多维表格配置: feishu.table_id 或 datasource.table_id")
 
     return FeishuBitableTaskPool(
         app_id=feishu_config["app_id"],
