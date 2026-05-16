@@ -133,6 +133,21 @@ def test_build_upstream_payload_preserves_response_format_extra_fields(tmp_path)
     )
 
 
+def test_build_upstream_payload_keeps_json_object_for_non_schema_model(tmp_path):
+    """json_object 是 JSON 模式，不应被 supports_json_schema=false 过滤掉"""
+    config_path = _write_gateway_config(
+        tmp_path,
+        [_model_config("model-a", supports_json_schema=False)],
+    )
+    service = FluxApiService(str(config_path))
+    model = service.models[0]
+    request = _chat_request(response_format={"type": "json_object"})
+
+    payload = service._build_upstream_payload(model, request)
+
+    assert payload["response_format"] == {"type": "json_object"}
+
+
 def test_get_available_model_filters_json_schema_capability(tmp_path):
     """需要 JSON 输出时，不应选择未声明支持 JSON Schema 的模型"""
     config_path = _write_gateway_config(
@@ -206,6 +221,12 @@ def test_request_requires_json_schema_only_for_non_text_response_format(tmp_path
     assert (
         service._request_requires_json_schema(
             _chat_request(response_format={"type": "json_object"})
+        )
+        is False
+    )
+    assert (
+        service._request_requires_json_schema(
+            _chat_request(response_format={"type": "json_schema"})
         )
         is True
     )

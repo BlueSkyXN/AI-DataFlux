@@ -121,6 +121,26 @@ class TestContentProcessor:
         assert result["status"] == "active"
         assert result["details"]["score"] == 98
 
+    def test_parse_response_prefers_later_valid_json_candidate(
+        self, processor, mock_validator
+    ):
+        """测试前面的 JSON 示例校验失败时继续寻找后续有效结果"""
+        def validate(data):
+            if data.get("status") == "active":
+                return True, []
+            return False, ["Invalid status"]
+
+        mock_validator.validate.side_effect = validate
+        response = """
+        示例（不要使用）: {"name": "Example", "status": "invalid"}
+        实际结果: {"name": "Grace", "status": "active"}
+        """
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "Grace"
+        assert result["status"] == "active"
+
     def test_parse_response_missing_fields(self, processor):
         response = '{"name": "Eve"}'  # 缺少 status
         result = processor.parse_response(response)

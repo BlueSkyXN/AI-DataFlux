@@ -639,11 +639,12 @@ class FluxApiService:
         """
         判断请求是否要求 JSON 输出能力。
 
-        目前 OpenAI 兼容请求中 response_format 非 text 时，都需要模型声明支持。
+        只有严格的 json_schema response_format 需要模型显式声明支持。
+        json_object 是较宽松的 JSON 模式，保持原有透传行为以避免误排除模型。
         """
         return (
             request.response_format is not None
-            and request.response_format.type.lower() != "text"
+            and request.response_format.type.lower() == "json_schema"
         )
 
     def _build_upstream_payload(
@@ -670,7 +671,10 @@ class FluxApiService:
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
         if request.response_format is not None:
-            if model.supports_json_schema:
+            if (
+                request.response_format.type.lower() != "json_schema"
+                or model.supports_json_schema
+            ):
                 payload["response_format"] = request.response_format.model_dump(
                     exclude_none=True
                 )

@@ -226,10 +226,17 @@ class ContentProcessor:
 
         # 3. 提取所有平衡的 JSON 对象候选。这里不能用非贪婪正则，
         # 否则遇到嵌套对象时会在第一个右花括号处截断。
+        first_validation_error = None
         for candidate in self._iter_json_object_candidates(content):
             validation_result = self._validate_candidate(candidate)
             if validation_result is not None:
+                if validation_result.get("_error") == "invalid_field_values":
+                    first_validation_error = first_validation_error or validation_result
+                    continue
                 return validation_result
+
+        if first_validation_error is not None:
+            return first_validation_error
 
         logging.error(f"无法提取有效 JSON (必需字段: {self.required_fields})")
         return {"_error": "invalid_or_missing_json", "_error_type": ErrorType.CONTENT}
