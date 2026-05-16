@@ -125,6 +125,7 @@ class TestContentProcessor:
         self, processor, mock_validator
     ):
         """测试前面的 JSON 示例校验失败时继续寻找后续有效结果"""
+
         def validate(data):
             if data.get("status") == "active":
                 return True, []
