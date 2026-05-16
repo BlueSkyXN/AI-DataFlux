@@ -146,6 +146,74 @@ class TestCLI:
         )
         assert result.returncode != 0
 
+    def test_process_validate_rejects_semantic_errors(self, tmp_path):
+        """测试 --validate 能拦截运行前置配置错误"""
+        invalid_config = tmp_path / "semantic_invalid.yaml"
+        invalid_config.write_text(
+            """
+datasource:
+  type: mongodb
+  concurrency:
+    batch_size: 0
+columns_to_extract: []
+columns_to_write: {}
+prompt:
+  template: "{record_json}"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "process",
+                "--config",
+                str(invalid_config),
+                "--validate",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1
+        assert "Config invalid" in result.stdout
+        assert "datasource.type" in result.stdout
+        assert "batch_size" in result.stdout
+
+    def test_main_validate_rejects_semantic_errors(self, tmp_path):
+        """测试 main.py --validate 复用同一套语义校验"""
+        invalid_config = tmp_path / "main_semantic_invalid.yaml"
+        invalid_config.write_text(
+            """
+datasource:
+  type: mongodb
+columns_to_extract: []
+columns_to_write: {}
+prompt:
+  template: "{record_json}"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "main.py",
+                "--config",
+                str(invalid_config),
+                "--validate",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1
+        assert "配置文件无效" in result.stdout
+        assert "datasource.type" in result.stdout
+
     def test_no_command(self):
         """测试无命令时显示帮助"""
         result = subprocess.run(

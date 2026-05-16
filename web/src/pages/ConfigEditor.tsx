@@ -305,12 +305,18 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
     setError(null);
     setSuccess(null);
     try {
-      const result = await validateConfig(contentToValidate);
+      const result = await validateConfig(contentToValidate, configPath);
       if (result.valid) {
-        setSuccess(t.yamlSyntaxValid);
+        const warnings = result.warnings ?? [];
+        setSuccess(
+          warnings.length > 0
+            ? `${t.configValidWithWarnings}\n${warnings.join('\n')}`
+            : t.configValid
+        );
         setTimeout(() => setSuccess(null), 3000);
       } else {
-        setError(result.error ? `${t.yamlSyntaxError}: ${result.error}` : t.yamlSyntaxError);
+        const errors = result.errors?.length ? result.errors.join('\n') : result.error;
+        setError(errors ? `${t.configInvalid}:\n${errors}` : t.configInvalid);
       }
     } catch (err) {
       setError(`${t.failedToValidate}: ${err}`);
@@ -358,12 +364,12 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
 
       {/* Messages */}
       {error && (
-        <div className="bg-red-50 text-red-600 px-4 py-3 rounded-lg mb-4 text-sm">
+        <div className="bg-red-50 text-red-600 px-4 py-3 rounded-lg mb-4 text-sm whitespace-pre-wrap">
           {error}
         </div>
       )}
       {success && (
-        <div className="bg-green-50 text-green-600 px-4 py-3 rounded-lg mb-4 text-sm">
+        <div className="bg-green-50 text-green-600 px-4 py-3 rounded-lg mb-4 text-sm whitespace-pre-wrap">
           {success}
         </div>
       )}

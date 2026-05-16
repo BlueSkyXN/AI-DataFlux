@@ -97,10 +97,14 @@ export interface ConfigWriteResponse {
 
 /** 配置文件验证响应 */
 export interface ConfigValidateResponse {
-  /** YAML 语法是否合法 */
+  /** YAML 语法和本地可验证的配置语义是否合法 */
   valid: boolean;
   /** 验证错误信息（仅在 valid=false 时存在） */
   error?: string;
+  /** 配置错误列表 */
+  errors?: string[];
+  /** 配置警告列表 */
+  warnings?: string[];
 }
 
 /** 顶部导航标签页类型：仪表盘 / 配置 / 监控 */

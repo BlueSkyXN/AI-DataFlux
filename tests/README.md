@@ -12,14 +12,25 @@ tests/
 │
 ├── test_cli.py            # CLI 命令行测试
 ├── test_config.py         # 配置加载和验证测试
+├── test_control.py        # Web GUI 控制面板测试
+├── test_csv_pool.py       # CSV 数据源测试
 ├── test_engines.py        # 数据引擎测试 (Pandas/Polars)
 ├── test_factory.py        # 数据源工厂模式测试
+├── test_feishu_client_async.py # 飞书客户端异步测试
+├── test_feishu_pool.py    # 飞书数据源测试
+├── test_gateway_service.py # Gateway 服务测试
 ├── test_integration.py    # 集成测试
 ├── test_models.py         # 数据模型测试 (TaskMetadata/ErrorType)
-├── test_processor.py      # 处理器核心逻辑测试
+├── test_postgresql_pool.py # PostgreSQL 数据源测试
 ├── test_scheduler.py      # 分片调度器测试
+├── test_sqlite_pool.py    # SQLite 数据源测试
 ├── test_token_estimator.py # Token 估算器测试
-└── test_validator.py      # JSON 验证器测试
+├── test_validator.py      # JSON 验证器测试
+└── core/                  # 核心模块子目录测试
+    ├── clients/test_flux_client.py
+    ├── content/test_processor.py
+    ├── retry/test_strategy.py
+    └── state/test_manager.py
 ```
 
 ## 🚀 快速开始
@@ -108,17 +119,17 @@ pytest tests/ --cov=src --cov-report=json
 ### test_cli.py
 - **目的**: 测试 CLI 命令行接口
 - **覆盖**: version, check, process, gateway 命令
-- **测试数量**: 9 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 
 ### test_config.py
 - **目的**: 测试配置文件加载和验证
-- **覆盖**: YAML 解析、配置验证、错误处理
-- **测试数量**: 9 个测试
+- **覆盖**: YAML 解析、默认配置合并、统一语义校验、错误和 warning 处理
+- **测试数量**: 以 `pytest --collect-only` 为准
 
 ### test_engines.py
 - **目的**: 测试数据引擎抽象和实现
 - **覆盖**: PandasEngine, PolarsEngine, 引擎工厂
-- **测试数量**: 28 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 - **特性**:
   - 引擎自动选择
   - 读写器性能库检测 (Calamine/xlsxwriter)
@@ -127,7 +138,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_factory.py
 - **目的**: 测试数据源任务池工厂
 - **覆盖**: Excel 池创建、MySQL 池创建、引擎选择
-- **测试数量**: 17 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 - **特性**:
   - 多种引擎配置 (auto/pandas/polars)
   - 读写器配置
@@ -136,13 +147,13 @@ pytest tests/ --cov=src --cov-report=json
 ### test_integration.py
 - **目的**: 集成测试多模块协同
 - **覆盖**: Excel 任务池、引擎兼容性、配置到池的完整流程
-- **测试数量**: 7 个测试
-- **标记**: `@pytest.mark.integration`
+- **测试数量**: 以 `pytest --collect-only` 为准
+- **标记**: 文件级 `pytestmark = pytest.mark.integration`
 
 ### test_models.py
 - **目的**: 测试数据模型和数据类
 - **覆盖**: TaskMetadata, ErrorRecord, ErrorType
-- **测试数量**: 21 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 - **特性**:
   - 重试计数管理
   - 错误历史记录
@@ -151,7 +162,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_processor.py
 - **目的**: 测试 AI 处理器核心逻辑
 - **覆盖**: 提示词生成、JSON 提取、Schema 构建、任务状态管理
-- **测试数量**: 23 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 - **特性**:
   - Markdown 代码块提取
   - 字段验证
@@ -160,7 +171,7 @@ pytest tests/ --cov=src --cov-report=json
 ### test_scheduler.py
 - **目的**: 测试分片任务调度器
 - **覆盖**: 分片计算、加载、进度跟踪、内存监控
-- **测试数量**: 26 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 - **特性**:
   - 动态分片大小计算
   - 空分片跳过
@@ -169,12 +180,12 @@ pytest tests/ --cov=src --cov-report=json
 ### test_token_estimator.py
 - **目的**: 测试 Token 估算器
 - **覆盖**: mode 规范化、输入/输出估算、采样逻辑
-- **测试数量**: 14 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 
 ### test_validator.py
 - **目的**: 测试 JSON 字段验证器
 - **覆盖**: 字段规则验证、大小写敏感性、数值类型
-- **测试数量**: 10 个测试
+- **测试数量**: 以 `pytest --collect-only` 为准
 
 ## 🔧 Fixtures 说明
 
@@ -288,8 +299,9 @@ def test_performance(self):
 - 引擎自动选择验证
 
 #### 5. 集成测试 (integration-test)
-- 手动触发 (workflow_dispatch)
-- 完整工作流验证
+- 在 push、pull_request 和 workflow_dispatch 中运行
+- 执行 `pytest tests/ -v -m "integration" --tb=short`
+- 当前集成测试只使用本地临时文件和本地数据源，不依赖外部服务
 
 ### 覆盖率上传
 

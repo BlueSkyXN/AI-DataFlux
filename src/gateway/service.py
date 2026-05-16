@@ -343,6 +343,7 @@ class FluxApiService:
         self,
         requested_model_name: str | None = None,
         exclude_models: list[str] | None = None,
+        requires_json_schema: bool = False,
     ) -> ModelConfig | None:
         """
         获取一个可用的模型
@@ -353,6 +354,7 @@ class FluxApiService:
         Args:
             requested_model_name: 用户请求的模型名称/ID
             exclude_models: 要排除的模型ID列表
+            requires_json_schema: 请求是否需要 JSON 输出能力
 
         Returns:
             可用的模型配置，如果没有可用模型返回 None
@@ -389,8 +391,11 @@ class FluxApiService:
                     # 检查调度器可用性和限流器
                     is_available = self.dispatcher.is_model_available(target_model_id)
                     can_process = self.rate_limiter.can_process(target_model_id)
+                    supports_schema = (
+                        not requires_json_schema or model.supports_json_schema
+                    )
 
-                    if is_available and can_process:
+                    if is_available and can_process and supports_schema:
                         logging.debug(
                             f"使用请求的可用模型: {model.name or target_model_id}"
                         )
@@ -400,6 +405,10 @@ class FluxApiService:
                         logging.warning(
                             f"请求的模型 [{model.name or target_model_id}] 当前不可用/受限。尝试随机选择"
                         )
+                        if requires_json_schema and not model.supports_json_schema:
+                            logging.warning(
+                                f"请求需要 JSON 输出，但模型 [{model.name or target_model_id}] 未声明支持 JSON Schema"
+                            )
                         exclude_set.add(target_model_id)
                         use_random_selection = True
             else:
@@ -419,6 +428,9 @@ class FluxApiService:
                 and model.id not in exclude_set  # 未被排除
                 and self.dispatcher.is_model_available(model.id)  # 调度器可用
                 and self.rate_limiter.can_process(model.id)  # 限流器允许
+                and (
+                    not requires_json_schema or model.supports_json_schema
+                )  # JSON 输出能力匹配
             ]
 
             if not eligible_models:
@@ -451,6 +463,7 @@ class FluxApiService:
         start_time = time.time()
         tried_models: set[str] = set()
         last_error: Exception | None = None
+        requires_json_schema = self._request_requires_json_schema(request)
 
         # 尝试多个模型
         max_retries = min(len(self.models), 3)
@@ -460,6 +473,7 @@ class FluxApiService:
             model = self.get_available_model(
                 requested_model_name=request.model,  # 传递用户请求的模型
                 exclude_models=list(tried_models),
+                requires_json_schema=requires_json_schema,
             )
 
             if not model:
@@ -518,45 +532,11 @@ class FluxApiService:
             ssl_verify=model.ssl_verify, proxy=model.proxy
         )
 
-        # 构建请求
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {model.api_key}",
         }
-
-        payload: dict[str, Any] = {
-            "model": model.model,
-            "messages": [m.model_dump() for m in request.messages],
-            "temperature": (
-                request.temperature
-                if request.temperature is not None
-                else model.temperature
-            ),
-            "stream": request.stream or False,
-        }
-
-        # 添加可选参数 (使用 is not None 以支持 0 和 False)
-        if request.max_tokens is not None:
-            payload["max_tokens"] = request.max_tokens
-        if request.response_format is not None:
-            payload["response_format"] = request.response_format.model_dump()
-        if request.stop is not None:
-            payload["stop"] = request.stop
-        if request.top_p is not None:
-            payload["top_p"] = request.top_p
-        if request.user is not None:
-            payload["user"] = request.user
-        if request.n is not None:
-            payload["n"] = request.n
-
-        # 高级参数 (如果模型支持)
-        if model.supports_advanced_params:
-            if request.presence_penalty is not None:
-                payload["presence_penalty"] = request.presence_penalty
-            if request.frequency_penalty is not None:
-                payload["frequency_penalty"] = request.frequency_penalty
-            if request.logit_bias is not None:
-                payload["logit_bias"] = request.logit_bias
+        payload = self._build_upstream_payload(model, request)
 
         # 发送请求
         # 流式请求需要更长的 sock_read 超时
@@ -653,6 +633,95 @@ class FluxApiService:
                 else None
             ),
         )
+
+    @staticmethod
+    def _request_requires_json_schema(request: ChatCompletionRequest) -> bool:
+        """
+        判断请求是否要求 JSON 输出能力。
+
+        只有严格的 json_schema response_format 需要模型显式声明支持。
+        json_object 是较宽松的 JSON 模式，保持原有透传行为以避免误排除模型。
+        """
+        return (
+            request.response_format is not None
+            and request.response_format.type.lower() == "json_schema"
+        )
+
+    def _build_upstream_payload(
+        self, model: ModelConfig, request: ChatCompletionRequest
+    ) -> dict[str, Any]:
+        """
+        构建发送给上游模型 API 的请求体。
+
+        ChatCompletionRequest 允许额外字段；这些字段应透传给上游以保持
+        OpenAI 兼容性，但显式构建的标准字段拥有更高优先级。
+        """
+        payload: dict[str, Any] = {
+            "model": model.model,
+            "messages": [m.model_dump() for m in request.messages],
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else model.temperature
+            ),
+            "stream": request.stream or False,
+        }
+
+        # 添加可选参数 (使用 is not None 以支持 0 和 False)
+        if request.max_tokens is not None:
+            payload["max_tokens"] = request.max_tokens
+        if request.response_format is not None:
+            if (
+                request.response_format.type.lower() != "json_schema"
+                or model.supports_json_schema
+            ):
+                payload["response_format"] = request.response_format.model_dump(
+                    exclude_none=True
+                )
+            else:
+                logging.debug(
+                    f"模型 {model.id} 未声明支持 JSON Schema，跳过 response_format"
+                )
+        if request.stop is not None:
+            payload["stop"] = request.stop
+        if request.top_p is not None:
+            payload["top_p"] = request.top_p
+        if request.user is not None:
+            payload["user"] = request.user
+        if request.n is not None:
+            payload["n"] = request.n
+
+        # 高级参数 (如果模型支持)
+        if model.supports_advanced_params:
+            if request.presence_penalty is not None:
+                payload["presence_penalty"] = request.presence_penalty
+            if request.frequency_penalty is not None:
+                payload["frequency_penalty"] = request.frequency_penalty
+            if request.logit_bias is not None:
+                payload["logit_bias"] = request.logit_bias
+
+        # 透传 Pydantic 额外字段，避免 OpenAI 兼容参数被静默丢弃。
+        for key, value in (request.model_extra or {}).items():
+            if key in payload or value is None:
+                continue
+            payload[key] = self._serialize_payload_value(value)
+
+        return payload
+
+    @classmethod
+    def _serialize_payload_value(cls, value: Any) -> Any:
+        """将额外参数转换为 JSON 可序列化的基础结构。"""
+        if hasattr(value, "model_dump"):
+            return value.model_dump(exclude_none=True)
+        if isinstance(value, dict):
+            return {
+                key: cls._serialize_payload_value(item)
+                for key, item in value.items()
+                if item is not None
+            }
+        if isinstance(value, list):
+            return [cls._serialize_payload_value(item) for item in value]
+        return value
 
     def _extract_peer_ip(
         self, resp: aiohttp.ClientResponse, model: ModelConfig

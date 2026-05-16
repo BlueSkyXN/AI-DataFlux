@@ -38,10 +38,10 @@ Control Server 测试
         test_kill_tree_nonexistent_process     验证清理不存在的进程不抛异常
 """
 
+import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import base64
 
 
 class TestConfigAPI:
@@ -175,6 +175,33 @@ class TestControlServerAuth:
         app = auth_app.create_control_app()
         assert app is not None
         assert auth_app.get_control_auth_token() == "unit-test-token"
+
+    @pytest.mark.asyncio
+    async def test_config_validate_api_rejects_semantic_errors(self, auth_app):
+        """测试控制面板配置验证 API 会返回语义校验错误"""
+        app = auth_app.create_control_app()
+        route = next(
+            route
+            for route in app.routes
+            if getattr(route, "path", None) == "/api/config/validate"
+        )
+
+        data = await route.endpoint(
+            auth_app.ConfigValidateRequest(
+                path="config.yaml",
+                content="""
+datasource:
+  type: mongodb
+columns_to_extract: []
+columns_to_write: {}
+prompt:
+  template: "{record_json}"
+""".strip(),
+            )
+        )
+
+        assert data["valid"] is False
+        assert "datasource.type" in "\n".join(data["errors"])
 
     def test_decode_base64url_token(self, auth_app):
         """测试 base64url token 解码"""

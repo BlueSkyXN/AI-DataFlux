@@ -24,6 +24,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 class TestExcelTaskPoolIntegration:
     """Excel 任务池集成测试"""

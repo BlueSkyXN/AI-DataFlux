@@ -82,7 +82,7 @@ OpenAI 兼容性:
 """
 
 from typing import Any, Literal
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class ChatMessage(BaseModel):
@@ -113,6 +113,7 @@ class ResponseFormat(BaseModel):
     """
 
     type: str = "text"
+    model_config = ConfigDict(extra="allow")
 
 
 class ChatCompletionRequest(BaseModel):
@@ -154,8 +155,7 @@ class ChatCompletionRequest(BaseModel):
     user: str | None = None
     response_format: ResponseFormat | None = None
 
-    class Config:
-        extra = "allow"  # 允许额外字段
+    model_config = ConfigDict(extra="allow")  # 允许额外字段
 
     @model_validator(mode="before")
     @classmethod

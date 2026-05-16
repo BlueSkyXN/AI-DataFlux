@@ -14,7 +14,7 @@
           将记录数据渲染为 Prompt (过滤 _开头字段、None 值、排除字段)
           输入: Dict 原始记录数据 | 输出: str 渲染后的 Prompt 字符串
         - parse_response(content: Optional[str]) -> Dict
-          从 AI 响应提取 JSON，三级回退策略 (Markdown → 直接解析 → 正则)
+          从 AI 响应提取 JSON，三级回退策略 (Markdown → 直接解析 → 平衡对象扫描)
           输入: str|None AI 响应文本 | 输出: Dict 解析结果或错误字典
         - _check_missing_fields(data: Dict) -> List[str]
           检查数据中缺失的必需字段
@@ -32,7 +32,7 @@
 
 模块依赖:
     - json: JSON 序列化与解析
-    - re: 正则表达式 (Markdown 代码块提取、JSON 搜索、尾逗号清理)
+    - re: 正则表达式 (Markdown 代码块提取、尾逗号清理)
     - logging: 错误日志
     - src.core.validator.JsonValidator: 字段枚举值验证
     - src.models.errors.ErrorType: 错误类型常量
@@ -53,7 +53,7 @@
 JSON 提取策略 (按优先级):
     1. Markdown 代码块: ```json {...} ``` 或 ``` {...} ```
     2. 直接 JSON 解析: 整个响应作为 JSON
-    3. 正则提取: 搜索所有 {...} 模式，逐个尝试解析
+    3. 平衡对象扫描: 搜索所有完整 {...} 候选，逐个尝试解析
 
 JSON 预处理:
     - 移除尾部多余逗号 (常见的 AI 错误): {"a": 1,} → {"a": 1}
@@ -195,7 +195,7 @@ class ContentProcessor:
         提取策略:
             1. 尝试提取 Markdown JSON 代码块 (```json...```)
             2. 尝试直接解析整个响应为 JSON
-            3. 使用正则搜索所有 {...} 模式
+            3. 扫描所有平衡的 JSON 对象候选
 
         错误类型:
             - empty_ai_response: AI 返回空内容
@@ -216,47 +216,159 @@ class ContentProcessor:
         if code_block_match:
             parse_content = code_block_match.group(1).strip()
 
+        first_validation_error = None
+
         # 2. 尝试直接解析
-        # 预处理：移除尾部多余的逗号 (常见的 AI 格式错误)
-        try:
-            parse_content_cleaned = re.sub(r",\s*([}\]])", r"\1", parse_content)
-            data = json.loads(parse_content_cleaned)
+        data = self._load_json_object(parse_content)
+        if data is not None:
+            validation_result = self._validate_candidate(data)
+            if validation_result is not None:
+                if self._is_invalid_field_error(validation_result):
+                    first_validation_error = validation_result
+                else:
+                    return validation_result
+            # 如果缺少字段，继续尝试从原始文本中提取其他 JSON 对象
 
-            if isinstance(data, dict):
-                missing_fields = self._check_missing_fields(data)
-                if not missing_fields:
-                    # 字段完整，进行值验证
-                    is_valid, errors = self.validator.validate(data)
-                    if is_valid:
-                        return data
-                    else:
-                        return {
-                            "_error": "invalid_field_values",
-                            "_error_type": ErrorType.CONTENT,
-                            "_validation_errors": errors,
-                        }
-                # 如果缺少字段，继续尝试正则提取
-        except json.JSONDecodeError:
-            pass
+        # 3. 提取所有平衡的 JSON 对象候选。这里不能用非贪婪正则，
+        # 否则遇到嵌套对象时会在第一个右花括号处截断。
+        for candidate in self._iter_json_object_candidates(content):
+            validation_result = self._validate_candidate(candidate)
+            if validation_result is not None:
+                if self._is_invalid_field_error(validation_result):
+                    first_validation_error = first_validation_error or validation_result
+                    continue
+                return validation_result
 
-        # 3. 尝试正则提取所有可能的 JSON 对象
-        pattern = r"(\{.*?\})"
-        for match in re.finditer(pattern, content, re.DOTALL):
-            match_str = match.group(1)
-            try:
-                match_str_cleaned = re.sub(r",\s*([}\]])", r"\1", match_str.strip())
-                candidate = json.loads(match_str_cleaned)
-
-                if isinstance(candidate, dict):
-                    if not self._check_missing_fields(candidate):
-                        is_valid, _ = self.validator.validate(candidate)
-                        if is_valid:
-                            return candidate
-            except json.JSONDecodeError:
-                continue
+        if first_validation_error is not None:
+            return first_validation_error
 
         logging.error(f"无法提取有效 JSON (必需字段: {self.required_fields})")
         return {"_error": "invalid_or_missing_json", "_error_type": ErrorType.CONTENT}
+
+    def _load_json_object(self, text: str) -> Dict[str, Any] | None:
+        """
+        尝试把文本解析为 JSON 对象。
+
+        会先移除 AI 常见的尾随逗号错误；非对象 JSON（如数组/字符串）返回 None。
+        """
+        try:
+            cleaned = self._strip_trailing_commas(text.strip())
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _is_invalid_field_error(result: Dict[str, Any]) -> bool:
+        """判断校验结果是否为字段值非法错误。"""
+        return result.get("_error") == "invalid_field_values"
+
+    def _validate_candidate(self, data: Dict[str, Any]) -> Dict[str, Any] | None:
+        """
+        校验候选 JSON 对象。
+
+        返回 None 表示字段缺失，调用方可以继续尝试其他候选对象。
+        """
+        missing_fields = self._check_missing_fields(data)
+        if missing_fields:
+            return None
+
+        is_valid, errors = self.validator.validate(data)
+        if is_valid:
+            return data
+
+        return {
+            "_error": "invalid_field_values",
+            "_error_type": ErrorType.CONTENT,
+            "_validation_errors": errors,
+        }
+
+    def _iter_json_object_candidates(self, text: str):
+        """按出现顺序产出文本中的平衡 JSON 对象候选。"""
+        seen: set[str] = set()
+        for start, char in enumerate(text):
+            if char != "{":
+                continue
+
+            candidate_text = self._extract_balanced_json_object(text, start)
+            if not candidate_text or candidate_text in seen:
+                continue
+
+            seen.add(candidate_text)
+            candidate = self._load_json_object(candidate_text)
+            if candidate is not None:
+                yield candidate
+
+    @staticmethod
+    def _extract_balanced_json_object(text: str, start: int) -> str | None:
+        """从 start 位置提取一个平衡的 JSON 对象字符串。"""
+        depth = 0
+        in_string = False
+        escaped = False
+
+        for pos in range(start, len(text)):
+            char = text[pos]
+
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : pos + 1]
+
+        return None
+
+    @staticmethod
+    def _strip_trailing_commas(text: str) -> str:
+        """
+        移除对象/数组闭合前的尾随逗号，同时保留字符串内容不变。
+
+        不能直接用正则处理整个 JSON 文本，否则字符串值里的 `,}` 或 `,]`
+        会被误删。
+        """
+        result: list[str] = []
+        in_string = False
+        escaped = False
+
+        for char in text:
+            if in_string:
+                result.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                result.append(char)
+                continue
+
+            if char in "}]":
+                index = len(result) - 1
+                while index >= 0 and result[index].isspace():
+                    index -= 1
+                if index >= 0 and result[index] == ",":
+                    del result[index]
+                result.append(char)
+                continue
+
+            result.append(char)
+
+        return "".join(result)
 
     def _check_missing_fields(self, data: Dict[str, Any]) -> List[str]:
         """

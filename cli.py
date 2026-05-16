@@ -181,9 +181,20 @@ def cmd_process(args):
 
     if args.validate:
         _check_rlimit()
-        from src.config import load_config
+        from src.config import load_config, validate_config
 
         config = load_config(args.config)
+        validation = validate_config(config, args.config)
+
+        for warning in validation["warnings"]:
+            print(f"{console.warn} {warning}")
+
+        if validation["errors"]:
+            print(f"{console.error} Config invalid: {args.config}")
+            for error in validation["errors"]:
+                print(f"  - {error}")
+            return 1
+
         print(f"{console.ok} Config valid: {args.config}")
         print(f"  - Datasource: {config.get('datasource', {}).get('type', 'excel')}")
         print(f"  - Engine: {config.get('datasource', {}).get('engine', 'auto')}")

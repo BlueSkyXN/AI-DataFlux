@@ -1280,10 +1280,41 @@ datasource:
 
 ### 配置验证
 
-**位置**：各组件初始化时验证
+配置验证分为两层：
+
+1. **统一语义校验**：`src/config/settings.py:validate_config()` 在启动前检查 YAML 结构和会导致运行失败的配置语义。
+2. **组件初始化校验**：各数据源或处理组件在真正初始化时继续校验文件存在性、数据库连接参数等运行期条件。
+
+可通过以下入口触发统一语义校验：
+
+```bash
+python cli.py process --config config.yaml --validate
+python main.py --config config.yaml --validate
+```
+
+GUI 控制面板的 `POST /api/config/validate` 也调用同一套 `validate_config()`，并返回 `errors` 与 `warnings`。
+
+统一语义校验会拦截：
+
+- 不支持的 `datasource.type`
+- 非法的 engine、Excel reader/writer、log 选项
+- 非 bool 或非正整数的并发/开关配置
+- 空或类型错误的 `columns_to_extract` / `columns_to_write`
+- 主配置缺少 `prompt.template`
+- 数据源必需字段缺失，例如 Excel/CSV `input_path`、SQLite `db_path/table_name`、MySQL/PostgreSQL 连接字段、Feishu 凭证与表格标识
+- routing 启用时缺少 `field`、`subtasks`、`match`、`profile`，或 profile 文件不存在
+- routing profile 包含 `prompt` / `validation` 之外的顶层键
+
+以下情况返回 warning，不阻止配置通过：
+
+- 未识别的顶层配置键
+- 旧版但当前处理引擎不会读取的并发键：`max_workers`、`retry_times`、`backoff_factor`
+
+**组件初始化校验位置**：
 
 | 组件 | 验证内容 | 代码位置 |
 |------|---------|---------|
+| 统一配置校验 | 启动前语义配置、routing profile、旧键 warning | `src/config/settings.py:validate_config()` |
 | UniversalAIProcessor | flux_api_url 必需 | `src/core/processor.py:59-60` |
 | MySQLTaskPool | host/user/password/database/table_name 必需 | `src/data/factory.py:155-158` |
 | PostgreSQLTaskPool | host/user/password/database/table_name 必需 | `src/data/factory.py:243-245` |

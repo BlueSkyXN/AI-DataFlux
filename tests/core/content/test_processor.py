@@ -100,6 +100,87 @@ class TestContentProcessor:
         result = processor.parse_response(response)
         assert result["name"] == "Dave"
 
+    def test_parse_response_extracts_nested_json_from_mixed_text(self, processor):
+        """测试混合文本中的嵌套 JSON 不会被截断"""
+        response = """
+        处理结果如下：
+        {
+            "name": "Ada",
+            "status": "active",
+            "details": {
+                "score": 98,
+                "reason": "contains nested object"
+            }
+        }
+        请查收。
+        """
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "Ada"
+        assert result["status"] == "active"
+        assert result["details"]["score"] == 98
+
+    def test_parse_response_prefers_later_valid_json_candidate(
+        self, processor, mock_validator
+    ):
+        """测试前面的 JSON 示例校验失败时继续寻找后续有效结果"""
+
+        def validate(data):
+            if data.get("status") == "active":
+                return True, []
+            return False, ["Invalid status"]
+
+        mock_validator.validate.side_effect = validate
+        response = """
+        示例（不要使用）: {"name": "Example", "status": "invalid"}
+        实际结果: {"name": "Grace", "status": "active"}
+        """
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "Grace"
+        assert result["status"] == "active"
+
+    def test_parse_response_prefers_later_valid_json_after_invalid_code_block(
+        self, processor, mock_validator
+    ):
+        """测试 Markdown 代码块校验失败时继续寻找后续有效结果"""
+
+        def validate(data):
+            if data.get("status") == "active":
+                return True, []
+            return False, ["Invalid status"]
+
+        mock_validator.validate.side_effect = validate
+        response = """
+        下面是格式示例：
+        ```json
+        {"name": "Example", "status": "invalid"}
+        ```
+        实际结果: {"name": "Heidi", "status": "active"}
+        """
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "Heidi"
+        assert result["status"] == "active"
+
+    def test_parse_response_trailing_comma_cleanup_preserves_string_content(
+        self, processor
+    ):
+        """测试尾逗号清理不会误删字符串内部的逗号"""
+        response = (
+            '{"name": "literal ,} marker", '
+            '"status": "active", '
+            '"note": "literal ,] marker",}'
+        )
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "literal ,} marker"
+        assert result["note"] == "literal ,] marker"
+
     def test_parse_response_missing_fields(self, processor):
         response = '{"name": "Eve"}'  # 缺少 status
         result = processor.parse_response(response)
