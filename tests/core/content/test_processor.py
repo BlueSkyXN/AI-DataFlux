@@ -100,6 +100,27 @@ class TestContentProcessor:
         result = processor.parse_response(response)
         assert result["name"] == "Dave"
 
+    def test_parse_response_extracts_nested_json_from_mixed_text(self, processor):
+        """测试混合文本中的嵌套 JSON 不会被截断"""
+        response = """
+        处理结果如下：
+        {
+            "name": "Ada",
+            "status": "active",
+            "details": {
+                "score": 98,
+                "reason": "contains nested object"
+            }
+        }
+        请查收。
+        """
+
+        result = processor.parse_response(response)
+
+        assert result["name"] == "Ada"
+        assert result["status"] == "active"
+        assert result["details"]["score"] == 98
+
     def test_parse_response_missing_fields(self, processor):
         response = '{"name": "Eve"}'  # 缺少 status
         result = processor.parse_response(response)
