@@ -216,21 +216,25 @@ class ContentProcessor:
         if code_block_match:
             parse_content = code_block_match.group(1).strip()
 
+        first_validation_error = None
+
         # 2. 尝试直接解析
         data = self._load_json_object(parse_content)
         if data is not None:
             validation_result = self._validate_candidate(data)
             if validation_result is not None:
-                return validation_result
+                if self._is_invalid_field_error(validation_result):
+                    first_validation_error = validation_result
+                else:
+                    return validation_result
             # 如果缺少字段，继续尝试从原始文本中提取其他 JSON 对象
 
         # 3. 提取所有平衡的 JSON 对象候选。这里不能用非贪婪正则，
         # 否则遇到嵌套对象时会在第一个右花括号处截断。
-        first_validation_error = None
         for candidate in self._iter_json_object_candidates(content):
             validation_result = self._validate_candidate(candidate)
             if validation_result is not None:
-                if validation_result.get("_error") == "invalid_field_values":
+                if self._is_invalid_field_error(validation_result):
                     first_validation_error = first_validation_error or validation_result
                     continue
                 return validation_result
@@ -248,11 +252,16 @@ class ContentProcessor:
         会先移除 AI 常见的尾随逗号错误；非对象 JSON（如数组/字符串）返回 None。
         """
         try:
-            cleaned = re.sub(r",\s*([}\]])", r"\1", text.strip())
+            cleaned = self._strip_trailing_commas(text.strip())
             data = json.loads(cleaned)
         except json.JSONDecodeError:
             return None
         return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _is_invalid_field_error(result: Dict[str, Any]) -> bool:
+        """判断校验结果是否为字段值非法错误。"""
+        return result.get("_error") == "invalid_field_values"
 
     def _validate_candidate(self, data: Dict[str, Any]) -> Dict[str, Any] | None:
         """
@@ -319,6 +328,47 @@ class ContentProcessor:
                     return text[start : pos + 1]
 
         return None
+
+    @staticmethod
+    def _strip_trailing_commas(text: str) -> str:
+        """
+        移除对象/数组闭合前的尾随逗号，同时保留字符串内容不变。
+
+        不能直接用正则处理整个 JSON 文本，否则字符串值里的 `,}` 或 `,]`
+        会被误删。
+        """
+        result: list[str] = []
+        in_string = False
+        escaped = False
+
+        for char in text:
+            if in_string:
+                result.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                result.append(char)
+                continue
+
+            if char in "}]":
+                index = len(result) - 1
+                while index >= 0 and result[index].isspace():
+                    index -= 1
+                if index >= 0 and result[index] == ",":
+                    del result[index]
+                result.append(char)
+                continue
+
+            result.append(char)
+
+        return "".join(result)
 
     def _check_missing_fields(self, data: Dict[str, Any]) -> List[str]:
         """
