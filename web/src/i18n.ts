@@ -78,6 +78,9 @@ export interface Translations {
   enterYamlConfig: string;
   yamlSyntaxValid: string;
   yamlSyntaxError: string;
+  configValid: string;
+  configValidWithWarnings: string;
+  configInvalid: string;
   yamlNoTabs: string;
   failedToLoad: string;
   failedToSave: string;
@@ -321,6 +324,9 @@ const en: Translations = {
   enterYamlConfig: 'Enter YAML configuration...',
   yamlSyntaxValid: 'YAML syntax is valid',
   yamlSyntaxError: 'YAML syntax error',
+  configValid: 'Configuration is valid',
+  configValidWithWarnings: 'Configuration is valid with warnings',
+  configInvalid: 'Configuration is invalid',
   yamlNoTabs: 'YAML does not allow tabs. Please use spaces for indentation.',
   failedToLoad: 'Failed to load config',
   failedToSave: 'Failed to save config',
@@ -564,6 +570,9 @@ const zh: Translations = {
   enterYamlConfig: '输入 YAML 配置...',
   yamlSyntaxValid: 'YAML 语法有效',
   yamlSyntaxError: 'YAML 语法错误',
+  configValid: '配置有效',
+  configValidWithWarnings: '配置有效，但存在警告',
+  configInvalid: '配置无效',
   yamlNoTabs: 'YAML 不允许使用制表符。请使用空格缩进。',
   failedToLoad: '加载配置失败',
   failedToSave: '保存配置失败',

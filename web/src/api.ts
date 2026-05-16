@@ -189,16 +189,20 @@ export async function saveConfig(path: string, content: string): Promise<ConfigW
 }
 
 /**
- * 校验 YAML 配置语法
- * 调用 POST /api/config/validate，服务端解析并验证 YAML 格式。
+ * 校验 YAML 配置语法和本地可验证的配置语义
+ * 调用 POST /api/config/validate，服务端解析 YAML 并执行配置校验。
  * @param content - 待验证的 YAML 字符串
+ * @param path - 配置文件路径，用于解析相对 routing profile
  * @returns 验证结果（是否合法 + 错误信息）
  */
-export async function validateConfig(content: string): Promise<ConfigValidateResponse> {
+export async function validateConfig(
+  content: string,
+  path: string = 'config.yaml'
+): Promise<ConfigValidateResponse> {
   const response = await fetch(`${API_BASE}/api/config/validate`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ path, content }),
   });
   if (!response.ok) {
     throw new Error(`Failed to validate config: ${response.status}`);

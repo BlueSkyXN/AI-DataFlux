@@ -14,6 +14,8 @@
             深度合并两个配置字典 (override 覆盖 base)
         get_nested(config: dict, *keys: str, default=None) -> Any
             安全获取嵌套字典值 (任意层级不存在返回默认值)
+        validate_config(config, config_path=None) -> dict
+            校验配置结构和本地可验证的运行前置条件
     常量:
         DEFAULT_CONFIG: dict[str, Any]
             默认配置字典 (包含 global、datasource、token_estimation 等默认值)
@@ -37,6 +39,7 @@ from .settings import (
     DEFAULT_CONFIG,
     merge_config,
     get_nested,
+    validate_config,
 )
 
 __all__ = [
@@ -45,4 +48,5 @@ __all__ = [
     "DEFAULT_CONFIG",
     "merge_config",
     "get_nested",
+    "validate_config",
 ]

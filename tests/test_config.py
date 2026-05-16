@@ -25,6 +25,7 @@
 
 import pytest
 from pathlib import Path
+import yaml
 
 
 class TestConfigLoading:
@@ -118,3 +119,133 @@ class TestConfigValidation:
 
         if "required_fields" in prompt:
             assert isinstance(prompt["required_fields"], list)
+
+
+class TestConfigSemanticValidation:
+    """配置语义校验测试"""
+
+    def test_validate_config_rejects_startup_blocking_errors(self, sample_config):
+        """测试 validate_config 能拦截启动阶段会失败的配置"""
+        from src.config import validate_config
+
+        sample_config["datasource"]["type"] = "mongodb"
+        sample_config["datasource"]["concurrency"]["batch_size"] = 0
+        sample_config["columns_to_extract"] = []
+
+        result = validate_config(sample_config)
+
+        assert any("datasource.type" in error for error in result["errors"])
+        assert any("batch_size" in error for error in result["errors"])
+        assert any("columns_to_extract" in error for error in result["errors"])
+
+    def test_validate_config_accepts_datasource_type_case_runtime_support(
+        self, sample_config
+    ):
+        """测试 datasource.type 大小写兼容 create_task_pool 的 lower 行为"""
+        from src.config import validate_config
+
+        sample_config["datasource"]["type"] = "Excel"
+
+        result = validate_config(sample_config)
+
+        assert not result["errors"]
+
+    def test_validate_config_rejects_prompt_without_template(self, sample_config):
+        """测试主配置缺少 prompt.template 时会被拦截"""
+        from src.config import validate_config
+
+        sample_config["prompt"] = {"system_prompt": "only system message"}
+
+        result = validate_config(sample_config)
+
+        assert any("prompt.template" in error for error in result["errors"])
+
+    def test_validate_config_warns_ignored_legacy_concurrency_keys(self, sample_config):
+        """测试已知会被忽略的旧并发配置键会给出 warning"""
+        from src.config import validate_config
+
+        sample_config["datasource"]["concurrency"]["max_workers"] = 8
+        sample_config["datasource"]["concurrency"]["retry_times"] = 5
+
+        result = validate_config(sample_config)
+
+        assert not result["errors"]
+        assert any("max_workers" in warning for warning in result["warnings"])
+        assert any("retry_times" in warning for warning in result["warnings"])
+
+    def test_validate_config_rejects_missing_routing_profile(
+        self, sample_config, tmp_path
+    ):
+        """测试 routing profile 缺失时 validate_config 不再误报有效"""
+        from src.config import validate_config
+
+        config_path = tmp_path / "config.yaml"
+        sample_config["routing"] = {
+            "enabled": True,
+            "field": "category",
+            "subtasks": [{"match": "a", "profile": "missing.yaml"}],
+        }
+
+        result = validate_config(sample_config, config_path)
+
+        assert any("profile 加载失败" in error for error in result["errors"])
+
+    def test_validate_config_rejects_non_bool_routing_enabled(self, sample_config):
+        """测试 routing.enabled 使用字符串时会被明确拦截"""
+        from src.config import validate_config
+
+        sample_config["routing"] = {"enabled": "false"}
+
+        result = validate_config(sample_config)
+
+        assert any("routing.enabled" in error for error in result["errors"])
+
+    def test_validate_config_allows_partial_routing_profile_prompt(
+        self, sample_config, tmp_path
+    ):
+        """测试 routing 子配置允许只覆盖 prompt 局部字段"""
+        from src.config import validate_config
+
+        profile_path = tmp_path / "rule.yaml"
+        profile_path.write_text(
+            yaml.safe_dump({"prompt": {"temperature": 0.1}}, allow_unicode=True),
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "config.yaml"
+        sample_config["routing"] = {
+            "enabled": True,
+            "field": "category",
+            "subtasks": [{"match": "a", "profile": "rule.yaml"}],
+        }
+
+        result = validate_config(sample_config, config_path)
+
+        assert not result["errors"]
+
+    def test_validate_config_rejects_forbidden_routing_profile_keys(
+        self, sample_config, tmp_path
+    ):
+        """测试 routing 子配置包含非法顶层键时会失败"""
+        from src.config import validate_config
+
+        profile_path = tmp_path / "rule.yaml"
+        profile_path.write_text(
+            yaml.safe_dump(
+                {
+                    "prompt": {"template": "route: {record_json}"},
+                    "datasource": {"type": "sqlite"},
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "config.yaml"
+        sample_config["routing"] = {
+            "enabled": True,
+            "field": "category",
+            "subtasks": [{"match": "a", "profile": "rule.yaml"}],
+        }
+
+        result = validate_config(sample_config, config_path)
+
+        assert any("仅允许 prompt/validation" in error for error in result["errors"])

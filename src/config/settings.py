@@ -135,6 +135,41 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+SUPPORTED_DATASOURCE_TYPES = {
+    "excel",
+    "csv",
+    "mysql",
+    "postgresql",
+    "sqlite",
+    "feishu_bitable",
+    "feishu_sheet",
+}
+SUPPORTED_ENGINES = {"auto", "pandas", "polars"}
+SUPPORTED_EXCEL_READERS = {"auto", "openpyxl", "calamine"}
+SUPPORTED_EXCEL_WRITERS = {"auto", "openpyxl", "xlsxwriter"}
+SUPPORTED_LOG_LEVELS = {"debug", "info", "warning", "error"}
+SUPPORTED_LOG_FORMATS = {"text", "json"}
+SUPPORTED_LOG_OUTPUTS = {"console", "file"}
+ALLOWED_TOP_LEVEL_KEYS = {
+    "global",
+    "gateway",
+    "datasource",
+    "mysql",
+    "excel",
+    "postgresql",
+    "sqlite",
+    "csv",
+    "feishu",
+    "columns_to_extract",
+    "columns_to_write",
+    "validation",
+    "models",
+    "channels",
+    "prompt",
+    "token_estimation",
+    "routing",
+}
+
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
     """
@@ -174,6 +209,405 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         raise ConfigError(f"YAML 解析错误: {e}") from e
     except Exception as e:
         raise ConfigError(f"加载配置文件失败: {e}") from e
+
+
+def validate_config(
+    config: dict[str, Any], config_path: str | Path | None = None
+) -> dict[str, list[str]]:
+    """
+    校验配置结构和本地可验证的运行前置条件。
+
+    本函数不连接数据库、不访问远端 API，也不要求输入数据文件已经存在；
+    它只拦截会在启动初始化阶段立即失败的配置错误，并提示已知会被忽略的旧键。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not isinstance(config, dict):
+        return {"errors": ["配置根节点必须是字典"], "warnings": warnings}
+
+    unknown_top_level = sorted(set(config) - ALLOWED_TOP_LEVEL_KEYS)
+    if unknown_top_level:
+        warnings.append(f"发现未知顶层配置键，将被忽略: {unknown_top_level}")
+
+    _validate_global_config(config.get("global", {}), errors, warnings)
+    datasource = _ensure_mapping(config.get("datasource", {}), "datasource", errors)
+    datasource_type = (
+        _normalize_nonempty_str(datasource.get("type")) or "excel"
+    ).lower()
+    if datasource_type not in SUPPORTED_DATASOURCE_TYPES:
+        errors.append(
+            f"datasource.type 不支持: {datasource_type!r}，"
+            f"可选: {sorted(SUPPORTED_DATASOURCE_TYPES)}"
+        )
+
+    _validate_datasource_options(datasource, errors, warnings)
+    _validate_columns_config(config, errors)
+    _validate_prompt_config(config.get("prompt", {}), "prompt", errors)
+    _validate_validation_config(config.get("validation", {}), "validation", errors)
+    _validate_data_source_section(config, datasource_type, errors)
+    _validate_routing_config(config, config_path, errors)
+
+    return {"errors": errors, "warnings": warnings}
+
+
+def _normalize_nonempty_str(value: Any) -> str | None:
+    """将配置值规范化为非空字符串。"""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _ensure_mapping(value: Any, path: str, errors: list[str]) -> dict[str, Any]:
+    """确认配置节点为 dict；否则记录错误并返回空 dict。"""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        errors.append(f"{path} 必须是字典")
+        return {}
+    return value
+
+
+def _validate_global_config(
+    global_cfg: Any, errors: list[str], warnings: list[str]
+) -> None:
+    global_map = _ensure_mapping(global_cfg, "global", errors)
+    log_cfg = _ensure_mapping(global_map.get("log", {}), "global.log", errors)
+
+    level = _normalize_nonempty_str(log_cfg.get("level"))
+    if level is not None and level.lower() not in SUPPORTED_LOG_LEVELS:
+        errors.append(
+            f"global.log.level 不支持: {level!r}，可选: {sorted(SUPPORTED_LOG_LEVELS)}"
+        )
+
+    fmt = _normalize_nonempty_str(log_cfg.get("format"))
+    if fmt is not None and fmt.lower() not in SUPPORTED_LOG_FORMATS:
+        errors.append(
+            f"global.log.format 不支持: {fmt!r}，可选: {sorted(SUPPORTED_LOG_FORMATS)}"
+        )
+
+    output = _normalize_nonempty_str(log_cfg.get("output"))
+    if output is not None and output.lower() not in SUPPORTED_LOG_OUTPUTS:
+        errors.append(
+            f"global.log.output 不支持: {output!r}，可选: {sorted(SUPPORTED_LOG_OUTPUTS)}"
+        )
+
+    if output == "file" and not _normalize_nonempty_str(log_cfg.get("file_path")):
+        warnings.append("global.log.output=file 但未设置 file_path，将使用默认日志路径")
+
+
+def _validate_datasource_options(
+    datasource: dict[str, Any], errors: list[str], warnings: list[str]
+) -> None:
+    engine = _normalize_nonempty_str(datasource.get("engine")) or "auto"
+    if engine not in SUPPORTED_ENGINES:
+        errors.append(
+            f"datasource.engine 不支持: {engine!r}，可选: {sorted(SUPPORTED_ENGINES)}"
+        )
+
+    reader = _normalize_nonempty_str(datasource.get("excel_reader")) or "auto"
+    if reader not in SUPPORTED_EXCEL_READERS:
+        errors.append(
+            f"datasource.excel_reader 不支持: {reader!r}，"
+            f"可选: {sorted(SUPPORTED_EXCEL_READERS)}"
+        )
+
+    writer = _normalize_nonempty_str(datasource.get("excel_writer")) or "auto"
+    if writer not in SUPPORTED_EXCEL_WRITERS:
+        errors.append(
+            f"datasource.excel_writer 不支持: {writer!r}，"
+            f"可选: {sorted(SUPPORTED_EXCEL_WRITERS)}"
+        )
+
+    if "require_all_input_fields" in datasource and not isinstance(
+        datasource["require_all_input_fields"], bool
+    ):
+        errors.append("datasource.require_all_input_fields 必须是布尔值")
+
+    concurrency = _ensure_mapping(
+        datasource.get("concurrency", {}), "datasource.concurrency", errors
+    )
+    _validate_positive_int(concurrency, "batch_size", "datasource.concurrency", errors)
+    _validate_positive_int(
+        concurrency, "save_interval", "datasource.concurrency", errors
+    )
+    _validate_positive_int(concurrency, "shard_size", "datasource.concurrency", errors)
+    _validate_positive_int(
+        concurrency, "min_shard_size", "datasource.concurrency", errors
+    )
+    _validate_positive_int(
+        concurrency, "max_shard_size", "datasource.concurrency", errors
+    )
+    _validate_positive_int(
+        concurrency, "max_connections", "datasource.concurrency", errors
+    )
+    _validate_nonnegative_int(
+        concurrency, "max_connections_per_host", "datasource.concurrency", errors
+    )
+    _validate_positive_number(
+        concurrency, "api_pause_duration", "datasource.concurrency", errors
+    )
+    _validate_positive_number(
+        concurrency, "api_error_trigger_window", "datasource.concurrency", errors
+    )
+
+    min_shard = concurrency.get("min_shard_size")
+    max_shard = concurrency.get("max_shard_size")
+    if (
+        isinstance(min_shard, int)
+        and isinstance(max_shard, int)
+        and min_shard > max_shard
+    ):
+        errors.append("datasource.concurrency.min_shard_size 不能大于 max_shard_size")
+
+    retry_limits = _ensure_mapping(
+        concurrency.get("retry_limits", {}),
+        "datasource.concurrency.retry_limits",
+        errors,
+    )
+    for key in ("api_error", "content_error", "system_error"):
+        _validate_nonnegative_int(
+            retry_limits, key, "datasource.concurrency.retry_limits", errors
+        )
+
+    ignored_keys = sorted(
+        set(concurrency).intersection({"max_workers", "retry_times", "backoff_factor"})
+    )
+    for key in ignored_keys:
+        warnings.append(
+            f"datasource.concurrency.{key} 是旧配置键，当前处理引擎不会读取"
+        )
+
+
+def _validate_columns_config(config: dict[str, Any], errors: list[str]) -> None:
+    columns_to_extract = config.get("columns_to_extract")
+    if not isinstance(columns_to_extract, list) or not columns_to_extract:
+        errors.append("columns_to_extract 必须是非空列表")
+    elif not all(_normalize_nonempty_str(item) for item in columns_to_extract):
+        errors.append("columns_to_extract 中的每一项都必须是非空字符串")
+
+    columns_to_write = config.get("columns_to_write")
+    if not isinstance(columns_to_write, dict) or not columns_to_write:
+        errors.append("columns_to_write 必须是非空字典")
+    else:
+        invalid_items = [
+            key
+            for key, value in columns_to_write.items()
+            if not _normalize_nonempty_str(key) or not _normalize_nonempty_str(value)
+        ]
+        if invalid_items:
+            errors.append(
+                f"columns_to_write 的键和值都必须是非空字符串，异常键: {invalid_items}"
+            )
+
+
+def _validate_prompt_config(
+    value: Any, path: str, errors: list[str], *, require_template: bool = True
+) -> None:
+    prompt = _ensure_mapping(value, path, errors)
+
+    template = _normalize_nonempty_str(prompt.get("template"))
+    if require_template:
+        if not template:
+            errors.append(f"{path}.template 必须是非空字符串")
+    elif "template" in prompt and not template:
+        errors.append(f"{path}.template 必须是非空字符串")
+
+    if "required_fields" in prompt:
+        required_fields = prompt["required_fields"]
+        if not isinstance(required_fields, list):
+            errors.append(f"{path}.required_fields 必须是列表")
+        elif not all(_normalize_nonempty_str(item) for item in required_fields):
+            errors.append(f"{path}.required_fields 中的每一项都必须是非空字符串")
+
+    if "use_json_schema" in prompt and not isinstance(prompt["use_json_schema"], bool):
+        errors.append(f"{path}.use_json_schema 必须是布尔值")
+
+
+def _validate_validation_config(value: Any, path: str, errors: list[str]) -> None:
+    validation = _ensure_mapping(value, path, errors)
+    if "enabled" in validation and not isinstance(validation["enabled"], bool):
+        errors.append(f"{path}.enabled 必须是布尔值")
+
+    if "field_rules" not in validation:
+        return
+
+    field_rules = validation["field_rules"]
+    if not isinstance(field_rules, dict):
+        errors.append(f"{path}.field_rules 必须是字典")
+        return
+
+    invalid_rules = [
+        key for key, values in field_rules.items() if not isinstance(values, list)
+    ]
+    if invalid_rules:
+        errors.append(
+            f"{path}.field_rules 的规则值必须是列表，异常字段: {invalid_rules}"
+        )
+
+
+def _validate_data_source_section(
+    config: dict[str, Any], datasource_type: str, errors: list[str]
+) -> None:
+    if datasource_type in {"excel", "csv"}:
+        section = _ensure_mapping(
+            config.get(datasource_type, {}), datasource_type, errors
+        )
+        if not _normalize_nonempty_str(section.get("input_path")):
+            errors.append(f"{datasource_type}.input_path 是必填项")
+        return
+
+    if datasource_type == "sqlite":
+        sqlite = _ensure_mapping(config.get("sqlite", {}), "sqlite", errors)
+        for key in ("db_path", "table_name"):
+            if not _normalize_nonempty_str(sqlite.get(key)):
+                errors.append(f"sqlite.{key} 是必填项")
+        return
+
+    if datasource_type in {"mysql", "postgresql"}:
+        section = _ensure_mapping(
+            config.get(datasource_type, {}), datasource_type, errors
+        )
+        for key in ("host", "user", "password", "database", "table_name"):
+            if not _normalize_nonempty_str(section.get(key)):
+                errors.append(f"{datasource_type}.{key} 是必填项")
+        return
+
+    if datasource_type in {"feishu_bitable", "feishu_sheet"}:
+        feishu = _ensure_mapping(config.get("feishu", {}), "feishu", errors)
+        datasource = _ensure_mapping(config.get("datasource", {}), "datasource", errors)
+        for key in ("app_id", "app_secret"):
+            if not _normalize_nonempty_str(feishu.get(key)):
+                errors.append(f"feishu.{key} 是必填项")
+
+        if datasource_type == "feishu_bitable":
+            app_token = _normalize_nonempty_str(feishu.get("app_token"))
+            app_token = app_token or _normalize_nonempty_str(
+                datasource.get("app_token")
+            )
+            table_id = _normalize_nonempty_str(feishu.get("table_id"))
+            table_id = table_id or _normalize_nonempty_str(datasource.get("table_id"))
+            if app_token is None:
+                errors.append(
+                    "feishu_bitable 需要 feishu.app_token 或 datasource.app_token"
+                )
+            if table_id is None:
+                errors.append(
+                    "feishu_bitable 需要 feishu.table_id 或 datasource.table_id"
+                )
+        else:
+            spreadsheet_token = _normalize_nonempty_str(feishu.get("spreadsheet_token"))
+            spreadsheet_token = spreadsheet_token or _normalize_nonempty_str(
+                datasource.get("spreadsheet_token")
+            )
+            sheet_id = _normalize_nonempty_str(feishu.get("sheet_id"))
+            sheet_id = sheet_id or _normalize_nonempty_str(datasource.get("sheet_id"))
+            if spreadsheet_token is None:
+                errors.append(
+                    "feishu_sheet 需要 feishu.spreadsheet_token 或 datasource.spreadsheet_token"
+                )
+            if sheet_id is None:
+                errors.append(
+                    "feishu_sheet 需要 feishu.sheet_id 或 datasource.sheet_id"
+                )
+
+
+def _validate_routing_config(
+    config: dict[str, Any], config_path: str | Path | None, errors: list[str]
+) -> None:
+    routing = _ensure_mapping(config.get("routing", {}), "routing", errors)
+    enabled = routing.get("enabled", False)
+    if not isinstance(enabled, bool):
+        errors.append("routing.enabled 必须是布尔值")
+        return
+    if not enabled:
+        return
+
+    field = _normalize_nonempty_str(routing.get("field"))
+    if not field:
+        errors.append("routing.enabled=true 时必须配置 routing.field")
+
+    subtasks = routing.get("subtasks")
+    if not isinstance(subtasks, list) or not subtasks:
+        errors.append("routing.enabled=true 时 routing.subtasks 必须是非空列表")
+        return
+
+    base_dir = Path(config_path).parent if config_path is not None else Path.cwd()
+    for idx, subtask in enumerate(subtasks):
+        if not isinstance(subtask, dict):
+            errors.append(f"routing.subtasks[{idx}] 必须是字典")
+            continue
+
+        if "match" not in subtask:
+            errors.append(f"routing.subtasks[{idx}] 必须包含 match")
+
+        profile = _normalize_nonempty_str(subtask.get("profile"))
+        if profile is None:
+            errors.append(f"routing.subtasks[{idx}] 必须包含非空 profile")
+            continue
+
+        profile_path = Path(profile)
+        if not profile_path.is_absolute():
+            profile_path = base_dir / profile_path
+
+        try:
+            profile_config = load_config(profile_path)
+        except Exception as exc:
+            errors.append(f"routing.subtasks[{idx}].profile 加载失败: {exc}")
+            continue
+
+        unknown_keys = sorted(set(profile_config) - {"prompt", "validation"})
+        if unknown_keys:
+            errors.append(
+                f"routing.subtasks[{idx}].profile 仅允许 prompt/validation，"
+                f"发现非法键: {unknown_keys}"
+            )
+            continue
+
+        if "prompt" in profile_config:
+            _validate_prompt_config(
+                profile_config["prompt"],
+                f"routing.subtasks[{idx}].profile.prompt",
+                errors,
+                require_template=False,
+            )
+        if "validation" in profile_config:
+            _validate_validation_config(
+                profile_config["validation"],
+                f"routing.subtasks[{idx}].profile.validation",
+                errors,
+            )
+
+
+def _validate_positive_int(
+    mapping: dict[str, Any], key: str, path: str, errors: list[str]
+) -> None:
+    if key not in mapping:
+        return
+    value = mapping[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        errors.append(f"{path}.{key} 必须是大于 0 的整数")
+
+
+def _validate_nonnegative_int(
+    mapping: dict[str, Any], key: str, path: str, errors: list[str]
+) -> None:
+    if key not in mapping:
+        return
+    value = mapping[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        errors.append(f"{path}.{key} 必须是大于等于 0 的整数")
+
+
+def _validate_positive_number(
+    mapping: dict[str, Any], key: str, path: str, errors: list[str]
+) -> None:
+    if key not in mapping:
+        return
+    value = mapping[key]
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        errors.append(f"{path}.{key} 必须是大于 0 的数字")
 
 
 def init_logging(log_config: dict[str, Any] | None = None) -> None:

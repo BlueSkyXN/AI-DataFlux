@@ -32,7 +32,7 @@ AI-DataFlux 数据处理引擎主入口模块
 
 依赖模块:
     - src.core.UniversalAIProcessor: 核心处理器
-    - src.config.load_config: 配置加载器（仅验证模式）
+    - src.config.load_config / validate_config: 配置加载与语义校验
 
 函数清单:
     main() -> int
@@ -101,10 +101,21 @@ def main() -> int:
 
     try:
         if args.validate:
-            # 验证模式：仅加载配置并显示关键信息
-            from src.config import load_config
+            # 验证模式：加载配置并检查本地可验证的运行前置条件
+            from src.config import load_config, validate_config
 
             config = load_config(args.config)
+            validation = validate_config(config, args.config)
+
+            for warning in validation["warnings"]:
+                print(f"⚠ {warning}")
+
+            if validation["errors"]:
+                print(f"✗ 配置文件无效: {args.config}")
+                for error in validation["errors"]:
+                    print(f"  - {error}")
+                return 1
+
             print(f"✓ 配置文件有效: {args.config}")
             print(
                 f"  - 数据源类型: {config.get('datasource', {}).get('type', 'excel')}"

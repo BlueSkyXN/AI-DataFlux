@@ -62,7 +62,7 @@ Pydantic 请求模型:
     REST API 路由:
         GET  /api/config              - 读取配置文件
         PUT  /api/config              - 写入配置文件
-        POST /api/config/validate     - 校验 YAML 语法
+        POST /api/config/validate     - 校验 YAML 语法和本地可验证的配置语义
         POST /api/feishu/test_connection - 测试飞书连接
         POST /api/gateway/start       - 启动 Gateway
         POST /api/gateway/stop        - 停止 Gateway
@@ -296,6 +296,7 @@ class ConfigValidateRequest(BaseModel):
     """配置文件校验请求"""
 
     content: str
+    path: str = "config.yaml"
 
 
 class GatewayStartRequest(BaseModel):
@@ -618,14 +619,28 @@ def create_control_app() -> FastAPI:
 
     @app.post("/api/config/validate")
     async def api_validate_config(request: ConfigValidateRequest):
-        """校验 YAML 配置内容（仅语法/解析）"""
+        """校验 YAML 配置内容（语法和本地可验证的运行前置条件）"""
         import yaml
+        from src.config import validate_config
 
         try:
-            yaml.safe_load(request.content)
-            return {"valid": True}
+            parsed = yaml.safe_load(request.content)
         except yaml.YAMLError as e:
-            return {"valid": False, "error": str(e)}
+            return {"valid": False, "error": str(e), "errors": [str(e)], "warnings": []}
+
+        validation = validate_config(parsed, request.path)
+        if validation["errors"]:
+            return {
+                "valid": False,
+                "error": "\n".join(validation["errors"]),
+                "errors": validation["errors"],
+                "warnings": validation["warnings"],
+            }
+
+        return {
+            "valid": True,
+            "warnings": validation["warnings"],
+        }
 
     @app.post("/api/feishu/test_connection")
     async def api_feishu_test_connection(request: FeishuTestConnectionRequest):
