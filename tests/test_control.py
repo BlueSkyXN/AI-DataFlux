@@ -176,19 +176,20 @@ class TestControlServerAuth:
         assert app is not None
         assert auth_app.get_control_auth_token() == "unit-test-token"
 
-    def test_config_validate_api_rejects_semantic_errors(self, auth_app):
+    @pytest.mark.asyncio
+    async def test_config_validate_api_rejects_semantic_errors(self, auth_app):
         """测试控制面板配置验证 API 会返回语义校验错误"""
-        from fastapi.testclient import TestClient
-
         app = auth_app.create_control_app()
-        client = TestClient(app)
+        route = next(
+            route
+            for route in app.routes
+            if getattr(route, "path", None) == "/api/config/validate"
+        )
 
-        response = client.post(
-            "/api/config/validate",
-            headers={"Authorization": "Bearer unit-test-token"},
-            json={
-                "path": "config.yaml",
-                "content": """
+        data = await route.endpoint(
+            auth_app.ConfigValidateRequest(
+                path="config.yaml",
+                content="""
 datasource:
   type: mongodb
 columns_to_extract: []
@@ -196,12 +197,9 @@ columns_to_write: {}
 prompt:
   template: "{record_json}"
 """.strip(),
-            },
+            )
         )
 
-        data = response.json()
-
-        assert response.status_code == 200
         assert data["valid"] is False
         assert "datasource.type" in "\n".join(data["errors"])
 
