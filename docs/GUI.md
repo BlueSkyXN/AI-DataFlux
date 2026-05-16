@@ -107,7 +107,7 @@ python cli.py gui
 |------|------|------|
 | `GET` | `/api/config?path=config.yaml` | 读取配置文件内容（仅允许 `.yaml/.yml`） |
 | `PUT` | `/api/config` | 写入配置文件（自动备份） |
-| `POST` | `/api/config/validate` | 校验 YAML 语法（仅解析，不做业务校验） |
+| `POST` | `/api/config/validate` | 校验 YAML 语法和运行前语义配置 |
 
 **PUT /api/config 请求体**:
 ```json
@@ -120,16 +120,21 @@ python cli.py gui
 **POST /api/config/validate 请求体**:
 ```json
 {
+  "path": "config.yaml",
   "content": "# YAML content..."
 }
 ```
+
+`path` 用于解析 routing profile 等相对路径；如果省略，则只校验不依赖文件位置的配置项。
 
 **POST /api/config/validate 响应**:
 
 成功：
 ```json
 {
-  "valid": true
+  "valid": true,
+  "errors": [],
+  "warnings": []
 }
 ```
 
@@ -137,9 +142,12 @@ python cli.py gui
 ```json
 {
   "valid": false,
-  "error": "..."
+  "errors": ["datasource.type 不支持: mongodb"],
+  "warnings": ["datasource.concurrency.max_workers 是旧配置键，当前处理引擎不会读取"]
 }
 ```
+
+语义校验覆盖数据源类型、引擎/读写器选项、并发参数、必需数据源字段、`columns_to_extract`/`columns_to_write`、主配置 `prompt.template`、routing 规则和 profile 文件。未知顶层键和已知旧配置键以 warning 返回，不会阻止保存。
 
 ### 进程管理 API
 

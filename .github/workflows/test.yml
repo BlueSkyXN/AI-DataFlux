@@ -243,14 +243,13 @@ jobs:
           "
 
   # =========================================================================
-  # 集成测试（可选）— 仅在手动触发 (workflow_dispatch) 时运行
-  # 需要外部服务依赖（如 API 端点），因此不在普通 CI 中运行
+  # 集成测试 — 在 PR/push/手动触发时运行
+  # 当前集成测试只使用本地临时文件和本地数据源，不依赖外部服务。
   # =========================================================================
-  # 集成测试 (可选)
+  # 集成测试
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
