@@ -12,6 +12,7 @@ Key files: `workflows/test.yml`, `workflows/build-pyinstaller.yml`, `workflows/b
 ## Local invariants
 
 - `test.yml` quality checks are `ruff`, `black --check`, permissive `mypy`, syntax compile, unit matrix, CLI tests, performance library checks, and integration tests.
+- `ruff.toml` makes the CI lint rule baseline explicit; do not rely on version-dependent Ruff defaults.
 - Build workflows run `cd web && npm ci && npm run build` before full GUI packaging.
 - PyInstaller has full and CLI-only variants; Nuitka builds full GUI bundles.
 - Python and Node versions in workflow `env` are part of the release surface. Keep docs and build assumptions aligned when changing them.
