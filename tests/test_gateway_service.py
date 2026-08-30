@@ -4,10 +4,13 @@ Gateway 服务单元测试
 覆盖 src/gateway/service.py 中不依赖真实 HTTP 上游的核心行为。
 """
 
+import asyncio
 from pathlib import Path
 
 import yaml
 
+from src import __version__
+from src.gateway.app import create_app
 from src.gateway.schemas import ChatCompletionRequest
 from src.gateway.service import FluxApiService
 
@@ -66,6 +69,16 @@ def _chat_request(**extra) -> ChatCompletionRequest:
     }
     payload.update(extra)
     return ChatCompletionRequest(**payload)
+
+
+def test_gateway_exposes_package_version(tmp_path):
+    """Gateway OpenAPI 元数据和根端点应使用应用版本事实源"""
+    config_path = _write_gateway_config(tmp_path, [_model_config("model-a")])
+    app = create_app(str(config_path))
+    root_route = next(route for route in app.routes if route.path == "/")
+
+    assert app.version == __version__
+    assert asyncio.run(root_route.endpoint())["version"] == __version__
 
 
 def test_build_upstream_payload_forwards_extra_openai_params(tmp_path):

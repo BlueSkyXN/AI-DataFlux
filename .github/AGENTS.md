@@ -5,13 +5,14 @@ Key files: `workflows/test.yml`, `workflows/build-pyinstaller.yml`, `workflows/b
 
 ## Why this is high-risk
 
-- Build workflows create release artifacts and GitHub Releases on `v*` tags.
+- Build workflows create release artifacts and GitHub Releases on SemVer tags with or without a `v` prefix, such as `3.2.0` or `v3.2.0`.
 - Test workflow covers multiple Python versions and OS/architecture combinations.
 - Packaging jobs depend on frontend build output, Python dependencies, compilers, and platform-specific commands.
 
 ## Local invariants
 
 - `test.yml` quality checks are `ruff`, `black --check`, permissive `mypy`, syntax compile, unit matrix, CLI tests, performance library checks, and integration tests.
+- `ruff.toml` makes the CI lint rule baseline explicit; do not rely on version-dependent Ruff defaults.
 - Build workflows run `cd web && npm ci && npm run build` before full GUI packaging.
 - PyInstaller has full and CLI-only variants; Nuitka builds full GUI bundles.
 - Python and Node versions in workflow `env` are part of the release surface. Keep docs and build assumptions aligned when changing them.

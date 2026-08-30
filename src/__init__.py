@@ -41,11 +41,11 @@ AI-DataFlux: 高性能批量 AI 数据处理引擎
     4. API 熔断机制: 连续 API 错误触发全局暂停
 
 导出符号:
-    __version__ (str): 当前版本号 ("2.0.0")
+    __version__ (str): 当前应用版本号
     __author__ (str): 作者信息 ("AI-DataFlux Team")
 
 版本信息:
-    - 版本号: 2.0.0
+    - 版本号以模块级 __version__ 为唯一 Python 事实源
     - 重构日期: 2026-01-22 (组件化架构)
 
 使用示例:
@@ -59,5 +59,5 @@ AI-DataFlux: 高性能批量 AI 数据处理引擎
     python cli.py token --config config.yaml
 """
 
-__version__ = "2.0.0"
+__version__ = "3.2.0-dev"
 __author__ = "AI-DataFlux Team"
