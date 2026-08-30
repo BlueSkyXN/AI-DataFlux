@@ -124,6 +124,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src import __version__
+
 from .config_api import read_config, write_config
 from .process_manager import get_process_manager
 from .runtime import find_web_dist_dir, get_project_root
@@ -545,7 +547,7 @@ def create_control_app() -> FastAPI:
     app = FastAPI(
         title="AI-DataFlux Control Panel",
         description="Web GUI for managing AI-DataFlux Gateway and Process",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
     )
     control_auth_token = get_control_auth_token()

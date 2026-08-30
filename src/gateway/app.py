@@ -80,6 +80,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src import __version__
+
 from .service import FluxApiService
 from .schemas import (
     ChatCompletionRequest,
@@ -169,7 +171,7 @@ def create_app(config_path: str) -> FastAPI:
     app = FastAPI(
         title="Flux API Gateway",
         description="OpenAI API 兼容的多模型网关",
-        version="2.0.0",
+        version=__version__,
         lifespan=lifespan,  # 使用生命周期管理器
     )
 
@@ -371,7 +373,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         return {
             "name": "Flux API Gateway",
-            "version": "2.0.0",
+            "version": __version__,
             "status": "running",
         }
 

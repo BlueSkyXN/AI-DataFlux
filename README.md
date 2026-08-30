@@ -768,6 +768,6 @@ global:
 
 ---
 
-## AI-DataFlux v2.3
+## AI-DataFlux 3.2.0-dev
 
-高效、智能的批量AI处理引擎。
+当前开发版本，尚未发布为正式 GitHub Release。高效、智能的批量AI处理引擎。

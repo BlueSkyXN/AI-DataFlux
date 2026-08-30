@@ -5,7 +5,7 @@ Key files: `workflows/test.yml`, `workflows/build-pyinstaller.yml`, `workflows/b
 
 ## Why this is high-risk
 
-- Build workflows create release artifacts and GitHub Releases on `v*` tags.
+- Build workflows create release artifacts and GitHub Releases on SemVer tags with or without a `v` prefix, such as `3.2.0` or `v3.2.0`.
 - Test workflow covers multiple Python versions and OS/architecture combinations.
 - Packaging jobs depend on frontend build output, Python dependencies, compilers, and platform-specific commands.
 

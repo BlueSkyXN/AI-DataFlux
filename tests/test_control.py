@@ -172,8 +172,11 @@ class TestControlServerAuth:
 
     def test_create_app_initializes_token(self, auth_app):
         """测试创建应用时会初始化鉴权 Token"""
+        from src import __version__
+
         app = auth_app.create_control_app()
         assert app is not None
+        assert app.version == __version__
         assert auth_app.get_control_auth_token() == "unit-test-token"
 
     @pytest.mark.asyncio

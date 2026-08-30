@@ -14,6 +14,8 @@ CLI 入口测试
 测试类/函数清单:
     TestCLI                        CLI 命令测试
         test_version               验证 version 命令输出包含版本号
+        test_version_metadata_consistency 验证跨 Python/Web/文档的版本一致性
+        test_release_workflow_version_tags 验证 Release workflow 支持历史和 v 前缀 tag
         test_check                 验证 check 命令输出包含依赖库名
         test_help                  验证 --help 列出所有子命令
         test_process_help          验证 process --help 显示 --config/--validate 参数
@@ -25,8 +27,17 @@ CLI 入口测试
         test_token_help            验证 token --help 显示 --mode 及模式选项
 """
 
+import json
+import re
 import subprocess
 import sys
+from pathlib import Path
+
+import yaml
+
+from src import __version__
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestCLI:
@@ -41,8 +52,59 @@ class TestCLI:
             encoding="utf-8",
         )
         assert result.returncode == 0
-        assert "AI-DataFlux" in result.stdout
-        assert "v" in result.stdout.lower() or "2." in result.stdout
+        assert result.stdout.strip() == f"AI-DataFlux v{__version__}"
+
+    def test_version_metadata_consistency(self):
+        """测试 Python、Web 包元数据和用户文档使用同一版本"""
+        assert re.fullmatch(
+            r"\d+\.\d+\.\d+(?:-(?:dev|alpha|beta|rc)(?:\.\d+)?)?",
+            __version__,
+        )
+
+        package = json.loads(
+            (PROJECT_ROOT / "web/package.json").read_text(encoding="utf-8")
+        )
+        package_lock = json.loads(
+            (PROJECT_ROOT / "web/package-lock.json").read_text(encoding="utf-8")
+        )
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        build_docs = (PROJECT_ROOT / "docs/BUILD_VARIANTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        assert package["version"] == __version__
+        assert package_lock["version"] == __version__
+        assert package_lock["packages"][""]["version"] == __version__
+        assert f"## AI-DataFlux {__version__}" in readme
+        assert f"AI-DataFlux v{__version__}" in build_docs
+
+    def test_release_workflow_version_tags(self):
+        """测试 Release workflow 同时支持数字版和 v 前缀 SemVer tag"""
+        expected_tags = {
+            "v[0-9]*.[0-9]*.[0-9]*",
+            "[0-9]*.[0-9]*.[0-9]*",
+        }
+
+        for workflow_name in ("build-pyinstaller.yml", "build-nuitka.yml"):
+            workflow = yaml.load(
+                (PROJECT_ROOT / ".github/workflows" / workflow_name).read_text(
+                    encoding="utf-8"
+                ),
+                Loader=yaml.BaseLoader,
+            )
+
+            assert set(workflow["on"]["push"]["tags"]) == expected_tags
+            assert workflow["jobs"]["release"]["if"] == (
+                "startsWith(github.ref, 'refs/tags/')"
+            )
+            release_step = next(
+                step
+                for step in workflow["jobs"]["release"]["steps"]
+                if step.get("uses") == "softprops/action-gh-release@v2"
+            )
+            assert (
+                "contains(github.ref_name, 'dev')" in release_step["with"]["prerelease"]
+            )
 
     def test_check(self):
         """测试 check 命令"""

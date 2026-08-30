@@ -151,7 +151,7 @@ pyinstaller --onefile --clean \
 
 # 验证核心功能可用
 ./AI-DataFlux-linux-amd64-cli version
-# 输出: AI-DataFlux v2.0.0
+# 输出: AI-DataFlux v3.2.0-dev
 
 ./AI-DataFlux-linux-amd64-cli check
 # 输出: 库状态信息
@@ -167,7 +167,7 @@ matrix:
   os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
 ```
 
-每次 tag 推送或 main 分支提交时，会产出 8 个 artifact（4 平台 × 2 版本）。
+每次推送 SemVer tag（支持 `3.2.0` 和 `v3.2.0` 两种形式），或 main 分支的相关源码、依赖、前端或 workflow 发生变更时，会产出 8 个 artifact（4 平台 × 2 版本）。只有 SemVer tag 构建会进入 GitHub Release 任务。
 
 ## 常见问题
 
