@@ -9,13 +9,20 @@ type JobStatus =
   | 'blocked'
   | 'completed'
   | 'completed_with_errors'
+  | 'completed_with_unresolved_writes'
   | 'failed'
   | 'cancelled';
 
 const jobId = '12345678-1234-4234-8234-123456789abc';
 
 function job(status: JobStatus, revision = 1) {
-  const terminal = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(status);
+  const terminal = [
+    'completed',
+    'completed_with_errors',
+    'completed_with_unresolved_writes',
+    'failed',
+    'cancelled',
+  ].includes(status);
   return {
     schema_version: 1,
     revision,
@@ -34,6 +41,7 @@ function job(status: JobStatus, revision = 1) {
       in_flight: status === 'running' ? 2 : 0,
       ai_complete: status === 'completed' ? 10 : status === 'running' ? 5 : 0,
       persisted: status === 'completed' ? 10 : status === 'running' ? 3 : 0,
+      unresolved_writes: status === 'completed_with_unresolved_writes' ? 1 : 0,
       failed: status === 'failed' ? 1 : 0,
       cancelled: status === 'cancelled' ? 1 : 0,
       retries: 0,

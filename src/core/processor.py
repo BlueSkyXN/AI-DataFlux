@@ -958,7 +958,7 @@ class UniversalAIProcessor:
                                     retry_error_type=error_type.value,
                                 )
 
-                            retry_data: dict[str, Any] | None = original_data
+                            retry_data: dict[str, Any] = original_data
                             if decision.reload_data:
                                 reloaded = await self._reload_record_for_retry(
                                     record_id,

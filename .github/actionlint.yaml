@@ -1,0 +1,7 @@
+self-hosted-runner:
+  # actionlint 1.7.7 尚未内置 workflow 使用的 Intel/26 runner labels。
+  labels:
+    - macos-15-intel
+    - macos-26
+
+config-variables: null

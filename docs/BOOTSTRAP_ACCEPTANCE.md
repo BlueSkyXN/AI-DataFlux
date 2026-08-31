@@ -8,7 +8,7 @@
 | Bootstrap tree | `cc6c9fffb7f929bd111c0e2c4fe1783b0306df1c` |
 | 冻结分支 | `codex/4.0-bootstrap` |
 | 活动研发线 | `codex/4.0-integration` |
-| 当前 Ledger 状态 | 全部 `UNREVIEWED` |
+| 当前 Ledger 状态 | H1 本地可验收子项已更新；外部证据与 H2～H4 仍有 `UNREVIEWED` |
 
 本 Ledger 追踪 Bootstrap 中每个主要模块如何进入 AI-DataFlux 4.0。Bootstrap 的本地测试通过只说明它可以作为 extraction/baseline 起点，不构成模块验收。
 
@@ -34,14 +34,17 @@
 
 | module | stage | status | acceptance criteria | accepted_at_commit | evidence |
 |---|---|---|---|---|---|
-| `src/config/`、`config-example.yaml` | H1.0 / H4.1 | `UNREVIEWED` | 只接受 canonical v4 schema；覆盖 `schema_version`、datasource、retry/writeback、jobs/workspace、gateway routes、server/token；旧配置明确拒绝 | — | — |
-| 3.x config migration/compatibility paths，包括 `docs/MIGRATION_3_2.md`、`web/src/pages/configMigration.ts` 及相关 backend branches | H1.0 / H4.1 | `UNREVIEWED` | 旧 key alias、自动迁移、兼容分支和双轨运行时已删除；无运行时引用残留 | — | — |
-| version metadata、`README.md`、root entrypoints | H1.0 | `UNREVIEWED` | 活动研发线统一报告 `4.0.0-dev`；Bootstrap 的 `3.2.0-dev` 历史身份不被改写 | — | — |
-| `src/core/processor.py` | H1.1 / H1.2 | `UNREVIEWED` | source failure、模型 retry、PreparedResult、写回、persisted 计数和 record/job failure 边界符合执行合同 | — | — |
-| `src/data/contracts.py`、`src/data/base.py` | H1.2 | `UNREVIEWED` | `WritebackReceipt` 逐记录、可校验、冲突 fail closed；只有 `COMMITTED` 增加 persisted | — | — |
-| `src/data/mysql.py`、`src/data/postgresql.py`、`src/data/sqlite.py` | H1.3 | `UNREVIEWED` | 在 disposable real database 上验证读取、事务、rowcount、重试、确认不明和 readback 合同 | — | — |
-| `src/data/excel.py` 及 CSV 路径 | H1.4 | `UNREVIEWED` | 原子写回、保留未返回输出列、崩溃恢复、receipt 与失败语义通过真实文件合同测试 | — | — |
-| `src/data/feishu/bitable.py`、`src/data/feishu/sheet.py` | H1.4 | `UNREVIEWED` | 分页、分块、限流、逐记录 receipt、确认不明和真实授权环境 UAT 均有证据 | — | — |
+| `src/config/`、`config-example.yaml` | H1.0 | `REVISED_AND_ACCEPTED` | 只接受 canonical v4 schema；覆盖 `schema_version`、datasource、retry/writeback、jobs/workspace、gateway routes、server/token；旧配置明确拒绝 | `d4447c5dee86906bbfc4a2720ca5ed85b3fda234` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| 3.x config migration/compatibility paths，包括 `docs/MIGRATION_3_2.md`、`web/src/pages/configMigration.ts` 及相关 backend branches | H1.0 | `DELETED` | 旧 key alias、自动迁移、兼容分支和双轨运行时已删除；无运行时引用残留 | `d4447c5dee86906bbfc4a2720ca5ed85b3fda234` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| version metadata、`README.md`、root entrypoints | H1.0 | `REVISED_AND_ACCEPTED` | 活动研发线统一报告 `4.0.0-dev`；Bootstrap 的 `3.2.0-dev` 历史身份不被改写 | `d4447c5dee86906bbfc4a2720ca5ed85b3fda234` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/core/processor.py` retry/source failure | H1.1 | `REVISED_AND_ACCEPTED` | source/content/model/system failure 分类、total-attempt retry、reload、nonretryable 与 record/job failure 边界符合执行合同 | `cf29b4e013244598e5b1dbc7789cfb0433e24a34` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/core/processor.py` PreparedResult/writeback flow | H1.2 | `REVISED_AND_ACCEPTED` | PreparedResult、reconciliation、persisted 计数、unresolved write 和 Job 终态优先级符合执行合同 | `eb9ebb5d32471c9b54503b57dec23b8418ce200c` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/data/contracts.py`、`src/data/base.py` | H1.2 | `REVISED_AND_ACCEPTED` | `WritebackReceipt` 逐记录、可校验、冲突 fail closed；只有 `COMMITTED` 增加 persisted | `eb9ebb5d32471c9b54503b57dec23b8418ce200c` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/data/mysql.py` | H1.3 | `UNREVIEWED` | 在 disposable real MySQL 上验证事务、`FOUND_ROWS`、rowcount、rollback、commit unknown 和 readback 合同 | — | 本地 mock 合同通过；真实 MySQL integration 本轮 `SKIPPED` |
+| `src/data/postgresql.py` | H1.3 | `UNREVIEWED` | 在 disposable real PostgreSQL 上验证事务、rowcount、rollback、commit unknown 和 readback 合同 | — | 本地 mock 合同通过；真实 PostgreSQL integration 本轮 `SKIPPED` |
+| `src/data/sqlite.py` | H1.3 | `REVISED_AND_ACCEPTED` | 使用真实 temp database 验证事务、rowcount、rollback、相同值、missing ID、commit 与 readback 合同 | `f6cba67fd4c8cd20f53a84ca5c49965f59188b22` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/data/excel.py` 及 CSV 路径 | H1.4 | `REVISED_AND_ACCEPTED` | 原子写回、保留未返回输出列、磁盘 readback、reconciliation、receipt 与失败语义通过真实文件合同测试 | `b890799a9485318085217c901223da563730f9ef` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/data/feishu/bitable.py`、`src/data/feishu/sheet.py` | H1.4 | `UNREVIEWED` | 分页、分块、限流、逐记录 receipt、确认不明和真实授权环境 UAT 均有证据 | — | mock contract 通过；没有测试应用/测试表，真实 UAT 未执行 |
 | `src/jobs/models.py`、`src/jobs/io.py` | H2.1 / H2.3 | `UNREVIEWED` | Repository schema 独立版本化；原子文件语义、PreparedResult 引用/hash、终态优先级和损坏处理符合合同 | — | — |
 | `src/jobs/repository.py` | H2.1 / H2.2 | `UNREVIEWED` | ownership/mutation 锁分离；revision CAS 在 mutation lock 内；并发创建和状态变更无丢失更新 | — | — |
 | `src/core/job_tracker.py` | H2.1 / H2.3 | `UNREVIEWED` | state/event/checkpoint 一致；`PENDING_COMMIT` 恢复点、orphan、hash 损坏和 reconciliation 可恢复 | — | — |

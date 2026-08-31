@@ -29,6 +29,7 @@ Token 估算器测试
         test_sample_unprocessed_rows              验证从 Excel 采样未处理行
 """
 
+import copy
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -77,15 +78,17 @@ class TestTokenEstimator:
     @pytest.fixture
     def token_config(self, sample_config):
         """扩展示例配置，添加 token 估算配置"""
-        config = sample_config.copy()
-        config["token_estimation"] = {
+        from src.config import RootConfig, compile_job_config
+
+        config = copy.deepcopy(sample_config)
+        config["runtime"]["token_estimation"] = {
             "mode": "in",
             "sample_size": 10,
-            "tiktoken_model": "gpt-4",
+            "encoding": "o200k_base",
         }
-        config["prompt"]["system_prompt"] = "You are a helpful assistant."
-        config["prompt"]["template"] = "Analyze this: {record_json}"
-        return config
+        config["job"]["prompt"]["system_prompt"] = "You are a helpful assistant."
+        config["job"]["prompt"]["template"] = "Analyze this: {record_json}"
+        return compile_job_config(RootConfig.model_validate(config))
 
     @pytest.fixture
     def mock_tiktoken(self):
@@ -289,13 +292,15 @@ class TestTokenEstimatorIntegration:
 
     def test_sample_unprocessed_rows(self, sample_excel_with_data, sample_config):
         """测试采样未处理行"""
+        from src.config import RootConfig, compile_job_config
         from src.data import create_task_pool
 
-        config = sample_config.copy()
-        config["excel"]["input_path"] = str(sample_excel_with_data)
-        config["excel"]["output_path"] = str(
+        root_config = copy.deepcopy(sample_config)
+        root_config["job"]["datasource"]["input_path"] = str(sample_excel_with_data)
+        root_config["job"]["datasource"]["output_path"] = str(
             sample_excel_with_data.parent / "output.xlsx"
         )
+        config = compile_job_config(RootConfig.model_validate(root_config))
 
         pool = create_task_pool(
             config, config["columns_to_extract"], config["columns_to_write"]

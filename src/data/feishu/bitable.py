@@ -417,11 +417,11 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
         record_outcomes = run_async(self._batch_update(update_records))
         for record_id, record_outcome in record_outcomes.items():
-            task_id = task_ids_by_record.get(record_id)
-            if task_id is None:
+            mapped_task_id = task_ids_by_record.get(record_id)
+            if mapped_task_id is None:
                 continue
-            outcomes[task_id] = WritebackItem(
-                record_id=task_id,
+            outcomes[mapped_task_id] = WritebackItem(
+                record_id=mapped_task_id,
                 disposition=record_outcome.disposition,
                 code=record_outcome.code,
                 message=record_outcome.message,
@@ -518,8 +518,11 @@ class FeishuBitableTaskPool(BaseTaskPool):
         # 同步更新内存快照，防止多 shard 重复处理（O(1) 映射查找）
         for rec in records:
             rec_id = str(rec["record_id"])
-            outcome = record_outcomes.get(rec_id)
-            if outcome is None or outcome.disposition != CommitDisposition.COMMITTED:
+            record_outcome = record_outcomes.get(rec_id)
+            if (
+                record_outcome is None
+                or record_outcome.disposition != CommitDisposition.COMMITTED
+            ):
                 continue
             fields = rec["fields"]
             task_id = self._reverse_map.get(rec_id)

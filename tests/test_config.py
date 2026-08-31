@@ -453,12 +453,13 @@ def test_compile_job_config_uses_defaults_and_canonical_paths(tmp_path):
 
     assert compiled["datasource"]["type"] == "csv"
     assert compiled["columns_to_extract"] == ["input"]
-    assert compiled["datasource"]["concurrency"]["retry_limits"] == {
-        "api_error": 3,
-        "content_error": 1,
-        "system_error": 2,
-        "source_error": 2,
+    assert compiled["retry"]["task_max_attempts"] == {
+        "api_error": 4,
+        "content_error": 2,
+        "system_error": 3,
+        "source_error": 3,
     }
+    assert compiled["retry"]["model_max_attempts"] == 3
 
 
 def test_workspace_resolution_rejects_symlink_escape(tmp_path):

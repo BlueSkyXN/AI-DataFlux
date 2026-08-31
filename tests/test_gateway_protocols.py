@@ -25,11 +25,12 @@ def _model(
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "id": model_id,
-        "name": model_id,
-        "model": f"upstream-{model_id}",
+        "display_name": model_id,
+        "aliases": [],
+        "upstream_model": f"upstream-{model_id}",
         "channel_id": "openai",
         "api_key": "test-key",
-        "timeout": 60,
+        "timeout_seconds": 60,
         "weight": 1,
         "temperature": 0.3,
         "safe_rps": 100,
@@ -54,39 +55,31 @@ def _config(
     models: list[dict[str, Any]],
 ) -> Path:
     channel: dict[str, Any] = {
-        "name": "openai",
         "base_url": "https://api.example.test",
         "endpoints": {
             "chat_completions": "/v1/chat/completions",
             "responses": "/v1/responses",
         },
-        "timeout": 60,
+        "timeout_seconds": 60,
         "ssl_verify": True,
     }
     path = tmp_path / "gateway-protocols.yaml"
     path.write_text(
         yaml.safe_dump(
             {
-                "global": {"log": {"level": "error"}},
-                "datasource": {
-                    "type": "csv",
-                    "engine": "pandas",
-                    "concurrency": {"batch_size": 1, "max_in_flight": 1},
-                },
-                "csv": {"input_path": "input.csv"},
-                "columns_to_extract": ["input"],
-                "columns_to_write": {"result": "result"},
-                "prompt": {"template": "{input}"},
-                "workspace": {
-                    "roots": {"project": "."},
-                    "state_dir": ".dataflux/jobs",
+                "schema_version": 4,
+                "runtime": {
+                    "log": {"level": "error"},
                 },
                 "gateway": {
-                    "max_connections": 10,
-                    "max_connections_per_host": 10,
+                    "listen": {},
+                    "connection_pool": {
+                        "max_connections": 10,
+                        "max_connections_per_host": 10,
+                    },
+                    "channels": {"openai": channel},
+                    "routes": models,
                 },
-                "channels": {"openai": channel},
-                "models": models,
             }
         ),
         encoding="utf-8",
@@ -595,7 +588,7 @@ def test_gateway_rejects_invalid_model_instead_of_silently_dropping_it(tmp_path)
     invalid["safe_rps"] = "fast"
     config_path = _config(tmp_path, [_model("valid"), invalid])
 
-    with pytest.raises(ValueError, match=r"models\[1\]\.safe_rps"):
+    with pytest.raises(ValueError, match=r"gateway\.routes\[1\]\.safe_rps"):
         FluxApiService(str(config_path))
 
 
