@@ -141,6 +141,7 @@ Excel 数据源任务池实现模块
 import asyncio
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -162,6 +163,14 @@ from .engines import (
     WriterType,
     get_engine,
 )
+
+
+class AtomicFileWriteError(IOError):
+    """文件替换失败，并标记目标路径是否已经被替换。"""
+
+    def __init__(self, message: str, *, replaced: bool):
+        super().__init__(message)
+        self.replaced = replaced
 
 
 class ExcelTaskPool(BaseTaskPool):
@@ -312,6 +321,7 @@ class ExcelTaskPool(BaseTaskPool):
         # 保存相关
         self.save_interval = save_interval
         self.last_save_time = time.time()
+        self._writeback_lock = threading.Lock()
 
         # 分片状态
         self.current_shard_id = -1
@@ -601,117 +611,298 @@ class ExcelTaskPool(BaseTaskPool):
         batch_id: str,
         results: dict[int, dict[str, Any]],
     ) -> WritebackReceipt:
-        """Update rows and acknowledge them only after an atomic file replace."""
+        """写入结果，并仅在磁盘回读完全匹配后确认提交。"""
+
+        with self._writeback_lock:
+            return self._update_task_results_locked(batch_id, results)
+
+    def _update_task_results_locked(
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """在单文件写回锁内完成内存变更、替换和回读。"""
 
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=False)
 
-        updated_indices: list[int] = []
-        failures: dict[int, WritebackItem] = {}
-        original_df = self.engine.copy(self.df)
+        outcomes: dict[int, WritebackItem] = {}
+        expected: dict[int, dict[str, Any]] = {}
+        with self.lock:
+            original_df = self.engine.copy(self.df)
+            working_df = self.engine.copy(self.df)
+            all_indices = set(self.engine.get_indices(working_df))
+
+            for idx, row_result in results.items():
+                if "_error" in row_result:
+                    outcomes[idx] = WritebackItem(
+                        idx,
+                        CommitDisposition.REJECTED,
+                        "invalid_result",
+                        "结果包含 _error",
+                        False,
+                    )
+                    continue
+                if idx not in all_indices:
+                    outcomes[idx] = WritebackItem(
+                        idx,
+                        CommitDisposition.REJECTED,
+                        "record_not_found",
+                        f"索引 {idx} 不存在",
+                        False,
+                    )
+                    continue
+
+                writable_fields = [
+                    (alias, col_name)
+                    for alias, col_name in self.columns_to_write.items()
+                    if alias in row_result
+                ]
+                if not writable_fields:
+                    outcomes[idx] = WritebackItem(
+                        idx,
+                        CommitDisposition.REJECTED,
+                        "no_writable_fields",
+                        "AI 结果不包含任何 columns_to_write alias",
+                        False,
+                    )
+                    continue
+
+                missing_columns = [
+                    col_name
+                    for _, col_name in writable_fields
+                    if not self.engine.has_column(working_df, col_name)
+                ]
+                if missing_columns:
+                    outcomes[idx] = WritebackItem(
+                        idx,
+                        CommitDisposition.REJECTED,
+                        "column_not_found",
+                        f"输出列不存在: {missing_columns}",
+                        False,
+                    )
+                    continue
+
+                record_df = self.engine.copy(working_df)
+                record_expected: dict[str, Any] = {}
+                try:
+                    for alias, col_name in writable_fields:
+                        record_df = self.engine.set_value(
+                            record_df,
+                            idx,
+                            col_name,
+                            row_result[alias],
+                        )
+                        record_expected[col_name] = row_result[alias]
+                except Exception as exc:
+                    outcomes[idx] = WritebackItem(
+                        idx,
+                        CommitDisposition.REJECTED,
+                        "set_value_failed",
+                        str(exc),
+                        True,
+                    )
+                    continue
+
+                working_df = record_df
+                expected[idx] = record_expected
+
+            self.df = working_df
+
+        if not expected:
+            return self._file_receipt(batch_id, results, outcomes)
 
         try:
-            with self.lock:
-                all_indices = set(self.engine.get_indices(self.df))
-                for idx, row_result in results.items():
-                    if "_error" in row_result:
-                        failures[idx] = WritebackItem(
-                            idx,
-                            CommitDisposition.REJECTED,
-                            "invalid_result",
-                            "结果包含 _error",
-                            False,
-                        )
-                        continue
-                    if idx not in all_indices:
-                        failures[idx] = WritebackItem(
-                            record_id=idx,
-                            disposition=CommitDisposition.REJECTED,
-                            code="record_not_found",
-                            message=f"索引 {idx} 不存在",
-                            retryable=False,
-                        )
-                        continue
+            self._save_excel()
+        except AtomicFileWriteError as exc:
+            if not exc.replaced:
+                with self.lock:
+                    self.df = original_df
+                disposition = CommitDisposition.REJECTED
+                code = "file_write_rejected"
+                retryable = True
+            else:
+                disposition = CommitDisposition.INDETERMINATE
+                code = "file_durability_indeterminate"
+                retryable = False
+            for idx in expected:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    disposition,
+                    code,
+                    str(exc),
+                    retryable,
+                )
+            return self._file_receipt(batch_id, results, outcomes)
 
-                    writable_fields = [
-                        (alias, col_name)
-                        for alias, col_name in self.columns_to_write.items()
-                        if alias in row_result
-                    ]
-                    if not writable_fields:
-                        failures[idx] = WritebackItem(
-                            record_id=idx,
-                            disposition=CommitDisposition.REJECTED,
-                            code="no_writable_fields",
-                            message="AI 结果不包含任何 columns_to_write alias",
-                            retryable=False,
-                        )
-                        continue
+        try:
+            persisted_df = self._read_output_file()
+        except Exception as exc:
+            for idx in expected:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.INDETERMINATE,
+                    "file_readback_failed",
+                    str(exc),
+                    False,
+                )
+            return self._file_receipt(batch_id, results, outcomes)
 
-                    record_failed = False
-                    row_before = self.engine.get_row(self.df, idx)
-                    applied_columns: list[str] = []
-                    for alias, col_name in writable_fields:
-                        if not self.engine.has_column(self.df, col_name):
-                            record_failed = True
-                            failures[idx] = WritebackItem(
-                                record_id=idx,
-                                disposition=CommitDisposition.REJECTED,
-                                code="column_not_found",
-                                message=f"输出列 {col_name} 不存在",
-                                retryable=False,
-                            )
-                            break
-                        try:
-                            self.df = self.engine.set_value(
-                                self.df, idx, col_name, row_result[alias]
-                            )
-                            applied_columns.append(col_name)
-                        except Exception as exc:
-                            record_failed = True
-                            failures[idx] = WritebackItem(
-                                record_id=idx,
-                                disposition=CommitDisposition.REJECTED,
-                                code="set_value_failed",
-                                message=f"列 {col_name}: {exc}",
-                                retryable=True,
-                            )
-                            break
-                    if record_failed:
-                        try:
-                            for col_name in applied_columns:
-                                self.df = self.engine.set_value(
-                                    self.df,
-                                    idx,
-                                    col_name,
-                                    row_before.get(col_name),
-                                )
-                        except Exception:
-                            self.df = original_df
-                            raise
-                    if not record_failed:
-                        updated_indices.append(idx)
+        persisted_indices = set(self.engine.get_indices(persisted_df))
+        for idx, expected_values in expected.items():
+            if idx not in persisted_indices:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "record_missing_on_readback",
+                    f"磁盘回读缺少索引 {idx}",
+                    True,
+                )
+                continue
+            actual = self.engine.get_row(persisted_df, idx)
+            mismatched = [
+                column
+                for column, value in expected_values.items()
+                if column not in actual or not self._values_equal(value, actual[column])
+            ]
+            if mismatched:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "file_readback_mismatch",
+                    f"磁盘回读字段不匹配: {mismatched}",
+                    True,
+                )
+            else:
+                outcomes[idx] = WritebackItem(idx, CommitDisposition.COMMITTED)
 
-            if updated_indices:
-                self._save_excel()
-                self.last_save_time = time.time()
-        except Exception:
-            self.df = original_df
-            raise
+        with self.lock:
+            self.df = persisted_df
+        self.last_save_time = time.time()
+        return self._file_receipt(batch_id, results, outcomes)
 
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """重新读取目标文件并逐字段确认之前不确定的写入。"""
+
+        with self._writeback_lock:
+            return self._reconcile_task_results_locked(batch_id, results)
+
+    def _reconcile_task_results_locked(
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """在单文件写回锁内完成磁盘 reconciliation。"""
+
+        outcomes: dict[int, WritebackItem] = {}
+        expected: dict[int, dict[str, Any]] = {}
+        for idx, row_result in results.items():
+            if "_error" in row_result:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
+                continue
+            writable = {
+                col_name: row_result[alias]
+                for alias, col_name in self.columns_to_write.items()
+                if alias in row_result
+            }
+            if not writable:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "AI 结果不包含任何 columns_to_write alias",
+                    False,
+                )
+                continue
+            expected[idx] = writable
+
+        try:
+            persisted_df = self._read_output_file()
+        except Exception as exc:
+            for idx in expected:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.INDETERMINATE,
+                    "file_reconciliation_failed",
+                    str(exc),
+                    False,
+                )
+            return self._file_receipt(batch_id, results, outcomes)
+
+        persisted_indices = set(self.engine.get_indices(persisted_df))
+        available_columns = set(self.engine.get_column_names(persisted_df))
+        for idx, expected_values in expected.items():
+            missing_columns = sorted(set(expected_values) - available_columns)
+            if idx not in persisted_indices or missing_columns:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "file_reconciliation_missing",
+                    (
+                        f"磁盘中缺少索引 {idx}"
+                        if idx not in persisted_indices
+                        else f"磁盘中缺少字段: {missing_columns}"
+                    ),
+                    False,
+                )
+                continue
+            actual = self.engine.get_row(persisted_df, idx)
+            mismatched = [
+                column
+                for column, value in expected_values.items()
+                if not self._values_equal(value, actual[column])
+            ]
+            if mismatched:
+                outcomes[idx] = WritebackItem(
+                    idx,
+                    CommitDisposition.REJECTED,
+                    "file_reconciliation_mismatch",
+                    f"磁盘字段不匹配: {mismatched}",
+                    True,
+                )
+            else:
+                outcomes[idx] = WritebackItem(idx, CommitDisposition.COMMITTED)
+
+        with self.lock:
+            self.df = persisted_df
+        return self._file_receipt(batch_id, results, outcomes)
+
+    @staticmethod
+    def _file_receipt(
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+        outcomes: dict[int, WritebackItem],
+    ) -> WritebackReceipt:
         return WritebackReceipt(
             batch_id=batch_id,
             submitted_ids=tuple(results),
-            items=tuple(
-                (
-                    WritebackItem(idx, CommitDisposition.COMMITTED)
-                    if idx in updated_indices
-                    else failures[idx]
-                )
-                for idx in results
-            ),
+            items=tuple(outcomes[idx] for idx in results),
             atomic=False,
         )
+
+    def _values_equal(self, expected: Any, actual: Any) -> bool:
+        try:
+            if self.engine.is_empty(expected) and self.engine.is_empty(actual):
+                return True
+        except (TypeError, ValueError):
+            pass
+        try:
+            equality = expected == actual
+            if bool(equality):
+                return True
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return str(expected) == str(actual)
 
     def reload_task_data(self, idx: int) -> dict[str, Any] | None:
         """
@@ -752,17 +943,9 @@ class ExcelTaskPool(BaseTaskPool):
             return None
 
     def close(self) -> None:
-        """
-        关闭任务池并执行最终保存
+        """关闭任务池；每次 write_results 已经独立完成持久化。"""
 
-        在处理结束时调用，确保所有内存中的数据都被持久化。
-
-        注意:
-            - 即使保存失败也不会抛出异常（已记录错误日志）
-            - 调用后不应再使用此任务池实例
-        """
-        logging.info("正在执行 Excel 文件的最终保存操作...")
-        self._save_excel()
+        self.clear_tasks()
 
     def close_readonly(self) -> None:
         """Excel token estimation owns no external handle and must not save."""
@@ -824,7 +1007,7 @@ class ExcelTaskPool(BaseTaskPool):
                     output_dir.mkdir(parents=True, exist_ok=True)
 
                 # CSV 文件直接保存
-                if self._is_csv or output_is_csv:
+                if output_is_csv:
                     self._atomic_write(self.df, self.output_path, csv=True)
                     logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
                     return
@@ -833,9 +1016,21 @@ class ExcelTaskPool(BaseTaskPool):
                 logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
                 return
 
+        except AtomicFileWriteError:
+            raise
         except Exception as e:
             logging.error(f"❌ 保存文件失败: {e}", exc_info=True)
-            raise IOError(f"保存文件失败: {e}") from e
+            raise AtomicFileWriteError(
+                f"保存文件失败: {e}",
+                replaced=False,
+            ) from e
+
+    def _read_output_file(self) -> Any:
+        """每次从目标路径重新读取，禁止使用内存 DataFrame 代替回读。"""
+
+        if self.output_path.suffix.lower() == ".csv":
+            return self.engine.read_csv(self.output_path)
+        return self.engine.read_excel(self.output_path)
 
     def _atomic_write(self, df: Any, destination: Path, *, csv: bool) -> None:
         """Write beside the destination, fsync it, then atomically replace."""
@@ -844,6 +1039,7 @@ class ExcelTaskPool(BaseTaskPool):
         temp_path = destination.with_name(
             f".{destination.stem}.{uuid.uuid4().hex}.tmp{suffix}"
         )
+        replaced = False
         try:
             if csv:
                 self.engine.write_csv(df, temp_path)
@@ -852,15 +1048,19 @@ class ExcelTaskPool(BaseTaskPool):
             with temp_path.open("rb") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp_path, destination)
+            replaced = True
+            directory_fd = os.open(str(destination.parent), os.O_RDONLY)
             try:
-                directory_fd = os.open(str(destination.parent), os.O_RDONLY)
-            except OSError:
-                directory_fd = None
-            if directory_fd is not None:
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except AtomicFileWriteError:
+            raise
+        except Exception as exc:
+            raise AtomicFileWriteError(
+                f"保存文件失败: {exc}",
+                replaced=replaced,
+            ) from exc
         finally:
             if temp_path.exists():
                 temp_path.unlink()

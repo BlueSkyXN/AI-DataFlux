@@ -87,7 +87,32 @@ from ..contracts import (
     WritebackReceipt,
 )
 from . import run_async
-from .client import FeishuClient
+from .client import FeishuAPIError, FeishuClient, FeishuRateLimitError
+
+
+def _sheet_error_item(record_id: int, error: BaseException) -> WritebackItem:
+    """将 Sheet 写入异常分类为明确拒绝或结果不明。"""
+
+    message = f"{type(error).__name__}: {error}"
+    if (
+        isinstance(error, FeishuAPIError)
+        and error.code not in {-1}
+        and not (500 <= error.code <= 599)
+    ):
+        return WritebackItem(
+            record_id,
+            CommitDisposition.REJECTED,
+            "sheet_api_rejected",
+            message,
+            isinstance(error, FeishuRateLimitError) or error.code == 429,
+        )
+    return WritebackItem(
+        record_id,
+        CommitDisposition.INDETERMINATE,
+        "sheet_write_indeterminate",
+        message,
+        False,
+    )
 
 
 def _col_index_to_letter(index: int) -> str:
@@ -161,6 +186,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
         self.current_max_id = 0
 
         self._snapshot_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._logger = logging.getLogger("feishu.sheet_pool")
 
     # ==================== 快照管理 ====================
@@ -391,14 +417,22 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 )
                 continue
 
-            writable = False
-            for alias, col_name in self.columns_to_write.items():
-                if alias in row_result:
-                    writable = True
-                    if col_name not in col_data:
-                        col_data[col_name] = {}
-                    col_data[col_name][task_id] = row_result[alias]
-            if not writable:
+            if task_id < 0 or task_id >= len(self._data_rows):
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "record_not_found",
+                    f"行索引 {task_id} 不存在",
+                    False,
+                )
+                continue
+
+            writable_fields = [
+                (alias, col_name)
+                for alias, col_name in self.columns_to_write.items()
+                if alias in row_result
+            ]
+            if not writable_fields:
                 outcomes[task_id] = WritebackItem(
                     task_id,
                     CommitDisposition.REJECTED,
@@ -406,6 +440,25 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     "结果不包含可写字段",
                     False,
                 )
+                continue
+
+            missing_columns = [
+                col_name
+                for _, col_name in writable_fields
+                if col_name not in self._col_name_to_index
+            ]
+            if missing_columns:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "column_not_found",
+                    f"列不在表头中: {missing_columns}",
+                    False,
+                )
+                continue
+
+            for alias, col_name in writable_fields:
+                col_data.setdefault(col_name, {})[task_id] = row_result[alias]
 
         if not col_data:
             return WritebackReceipt(
@@ -415,14 +468,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 atomic=False,
             )
 
-        persisted, failures = run_async(self._write_results(col_data))
-        for failure in failures:
-            outcomes.setdefault(failure.record_id, failure)
-        for task_id in persisted:
-            outcomes[task_id] = WritebackItem(
-                task_id,
-                CommitDisposition.COMMITTED,
-            )
+        with self._write_lock:
+            write_outcomes = run_async(self._write_results(col_data))
+        outcomes.update(write_outcomes)
         for task_id in results:
             outcomes.setdefault(
                 task_id,
@@ -443,7 +491,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
 
     async def _write_results(
         self, col_data: dict[str, dict[int, Any]]
-    ) -> tuple[set[int], list[WritebackItem]]:
+    ) -> dict[int, WritebackItem]:
         """
         异步写入结果到电子表格
 
@@ -452,9 +500,12 @@ class FeishuSheetTaskPool(BaseTaskPool):
         """
         success_count = 0
         error_count = 0
-        candidate_ids = {task_id for rows in col_data.values() for task_id in rows}
-        failed_ids: set[int] = set()
-        failures: list[WritebackItem] = []
+        expected_cells: dict[int, set[str]] = {}
+        successful_cells: dict[int, set[str]] = {}
+        failures: dict[int, list[WritebackItem]] = {}
+        for col_name, rows in col_data.items():
+            for task_id in rows:
+                expected_cells.setdefault(task_id, set()).add(col_name)
 
         for col_name, rows in col_data.items():
             col_idx = self._col_name_to_index.get(col_name)
@@ -462,8 +513,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 self._logger.warning(f"列 '{col_name}' 不在表头中，跳过")
                 error_count += len(rows)
                 for task_id in rows:
-                    failed_ids.add(task_id)
-                    failures.append(
+                    failures.setdefault(task_id, []).append(
                         WritebackItem(
                             record_id=task_id,
                             disposition=CommitDisposition.REJECTED,
@@ -501,6 +551,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
 
                     # 同步更新内存快照，防止多 shard 重复处理
                     for row_idx, value in segment:
+                        successful_cells.setdefault(row_idx, set()).add(col_name)
                         # 飞书可能省略行尾空单元格，先补齐长度再写入
                         row = self._data_rows[row_idx]
                         if len(row) <= col_idx:
@@ -511,18 +562,191 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     self._logger.error(f"写入 {range_str} 失败: {e}")
                     error_count += len(segment)
                     for row_idx, _ in segment:
-                        failed_ids.add(row_idx)
-                        failures.append(
-                            WritebackItem(
-                                record_id=row_idx,
-                                disposition=CommitDisposition.REJECTED,
-                                code="sheet_write_failed",
-                                message=str(e),
-                            )
+                        failures.setdefault(row_idx, []).append(
+                            _sheet_error_item(row_idx, e)
                         )
 
         self._logger.info(f"Sheet 写入完成，成功: {success_count}, 失败: {error_count}")
-        return candidate_ids - failed_ids, failures
+        outcomes: dict[int, WritebackItem] = {}
+        for task_id, expected in expected_cells.items():
+            succeeded = successful_cells.get(task_id, set())
+            task_failures = failures.get(task_id, [])
+            if succeeded == expected:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.COMMITTED,
+                )
+            elif succeeded:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "partial_sheet_write",
+                    "同一记录仅有部分期望单元格确认写入",
+                    False,
+                )
+            elif any(
+                item.disposition == CommitDisposition.INDETERMINATE
+                for item in task_failures
+            ):
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "sheet_write_indeterminate",
+                    "; ".join(item.message for item in task_failures),
+                    False,
+                )
+            elif task_failures:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    task_failures[0].code,
+                    "; ".join(item.message for item in task_failures),
+                    all(item.retryable for item in task_failures),
+                )
+            else:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "sheet_result_missing",
+                    "Sheet 写入结果未覆盖该记录",
+                    False,
+                )
+        return outcomes
+
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """按实际单元格范围重新读取并核对每个期望值。"""
+
+        outcomes: dict[int, WritebackItem] = {}
+        expected: dict[int, list[tuple[int, Any]]] = {}
+        for task_id, row_result in results.items():
+            if "_error" in row_result:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
+                continue
+            if task_id < 0 or task_id >= len(self._data_rows):
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "record_not_found",
+                    f"行索引 {task_id} 不存在",
+                    False,
+                )
+                continue
+
+            writable_fields = [
+                (col_name, row_result[alias])
+                for alias, col_name in self.columns_to_write.items()
+                if alias in row_result
+            ]
+            if not writable_fields:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含可写字段",
+                    False,
+                )
+                continue
+            missing_columns = [
+                col_name
+                for col_name, _ in writable_fields
+                if col_name not in self._col_name_to_index
+            ]
+            if missing_columns:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "column_not_found",
+                    f"列不在表头中: {missing_columns}",
+                    False,
+                )
+                continue
+            expected[task_id] = [
+                (self._col_name_to_index[col_name], value)
+                for col_name, value in writable_fields
+            ]
+
+        outcomes.update(run_async(self._reconcile_expected_cells(expected)))
+        return self._receipt(batch_id, results, outcomes)
+
+    async def _reconcile_expected_cells(
+        self,
+        expected: dict[int, list[tuple[int, Any]]],
+    ) -> dict[int, WritebackItem]:
+        outcomes: dict[int, WritebackItem] = {}
+        for task_id, cells in expected.items():
+            mismatched = False
+            read_error: Exception | None = None
+            actual_values: list[tuple[int, str]] = []
+            for col_idx, expected_value in cells:
+                cell = f"{_col_index_to_letter(col_idx)}{task_id + 2}"
+                range_str = f"{self.sheet_id}!{cell}:{cell}"
+                try:
+                    rows = await self.client.sheet_read_range(
+                        self.spreadsheet_token,
+                        range_str,
+                    )
+                except Exception as exc:
+                    read_error = exc
+                    continue
+                actual = ""
+                if rows and rows[0]:
+                    value = rows[0][0]
+                    actual = "" if value is None else str(value)
+                expected_text = "" if expected_value is None else str(expected_value)
+                actual_values.append((col_idx, actual))
+                if actual != expected_text:
+                    mismatched = True
+
+            if mismatched:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "sheet_reconciliation_mismatch",
+                    "至少一个远端单元格与期望值不匹配",
+                    True,
+                )
+            elif read_error is not None:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "sheet_reconciliation_failed",
+                    str(read_error),
+                    False,
+                )
+            else:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.COMMITTED,
+                )
+                row = self._data_rows[task_id]
+                for col_idx, actual in actual_values:
+                    if len(row) <= col_idx:
+                        row.extend([""] * (col_idx + 1 - len(row)))
+                    row[col_idx] = actual
+        return outcomes
+
+    @staticmethod
+    def _receipt(
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+        outcomes: dict[int, WritebackItem],
+    ) -> WritebackReceipt:
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(outcomes[task_id] for task_id in results),
+            atomic=False,
+        )
 
     @staticmethod
     def _group_consecutive(

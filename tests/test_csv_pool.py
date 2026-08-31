@@ -165,7 +165,11 @@ class TestCSVTaskPool:
         task_id, _ = batch[0]
 
         # 更新结果
-        csv_pool.update_task_results({task_id: {"result": "测试结果"}})
+        receipt = csv_pool.update_task_results(
+            "csv-update",
+            {task_id: {"result": "测试结果"}},
+        )
+        assert receipt.committed_ids == (task_id,)
 
         # 强制保存
         csv_pool.close()
@@ -189,9 +193,14 @@ class TestCSVTaskPool:
             with mock.patch(
                 "src.data.excel.os.replace", side_effect=OSError("replace failed")
             ):
-                with pytest.raises(IOError, match="replace failed"):
-                    pool.update_task_results({0: {"result": "not durable"}})
+                receipt = pool.update_task_results(
+                    "replace-failed",
+                    {0: {"result": "not durable"}},
+                )
 
+            assert receipt.committed_ids == ()
+            assert receipt.items[0].disposition.value == "rejected"
+            assert receipt.items[0].retryable is True
             assert temp_csv.read_bytes() == original
             assert list(temp_csv.parent.glob(f".{temp_csv.stem}.*.tmp.csv")) == []
         finally:
@@ -221,9 +230,12 @@ class TestCSVTaskPool:
             engine_type="pandas",
         )
         try:
-            receipt = pool.update_task_results({0: {"summary": "new-summary"}})
+            receipt = pool.update_task_results(
+                "partial-result",
+                {0: {"summary": "new-summary"}},
+            )
             row = pd.read_csv(csv_path).iloc[0]
-            assert receipt.persisted_ids == (0,)
+            assert receipt.committed_ids == (0,)
             assert row["output_result"] == "keep-me"
             assert row["output_summary"] == "new-summary"
         finally:
@@ -258,8 +270,11 @@ class TestCSVTaskPool:
                 "_atomic_write",
                 side_effect=fail_only_configured_excel,
             ):
-                with pytest.raises(IOError, match="保存文件失败"):
-                    pool.update_task_results({0: {"result": "not-durable"}})
+                receipt = pool.update_task_results(
+                    "unicode-failed",
+                    {0: {"result": "not-durable"}},
+                )
+            assert receipt.items[0].disposition.value == "rejected"
             assert writes == [(excel_path, False)]
             assert not excel_path.with_suffix(".csv").exists()
             assert pool.engine.is_empty(
@@ -267,6 +282,189 @@ class TestCSVTaskPool:
             )
         finally:
             pool.close()
+
+    def test_directory_fsync_failure_after_replace_is_indeterminate(self, temp_csv):
+        from src.data.contracts import CommitDisposition
+        from src.data.excel import ExcelTaskPool
+
+        pool = ExcelTaskPool(
+            input_path=temp_csv,
+            output_path=temp_csv,
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        try:
+            with mock.patch(
+                "src.data.excel.os.fsync",
+                side_effect=[None, OSError("directory fsync failed")],
+            ):
+                receipt = pool.update_task_results(
+                    "directory-fsync",
+                    {0: {"result": "possibly durable"}},
+                )
+
+            assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
+            assert pd.read_csv(temp_csv).iloc[0]["output_result"] == "possibly durable"
+        finally:
+            pool.close()
+
+    def test_reconciliation_reads_target_file(self, temp_csv):
+        from src.data.contracts import CommitDisposition
+        from src.data.excel import ExcelTaskPool
+
+        pool = ExcelTaskPool(
+            input_path=temp_csv,
+            output_path=temp_csv,
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        results = {0: {"result": "read-from-disk"}}
+        try:
+            with mock.patch.object(
+                pool,
+                "_read_output_file",
+                side_effect=IOError("readback unavailable"),
+            ):
+                uncertain = pool.update_task_results("write-readback", results)
+            assert uncertain.items[0].disposition == CommitDisposition.INDETERMINATE
+
+            pool.df = pool.engine.set_value(
+                pool.df,
+                0,
+                "output_result",
+                "memory-only-wrong-value",
+            )
+            reconciled = pool.reconcile_task_results("reconcile-file", results)
+            assert reconciled.committed_ids == (0,)
+
+            rejected = pool.reconcile_task_results(
+                "reconcile-mismatch",
+                {0: {"result": "different-value"}},
+            )
+            assert rejected.items[0].disposition == CommitDisposition.REJECTED
+        finally:
+            pool.close()
+
+    def test_receipt_covers_no_fields_and_missing_row(self, temp_csv):
+        from src.data.contracts import CommitDisposition
+        from src.data.excel import ExcelTaskPool
+
+        pool = ExcelTaskPool(
+            input_path=temp_csv,
+            output_path=temp_csv,
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        try:
+            receipt = pool.update_task_results(
+                "preflight",
+                {0: {"unmapped": "value"}, 999: {"result": "missing"}},
+            )
+            assert receipt.submitted_ids == (0, 999)
+            assert [item.record_id for item in receipt.items] == [0, 999]
+            assert all(
+                item.disposition == CommitDisposition.REJECTED for item in receipt.items
+            )
+        finally:
+            pool.close()
+
+    def test_set_value_failure_does_not_block_other_records(self, temp_csv):
+        from src.data.contracts import CommitDisposition
+        from src.data.excel import ExcelTaskPool
+
+        pool = ExcelTaskPool(
+            input_path=temp_csv,
+            output_path=temp_csv,
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        original_set_value = pool.engine.set_value
+
+        def selective_failure(df, idx, column, value):
+            if idx == 0:
+                raise ValueError("cannot set row zero")
+            return original_set_value(df, idx, column, value)
+
+        try:
+            with mock.patch.object(
+                pool.engine,
+                "set_value",
+                side_effect=selective_failure,
+            ):
+                receipt = pool.update_task_results(
+                    "set-value-failure",
+                    {
+                        0: {"result": "rejected"},
+                        1: {"result": "committed"},
+                    },
+                )
+            assert [item.disposition for item in receipt.items] == [
+                CommitDisposition.REJECTED,
+                CommitDisposition.COMMITTED,
+            ]
+            persisted = pd.read_csv(temp_csv)
+            assert pd.isna(persisted.iloc[0]["output_result"])
+            assert persisted.iloc[1]["output_result"] == "committed"
+        finally:
+            pool.close()
+
+
+@pytest.mark.parametrize("engine_type", ["pandas", "polars"])
+@pytest.mark.parametrize("suffix", ["csv", "xlsx"])
+def test_file_writeback_is_equivalent_across_engines_and_formats(
+    tmp_path,
+    engine_type,
+    suffix,
+):
+    from src.data.excel import ExcelTaskPool
+    from src.data.engines import POLARS_AVAILABLE
+
+    if engine_type == "polars" and not POLARS_AVAILABLE:
+        pytest.skip("polars is unavailable")
+
+    path = tmp_path / f"equivalent.{suffix}"
+    source = pd.DataFrame(
+        [
+            {
+                "input_text": "question",
+                "output_result": None,
+                "output_summary": "keep-me",
+            }
+        ]
+    )
+    if suffix == "csv":
+        source.to_csv(path, index=False)
+    else:
+        source.to_excel(path, index=False)
+
+    pool = ExcelTaskPool(
+        input_path=path,
+        output_path=path,
+        columns_to_extract=["input_text"],
+        columns_to_write={
+            "result": "output_result",
+            "summary": "output_summary",
+        },
+        engine_type=engine_type,
+    )
+    try:
+        results = {0: {"result": "written"}}
+        receipt = pool.update_task_results(f"{engine_type}-{suffix}", results)
+        assert receipt.committed_ids == (0,)
+        assert pool.reconcile_task_results("reconcile", results).committed_ids == (0,)
+
+        if suffix == "csv":
+            persisted = pd.read_csv(path)
+        else:
+            persisted = pd.read_excel(path)
+        assert persisted.iloc[0]["output_result"] == "written"
+        assert persisted.iloc[0]["output_summary"] == "keep-me"
+    finally:
+        pool.close()
 
 
 class TestCSVFactoryIntegration:

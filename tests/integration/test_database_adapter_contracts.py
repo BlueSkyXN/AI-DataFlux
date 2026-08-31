@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import csv
 import sqlite3
 from datetime import datetime
 from typing import Any, Iterator
@@ -169,6 +170,65 @@ async def test_sqlite_string_keyset_atomic_rollback_and_receipt(tmp_path) -> Non
             read_outputs=lambda: read_column("output_result"),
             read_summaries=lambda: read_column("output_summary"),
         )
+    finally:
+        adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_csv_atomic_replace_readback_and_reconciliation_contract(
+    tmp_path,
+) -> None:
+    from src.data.excel import ExcelTaskPool
+
+    csv_path = tmp_path / "adapter-contract.csv"
+    csv_path.write_text(
+        "input_text,output_result,output_summary\n"
+        "first,,keep-one\n"
+        "second,,keep-two\n",
+        encoding="utf-8",
+    )
+    adapter = ExcelTaskPool(
+        input_path=csv_path,
+        output_path=csv_path,
+        columns_to_extract=["input_text"],
+        columns_to_write={
+            "result": "output_result",
+            "summary": "output_summary",
+        },
+        engine_type="pandas",
+    )
+
+    try:
+        receipt = await adapter.write_results(
+            "csv-success",
+            {
+                0: {"result": "persisted-one"},
+                1: {"result": "persisted-two"},
+            },
+        )
+        assert receipt.committed_ids == (0, 1)
+        with csv_path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert [row["output_result"] for row in rows] == [
+            "persisted-one",
+            "persisted-two",
+        ]
+        assert [row["output_summary"] for row in rows] == ["keep-one", "keep-two"]
+
+        reconciled = await adapter.reconcile_results(
+            "csv-reconcile",
+            {
+                0: {"result": "persisted-one"},
+                1: {"result": "persisted-two"},
+            },
+        )
+        assert reconciled.committed_ids == (0, 1)
+
+        mismatch = await adapter.reconcile_results(
+            "csv-mismatch",
+            {0: {"result": "different"}},
+        )
+        assert mismatch.items[0].disposition == CommitDisposition.REJECTED
     finally:
         adapter.close()
 

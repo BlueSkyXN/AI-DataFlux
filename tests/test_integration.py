@@ -116,7 +116,11 @@ class TestExcelTaskPoolIntegration:
         )
 
         # 直接更新第一行的结果
-        pool.update_task_results({0: {"answer": "Test Answer"}})
+        receipt = pool.update_task_results(
+            "integration-excel",
+            {0: {"answer": "Test Answer"}},
+        )
+        assert receipt.committed_ids == (0,)
 
         # 验证写入
         row = pool.engine.get_row(pool.df, 0)
@@ -169,23 +173,26 @@ class TestConfigToPoolIntegration:
         self, sample_config_file, sample_excel_file, tmp_path
     ):
         """测试工厂根据配置创建正确的任务池"""
-        from src.config import load_config
+        from src.config import RootConfig, compile_job_config, load_config
         from src.data.factory import create_task_pool
 
         # 加载配置
         config = load_config(str(sample_config_file))
 
         # 修改配置使用测试文件
-        config["excel"] = {
-            "input_path": str(sample_excel_file),
-            "output_path": str(tmp_path / "output.xlsx"),
-        }
+        raw_config = config.model_dump(mode="python")
+        raw_config["job"]["datasource"]["input_path"] = str(sample_excel_file)
+        raw_config["job"]["datasource"]["output_path"] = str(tmp_path / "output.xlsx")
+        runtime_config = compile_job_config(
+            RootConfig.model_validate(raw_config),
+            sample_config_file,
+        )
 
         # 创建任务池
         pool = create_task_pool(
-            config=config,
-            columns_to_extract=config["columns_to_extract"],
-            columns_to_write=config["columns_to_write"],
+            config=runtime_config,
+            columns_to_extract=runtime_config["columns_to_extract"],
+            columns_to_write=runtime_config["columns_to_write"],
         )
 
         assert pool is not None

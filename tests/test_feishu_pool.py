@@ -453,8 +453,9 @@ class TestFeishuBitableTaskPool:
             "bitable_batch_update",
             side_effect=mock_batch_update,
         ):
-            bitable_pool.update_task_results(results)
+            receipt = bitable_pool.update_task_results("bitable-success", results)
 
+        assert receipt.committed_ids == (0,)
         # 验证快照已更新
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "AI 是人工智能"
         assert bitable_pool._snapshot[0]["fields"]["ai_category"] == "tech"
@@ -517,12 +518,16 @@ class TestFeishuBitableTaskPool:
             side_effect=Exception("network down"),
         ):
             receipt = bitable_pool.update_task_results(
-                {0: {"answer": "AI 是人工智能", "category": "tech"}}
+                "bitable-network-failure",
+                {0: {"answer": "AI 是人工智能", "category": "tech"}},
             )
 
         # 写回失败后快照应保持未更新
-        assert receipt.persisted_ids == ()
-        assert [failure.record_id for failure in receipt.failures] == [0]
+        from src.data.contracts import CommitDisposition
+
+        assert receipt.committed_ids == ()
+        assert receipt.items[0].record_id == 0
+        assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == ""
         assert bitable_pool.get_total_task_count() == 2
 
@@ -547,16 +552,95 @@ class TestFeishuBitableTaskPool:
             side_effect=partial,
         ):
             receipt = bitable_pool.update_task_results(
+                "bitable-partial",
                 {
                     0: {"answer": "first", "category": "ok"},
                     1: {"answer": "second", "category": "retry"},
-                }
+                },
             )
 
-        assert receipt.persisted_ids == (0,)
-        assert [failure.record_id for failure in receipt.failures] == [1]
+        from src.data.contracts import CommitDisposition
+
+        assert receipt.committed_ids == (0,)
+        assert receipt.items[1].record_id == 1
+        assert receipt.items[1].disposition == CommitDisposition.INDETERMINATE
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "first"
         assert bitable_pool._snapshot[1]["fields"]["ai_answer"] == ""
+
+    def test_update_task_results_marks_explicit_api_rejection(self, bitable_pool):
+        import unittest.mock as mock
+        from src.data.contracts import CommitDisposition
+        from src.data.feishu.client import FeishuAPIError
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=FeishuAPIError(code=99991403, msg="permission denied"),
+        ):
+            receipt = bitable_pool.update_task_results(
+                "bitable-rejected",
+                {0: {"answer": "not-written"}},
+            )
+
+        assert receipt.items[0].disposition == CommitDisposition.REJECTED
+        assert receipt.items[0].retryable is False
+
+    def test_reconcile_task_results_reads_all_expected_fields(self, bitable_pool):
+        import unittest.mock as mock
+        from src.data.contracts import CommitDisposition
+
+        async def remote_records(_app_token, _table_id, **_kwargs):
+            return [
+                {
+                    "record_id": "recAAABBB001",
+                    "fields": {
+                        "ai_answer": "AI 是人工智能",
+                        "ai_category": "tech",
+                    },
+                }
+            ]
+
+        results = {0: {"answer": "AI 是人工智能", "category": "tech"}}
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_list_records",
+            side_effect=remote_records,
+        ):
+            committed = bitable_pool.reconcile_task_results(
+                "bitable-reconcile",
+                results,
+            )
+        assert committed.committed_ids == (0,)
+
+        async def mismatched(_app_token, _table_id, **_kwargs):
+            return [
+                {
+                    "record_id": "recAAABBB001",
+                    "fields": {"ai_answer": "different", "ai_category": "tech"},
+                }
+            ]
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_list_records",
+            side_effect=mismatched,
+        ):
+            rejected = bitable_pool.reconcile_task_results(
+                "bitable-mismatch",
+                results,
+            )
+        assert rejected.items[0].disposition == CommitDisposition.REJECTED
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_list_records",
+            side_effect=ConnectionError("read failed"),
+        ):
+            uncertain = bitable_pool.reconcile_task_results(
+                "bitable-read-failed",
+                results,
+            )
+        assert uncertain.items[0].disposition == CommitDisposition.INDETERMINATE
 
 
 # ==================== Sheet TaskPool 测试 ====================
@@ -669,8 +753,9 @@ class TestFeishuSheetTaskPool:
             "sheet_write_range",
             side_effect=mock_write_range,
         ):
-            sheet_pool.update_task_results(results)
+            receipt = sheet_pool.update_task_results("sheet-success", results)
 
+        assert receipt.committed_ids == (0,)
         # 验证快照已更新（ai_answer 是第 3 列索引 2，ai_category 是第 4 列索引 3）
         assert sheet_pool._data_rows[0][2] == "AI 是人工智能"
         assert sheet_pool._data_rows[0][3] == "tech"
@@ -709,10 +794,117 @@ class TestFeishuSheetTaskPool:
             "sheet_write_range",
             side_effect=mock_write_range,
         ):
-            pool.update_task_results({0: {"answer": "AI 是人工智能"}})
+            receipt = pool.update_task_results(
+                "sheet-ragged",
+                {0: {"answer": "AI 是人工智能"}},
+            )
 
+        assert receipt.committed_ids == (0,)
         assert pool._data_rows[0][1] == "AI 是人工智能"
         assert pool.get_total_task_count() == 0
+
+    def test_partial_columns_are_indeterminate_for_one_record(self, sheet_pool):
+        import unittest.mock as mock
+        from src.data.contracts import CommitDisposition
+        from src.data.feishu.client import FeishuAPIError
+
+        calls = 0
+
+        async def partial_write(_token, _range_str, _values):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise FeishuAPIError(code=99991403, msg="explicit rejection")
+            return {}
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_write_range",
+            side_effect=partial_write,
+        ):
+            receipt = sheet_pool.update_task_results(
+                "sheet-partial-columns",
+                {0: {"answer": "written", "category": "not-written"}},
+            )
+
+        assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
+        assert sheet_pool._data_rows[0][2] == "written"
+        assert sheet_pool._data_rows[0][3] == ""
+
+    def test_sheet_write_error_classification(self, sheet_pool):
+        import unittest.mock as mock
+        from src.data.contracts import CommitDisposition
+        from src.data.feishu.client import FeishuAPIError
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_write_range",
+            side_effect=FeishuAPIError(code=99991403, msg="permission denied"),
+        ):
+            rejected = sheet_pool.update_task_results(
+                "sheet-rejected",
+                {0: {"answer": "value"}},
+            )
+        assert rejected.items[0].disposition == CommitDisposition.REJECTED
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_write_range",
+            side_effect=ConnectionError("network lost"),
+        ):
+            uncertain = sheet_pool.update_task_results(
+                "sheet-network",
+                {0: {"answer": "value"}},
+            )
+        assert uncertain.items[0].disposition == CommitDisposition.INDETERMINATE
+
+    def test_sheet_reconciliation_reads_each_expected_cell(self, sheet_pool):
+        import unittest.mock as mock
+        from src.data.contracts import CommitDisposition
+
+        remote = {
+            "Sheet1!C2:C2": [["AI 是人工智能"]],
+            "Sheet1!D2:D2": [["tech"]],
+        }
+
+        async def read_cell(_token, range_str):
+            return remote[range_str]
+
+        results = {0: {"answer": "AI 是人工智能", "category": "tech"}}
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_read_range",
+            side_effect=read_cell,
+        ) as read_mock:
+            committed = sheet_pool.reconcile_task_results(
+                "sheet-reconcile",
+                results,
+            )
+        assert committed.committed_ids == (0,)
+        assert read_mock.await_count == 2
+
+        remote["Sheet1!D2:D2"] = [["different"]]
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_read_range",
+            side_effect=read_cell,
+        ):
+            rejected = sheet_pool.reconcile_task_results(
+                "sheet-mismatch",
+                results,
+            )
+        assert rejected.items[0].disposition == CommitDisposition.REJECTED
+
+        with mock.patch.object(
+            sheet_pool.client,
+            "sheet_read_range",
+            side_effect=ConnectionError("read failed"),
+        ):
+            uncertain = sheet_pool.reconcile_task_results(
+                "sheet-read-failed",
+                results,
+            )
+        assert uncertain.items[0].disposition == CommitDisposition.INDETERMINATE
 
 
 class TestColIndexToLetter:

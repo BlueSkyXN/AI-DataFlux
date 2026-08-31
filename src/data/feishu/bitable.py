@@ -85,7 +85,37 @@ from ..contracts import (
     WritebackReceipt,
 )
 from . import run_async
-from .client import BITABLE_BATCH_UPDATE_LIMIT, FeishuClient
+from .client import (
+    BITABLE_BATCH_UPDATE_LIMIT,
+    FeishuAPIError,
+    FeishuClient,
+    FeishuRateLimitError,
+)
+
+
+def _bitable_error_item(record_id: str, error: BaseException) -> WritebackItem:
+    """将飞书写入异常分类为明确拒绝或结果不明。"""
+
+    message = f"{type(error).__name__}: {error}"
+    if (
+        isinstance(error, FeishuAPIError)
+        and error.code not in {-1}
+        and not (500 <= error.code <= 599)
+    ):
+        return WritebackItem(
+            record_id,
+            CommitDisposition.REJECTED,
+            "bitable_api_rejected",
+            message,
+            isinstance(error, FeishuRateLimitError) or error.code == 429,
+        )
+    return WritebackItem(
+        record_id,
+        CommitDisposition.INDETERMINATE,
+        "bitable_write_indeterminate",
+        message,
+        False,
+    )
 
 
 class FeishuBitableTaskPool(BaseTaskPool):
@@ -385,29 +415,17 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 atomic=False,
             )
 
-        persisted_record_ids, chunk_failures = run_async(
-            self._batch_update(update_records)
-        )
-        persisted_task_ids = [
-            task_ids_by_record[record_id]
-            for record_id in persisted_record_ids
-            if record_id in task_ids_by_record
-        ]
-        for record_id, message in chunk_failures:
-            if record_id not in task_ids_by_record:
+        record_outcomes = run_async(self._batch_update(update_records))
+        for record_id, record_outcome in record_outcomes.items():
+            task_id = task_ids_by_record.get(record_id)
+            if task_id is None:
                 continue
-            task_id = task_ids_by_record[record_id]
             outcomes[task_id] = WritebackItem(
                 record_id=task_id,
-                disposition=CommitDisposition.REJECTED,
-                code="bitable_chunk_failed",
-                message=message,
-                retryable=True,
-            )
-        for task_id in persisted_task_ids:
-            outcomes[task_id] = WritebackItem(
-                task_id,
-                CommitDisposition.COMMITTED,
+                disposition=record_outcome.disposition,
+                code=record_outcome.code,
+                message=record_outcome.message,
+                retryable=record_outcome.retryable,
             )
         for task_id in results:
             outcomes.setdefault(
@@ -429,8 +447,8 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
     async def _batch_update(
         self, records: list[dict[str, Any]]
-    ) -> tuple[list[str], list[tuple[str, str]]]:
-        """异步执行独立 chunk，保留部分成功和逐记录失败。"""
+    ) -> dict[str, WritebackItem]:
+        """异步执行独立 chunk，并为每个 record 返回精确结果。"""
 
         chunks = [
             records[index : index + BITABLE_BATCH_UPDATE_LIMIT]
@@ -443,39 +461,65 @@ class FeishuBitableTaskPool(BaseTaskPool):
             ),
             return_exceptions=True,
         )
-        result_ids: set[str] = set()
-        failures: list[tuple[str, str]] = []
+        record_outcomes: dict[str, WritebackItem] = {}
         for chunk, outcome in zip(chunks, outcomes):
             if isinstance(outcome, BaseException):
-                message = f"{type(outcome).__name__}: {outcome}"
-                failures.extend((str(record["record_id"]), message) for record in chunk)
+                for record in chunk:
+                    record_id = str(record["record_id"])
+                    record_outcomes[record_id] = _bitable_error_item(
+                        record_id,
+                        outcome,
+                    )
                 continue
-            result_ids.update(
-                str(item.get("record_id"))
-                for item in outcome
-                if isinstance(item, dict) and item.get("record_id")
-            )
+            if not isinstance(outcome, list):
+                for record in chunk:
+                    record_id = str(record["record_id"])
+                    record_outcomes[record_id] = WritebackItem(
+                        record_id,
+                        CommitDisposition.INDETERMINATE,
+                        "bitable_response_malformed",
+                        "Feishu 批量更新响应不是记录列表",
+                        False,
+                    )
+                continue
             acknowledged = {
                 str(item.get("record_id"))
                 for item in outcome
                 if isinstance(item, dict) and item.get("record_id")
             }
-            failures.extend(
-                (str(record["record_id"]), "record not acknowledged by Feishu")
-                for record in chunk
-                if str(record["record_id"]) not in acknowledged
-            )
+            for record in chunk:
+                record_id = str(record["record_id"])
+                if record_id in acknowledged:
+                    record_outcomes[record_id] = WritebackItem(
+                        record_id,
+                        CommitDisposition.COMMITTED,
+                    )
+                else:
+                    record_outcomes[record_id] = WritebackItem(
+                        record_id,
+                        CommitDisposition.INDETERMINATE,
+                        "bitable_ack_missing",
+                        "Feishu 响应未确认该 record_id",
+                        False,
+                    )
 
         self._logger.info(
-            "Bitable 批量更新完成，成功 %s 条，失败 %s 条",
-            len(result_ids),
-            len(failures),
+            "Bitable 批量更新完成，确认提交 %s 条，其他 %s 条",
+            sum(
+                item.disposition == CommitDisposition.COMMITTED
+                for item in record_outcomes.values()
+            ),
+            sum(
+                item.disposition != CommitDisposition.COMMITTED
+                for item in record_outcomes.values()
+            ),
         )
 
         # 同步更新内存快照，防止多 shard 重复处理（O(1) 映射查找）
         for rec in records:
-            rec_id = rec["record_id"]
-            if rec_id not in result_ids:
+            rec_id = str(rec["record_id"])
+            outcome = record_outcomes.get(rec_id)
+            if outcome is None or outcome.disposition != CommitDisposition.COMMITTED:
                 continue
             fields = rec["fields"]
             task_id = self._reverse_map.get(rec_id)
@@ -493,7 +537,136 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 snapshot_fields = {}
                 snapshot_rec["fields"] = snapshot_fields
             snapshot_fields.update(fields)
-        return sorted(result_ids), failures
+        return record_outcomes
+
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """从 Bitable 重新读取远端字段并逐记录核对。"""
+
+        outcomes: dict[int, WritebackItem] = {}
+        expected: dict[int, tuple[str, dict[str, Any]]] = {}
+        for task_id, row_result in results.items():
+            if "_error" in row_result:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
+                continue
+            record_id = self._id_map.get(task_id)
+            if not record_id:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "record_not_found",
+                    "task_id 无对应 record_id",
+                    False,
+                )
+                continue
+            fields = {
+                col_name: row_result[alias]
+                for alias, col_name in self.columns_to_write.items()
+                if alias in row_result
+            }
+            if not fields:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含可写字段",
+                    False,
+                )
+                continue
+            expected[task_id] = (record_id, fields)
+
+        try:
+            remote_records = run_async(
+                self.client.bitable_list_records(
+                    self.app_token,
+                    self.table_id,
+                    field_names=sorted(set(self.columns_to_write.values())),
+                )
+            )
+        except Exception as exc:
+            for task_id in expected:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "bitable_reconciliation_failed",
+                    str(exc),
+                    False,
+                )
+            return self._receipt(batch_id, results, outcomes)
+
+        by_record_id = {
+            str(record.get("record_id")): record
+            for record in remote_records
+            if record.get("record_id")
+        }
+        for task_id, (record_id, expected_fields) in expected.items():
+            remote = by_record_id.get(record_id)
+            if remote is None:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "record_not_found_on_reconciliation",
+                    f"远端不存在 record_id={record_id}",
+                    False,
+                )
+                continue
+            actual_fields = self._get_fields(remote)
+            mismatched = [
+                field_name
+                for field_name, value in expected_fields.items()
+                if field_name not in actual_fields
+                or not self._field_values_equal(value, actual_fields[field_name])
+            ]
+            if mismatched:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "bitable_reconciliation_mismatch",
+                    f"远端字段不匹配: {mismatched}",
+                    True,
+                )
+                continue
+            outcomes[task_id] = WritebackItem(
+                task_id,
+                CommitDisposition.COMMITTED,
+            )
+            if 0 <= task_id < len(self._snapshot):
+                snapshot_fields = self._snapshot[task_id].setdefault("fields", {})
+                if isinstance(snapshot_fields, dict):
+                    snapshot_fields.update(actual_fields)
+
+        return self._receipt(batch_id, results, outcomes)
+
+    @staticmethod
+    def _receipt(
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
+        outcomes: dict[int, WritebackItem],
+    ) -> WritebackReceipt:
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(outcomes[task_id] for task_id in results),
+            atomic=False,
+        )
+
+    @classmethod
+    def _field_values_equal(cls, expected: Any, actual: Any) -> bool:
+        try:
+            if expected == actual:
+                return True
+        except (TypeError, ValueError):
+            pass
+        return cls._convert_field_value(expected) == cls._convert_field_value(actual)
 
     def reload_task_data(self, task_id: int) -> dict[str, Any] | None:
         """重新从快照加载任务数据"""
