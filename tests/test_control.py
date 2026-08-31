@@ -42,6 +42,44 @@ import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def control_v1_app(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "input.csv").write_text("input,result\nhello,\n", encoding="utf-8")
+    config = {
+        "global": {
+            "log": {"level": "error", "format": "text", "output": "console"},
+            "flux_api_url": "http://127.0.0.1:8787",
+        },
+        "datasource": {
+            "type": "csv",
+            "engine": "pandas",
+            "concurrency": {"batch_size": 1, "max_in_flight": 1},
+        },
+        "csv": {"input_path": str(root / "input.csv")},
+        "columns_to_extract": ["input"],
+        "columns_to_write": {"result": "result"},
+        "prompt": {"template": "{input}"},
+        "workspace": {
+            "roots": {"project": str(root)},
+            "state_dir": ".dataflux/jobs",
+        },
+        "server": {"token": "config-token"},
+        "models": [],
+        "channels": {},
+    }
+    config_path = root / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setenv("DATAFLUX_TOKEN", "unit-test-token")
+    from src.control.server import create_control_app
+
+    app = create_control_app(str(config_path), supervise_worker=False)
+    return app, root, config_path
 
 
 class TestConfigAPI:
@@ -54,6 +92,29 @@ class TestConfigAPI:
         # 项目内部路径应该通过
         result = _validate_path("config-example.yaml")
         assert result.startswith(PROJECT_ROOT)
+
+    def test_workspace_revision_hashes_exact_crlf_bytes(self, tmp_path):
+        import hashlib
+
+        from src.control.config_api import (
+            read_workspace_config,
+            write_workspace_config,
+        )
+
+        path = tmp_path / "config.yaml"
+        original = b"server:\r\n  token: test\r\n"
+        path.write_bytes(original)
+
+        content, revision = read_workspace_config(path)
+
+        assert content == original.decode("utf-8")
+        assert revision == hashlib.sha256(original).hexdigest()
+        next_revision = write_workspace_config(
+            path,
+            content + "# edit\r\n",
+            expected_revision=revision,
+        )
+        assert next_revision == hashlib.sha256(path.read_bytes()).hexdigest()
 
     def test_validate_path_traversal_blocked(self):
         """测试路径校验 - 阻止路径穿越"""
@@ -134,7 +195,7 @@ class TestControlServerAuth:
     def auth_app(self, monkeypatch):
         from src.control import server as control_server
 
-        monkeypatch.setenv("DATAFLUX_CONTROL_TOKEN", "unit-test-token")
+        monkeypatch.setenv("DATAFLUX_TOKEN", "unit-test-token")
         monkeypatch.setattr(control_server, "_CONTROL_AUTH_TOKEN", None)
         monkeypatch.setattr(control_server, "_CONTROL_AUTH_TOKEN_SOURCE", "env")
         return control_server
@@ -174,7 +235,7 @@ class TestControlServerAuth:
         """测试创建应用时会初始化鉴权 Token"""
         from src import __version__
 
-        app = auth_app.create_control_app()
+        app = auth_app.create_control_app(supervise_worker=False)
         assert app is not None
         assert app.version == __version__
         assert auth_app.get_control_auth_token() == "unit-test-token"
@@ -182,7 +243,7 @@ class TestControlServerAuth:
     @pytest.mark.asyncio
     async def test_config_validate_api_rejects_semantic_errors(self, auth_app):
         """测试控制面板配置验证 API 会返回语义校验错误"""
-        app = auth_app.create_control_app()
+        app = auth_app.create_control_app(supervise_worker=False)
         route = next(
             route
             for route in app.routes
@@ -251,6 +312,321 @@ prompt:
             )
             mock_client.close.assert_awaited_once()
 
+
+class TestControlV1API:
+    def test_health_is_public_and_v1_requires_bearer(self, control_v1_app):
+        app, _root, _config_path = control_v1_app
+        with TestClient(app) as client:
+            health = client.get("/health")
+            unauthorized = client.get("/api/v1/jobs")
+
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+        assert unauthorized.status_code == 401
+        assert unauthorized.json()["error"]["code"] == "unauthorized"
+        assert unauthorized.json()["error"]["request_id"]
+
+    def test_workspace_containment_and_symlink_escape(self, control_v1_app, tmp_path):
+        app, root, _config_path = control_v1_app
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        escape = root / "escape"
+        try:
+            escape.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+        headers = {"Authorization": "Bearer unit-test-token"}
+        with TestClient(app) as client:
+            roots = client.get("/api/v1/workspace/roots", headers=headers)
+            traversal = client.get(
+                "/api/v1/workspace/entries",
+                params={"root_id": "project", "relative_path": "../outside"},
+                headers=headers,
+            )
+            symlink = client.get(
+                "/api/v1/workspace/entries",
+                params={"root_id": "project", "relative_path": "escape"},
+                headers=headers,
+            )
+
+        assert roots.status_code == 200
+        assert roots.json()["roots"][0]["id"] == "project"
+        assert traversal.status_code == 403
+        assert symlink.status_code == 403
+
+    def test_config_etag_prevents_lost_update(self, control_v1_app):
+        app, _root, _config_path = control_v1_app
+        headers = {"Authorization": "Bearer unit-test-token"}
+        params = {"root_id": "project", "relative_path": "config.yaml"}
+        with TestClient(app) as client:
+            current = client.get("/api/v1/config", params=params, headers=headers)
+            revision = current.json()["revision"]
+            content = current.json()["content"] + "\n# first edit\n"
+            updated = client.put(
+                "/api/v1/config",
+                headers={**headers, "If-Match": revision},
+                json={**params, "content": content},
+            )
+            conflict = client.put(
+                "/api/v1/config",
+                headers={**headers, "If-Match": revision},
+                json={**params, "content": content + "# stale\n"},
+            )
+
+        assert current.status_code == 200
+        assert current.headers["etag"] == f'"{revision}"'
+        assert updated.status_code == 200
+        assert updated.json()["revision"] != revision
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "revision_conflict"
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"max_in_flight": 0},
+            {"max_in_flight": 10_001},
+            {"max_in_flight": "10"},
+            {"max_in_flight": True},
+            {"unknown": 1},
+        ],
+    )
+    def test_job_submit_rejects_invalid_options(self, control_v1_app, options):
+        app, _root, _config_path = control_v1_app
+        headers = {"Authorization": "Bearer unit-test-token"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/jobs",
+                headers=headers,
+                json={
+                    "root_id": "project",
+                    "relative_path": "config.yaml",
+                    "options": options,
+                },
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "validation_error"
+
+    def test_unknown_api_route_is_structured_404_in_full_build(
+        self, control_v1_app, tmp_path, monkeypatch
+    ):
+        _app, _root, config_path = control_v1_app
+        import src.control.server as control_server
+
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<html>app</html>", encoding="utf-8")
+        monkeypatch.setattr(control_server, "WEB_DIST_DIR", str(dist))
+        app = control_server.create_control_app(
+            str(config_path), supervise_worker=False
+        )
+
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/does-not-exist",
+                headers={"Authorization": "Bearer unit-test-token"},
+            )
+
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["code"] == "api_not_found"
+
+    def test_job_submit_cancel_resume_events_and_sse_cursor(self, control_v1_app):
+        app, _root, _config_path = control_v1_app
+        headers = {"Authorization": "Bearer unit-test-token"}
+        with TestClient(app) as client:
+            submitted = client.post(
+                "/api/v1/jobs",
+                headers=headers,
+                json={"root_id": "project", "relative_path": "config.yaml"},
+            )
+            job_id = submitted.json()["job_id"]
+            listed = client.get("/api/v1/jobs", headers=headers)
+            cancelled = client.post(
+                f"/api/v1/jobs/{job_id}/cancel", headers=headers, json={}
+            )
+            events = client.get(
+                f"/api/v1/jobs/{job_id}/events",
+                params={"after_seq": 1, "limit": 100},
+                headers=headers,
+            )
+            with client.stream(
+                "GET",
+                f"/api/v1/jobs/{job_id}/events/stream",
+                params={"after_seq": events.json()["next_seq"]},
+                headers=headers,
+            ) as stream:
+                body = "".join(stream.iter_text())
+
+        assert submitted.status_code == 201
+        assert submitted.json()["status"] == "queued"
+        assert listed.status_code == 200
+        assert any(item["job_id"] == job_id for item in listed.json()["jobs"])
+        assert cancelled.json()["status"] == "cancelled"
+        assert events.status_code == 200
+        assert all(item["seq"] > 1 for item in events.json()["events"])
+        assert body == ""
+
+        from src.jobs import JobStatus
+
+        service = app.state.job_service
+        second = service.submit(root_id="project", relative_path="config.yaml")
+        service.repository.transition(second.job_id, JobStatus.BLOCKED)
+        with TestClient(app) as client:
+            resumed = client.post(
+                f"/api/v1/jobs/{second.job_id}/resume",
+                headers=headers,
+                json={},
+            )
+        assert resumed.status_code == 200
+        assert resumed.json()["status"] == "queued"
+
+    def test_non_loopback_requires_configured_token(self, control_v1_app, monkeypatch):
+        _app, _root, config_path = control_v1_app
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["server"]["token"] = ""
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        monkeypatch.delenv("DATAFLUX_TOKEN", raising=False)
+        from src.control.server import create_control_app
+        from src.models.errors import ConfigError
+
+        with pytest.raises(ConfigError):
+            create_control_app(str(config_path), host="0.0.0.0", supervise_worker=False)
+
+    def test_workspace_and_config_validation_error_contracts(self, control_v1_app):
+        app, root, _config_path = control_v1_app
+        (root / "notes.txt").write_text("not yaml", encoding="utf-8")
+        headers = {"Authorization": "Bearer unit-test-token"}
+        with TestClient(app) as client:
+            entries = client.get(
+                "/api/v1/workspace/entries",
+                params={"root_id": "project", "relative_path": "."},
+                headers=headers,
+            )
+            missing_dir = client.get(
+                "/api/v1/workspace/entries",
+                params={"root_id": "project", "relative_path": "missing"},
+                headers=headers,
+            )
+            file_as_dir = client.get(
+                "/api/v1/workspace/entries",
+                params={"root_id": "project", "relative_path": "config.yaml"},
+                headers=headers,
+            )
+            missing_config = client.get(
+                "/api/v1/config",
+                params={"root_id": "project", "relative_path": "missing.yaml"},
+                headers=headers,
+            )
+            forbidden_config = client.get(
+                "/api/v1/config",
+                params={"root_id": "project", "relative_path": "notes.txt"},
+                headers=headers,
+            )
+            no_precondition = client.put(
+                "/api/v1/config",
+                headers=headers,
+                json={
+                    "root_id": "project",
+                    "relative_path": "config.yaml",
+                    "content": "x: 1",
+                },
+            )
+            invalid_yaml = client.post(
+                "/api/v1/config/validate",
+                headers=headers,
+                json={"content": "bad: yaml: value:"},
+            )
+            incomplete_path = client.post(
+                "/api/v1/config/validate",
+                headers=headers,
+                json={"content": "{}", "root_id": "project"},
+            )
+
+        assert {item["name"] for item in entries.json()["entries"]} >= {
+            "config.yaml",
+            "input.csv",
+        }
+        assert missing_dir.status_code == 404
+        assert file_as_dir.status_code == 400
+        assert missing_config.status_code == 404
+        assert forbidden_config.status_code == 403
+        assert no_precondition.status_code == 428
+        assert invalid_yaml.json()["valid"] is False
+        assert incomplete_path.status_code == 422
+
+    def test_job_not_found_conflict_media_type_and_validation_envelopes(
+        self, control_v1_app
+    ):
+        app, _root, _config_path = control_v1_app
+        headers = {"Authorization": "Bearer unit-test-token"}
+        with TestClient(app) as client:
+            missing = client.get("/api/v1/jobs/not-a-uuid", headers=headers)
+            invalid_submit = client.post(
+                "/api/v1/jobs",
+                headers=headers,
+                json={"root_id": "project", "relative_path": "input.csv"},
+            )
+            submitted = client.post(
+                "/api/v1/jobs",
+                headers=headers,
+                json={"root_id": "project", "relative_path": "config.yaml"},
+            )
+            job_id = submitted.json()["job_id"]
+            resume_conflict = client.post(
+                f"/api/v1/jobs/{job_id}/resume", headers=headers, json={}
+            )
+            cancelled = client.post(
+                f"/api/v1/jobs/{job_id}/cancel", headers=headers, json={}
+            )
+            cancel_conflict = client.post(
+                f"/api/v1/jobs/{job_id}/cancel", headers=headers, json={}
+            )
+            media_type = client.post(
+                f"/api/v1/jobs/{job_id}/cancel",
+                headers=headers,
+                content="{}",
+            )
+            validation_error = client.get(
+                f"/api/v1/jobs/{job_id}/events",
+                params={"limit": 0},
+                headers=headers,
+            )
+            missing_events = client.get(
+                "/api/v1/jobs/00000000-0000-4000-8000-000000000000/events",
+                headers=headers,
+            )
+
+        assert missing.status_code == 404
+        assert invalid_submit.status_code == 422
+        assert resume_conflict.status_code == 409
+        assert cancelled.status_code == 200
+        assert cancel_conflict.status_code == 409
+        assert media_type.status_code == 415
+        assert validation_error.status_code == 422
+        assert validation_error.json()["error"]["code"] == "validation_error"
+        assert missing_events.status_code == 404
+
+    def test_v1_feishu_connection_route(self, control_v1_app):
+        app, _root, _config_path = control_v1_app
+        headers = {"Authorization": "Bearer unit-test-token"}
+        with patch("src.data.feishu.client.FeishuClient") as client_class:
+            client = MagicMock()
+            client.ensure_token = AsyncMock(return_value="token-123456789")
+            client.close = AsyncMock()
+            client_class.return_value = client
+            with TestClient(app) as test_client:
+                response = test_client.post(
+                    "/api/v1/feishu/test-connection",
+                    headers=headers,
+                    json={"app_id": "app", "app_secret": "secret"},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+
     @pytest.mark.asyncio
     async def test_test_feishu_connection_api_error(self):
         """测试飞书连接测试 API 错误路径"""
@@ -316,6 +692,32 @@ class TestProcessManager:
 
         process_logs = manager.get_log_buffer("process")
         assert process_logs == []
+
+    def test_gateway_health_probe_uses_unified_bearer(self):
+        from src.control.process_manager import ProcessManager
+
+        manager = ProcessManager()
+        manager.set_access_token("shared-control-token")
+        response = MagicMock()
+        response.read.return_value = b'{"status":"healthy"}'
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            health = manager._probe_gateway_health_sync(0.5)
+
+        request = urlopen.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer shared-control-token"
+        assert health == {"status": "healthy"}
+
+    def test_subprocess_env_inherits_unified_bearer(self, monkeypatch):
+        from src.control.process_manager import ProcessManager
+
+        monkeypatch.setenv("DATAFLUX_TOKEN", "stale-token")
+        manager = ProcessManager()
+        manager.set_access_token("shared-control-token")
+
+        assert manager._subprocess_env()["DATAFLUX_TOKEN"] == "shared-control-token"
 
 
 class TestManagedProcess:

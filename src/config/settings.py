@@ -93,7 +93,6 @@ import yaml
 
 from ..models.errors import ConfigError
 
-
 # 默认配置值
 # 用户配置会深度合并到此默认配置上
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -113,6 +112,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "require_all_input_fields": True,
         "concurrency": {
             "batch_size": 100,
+            "max_in_flight": 100,
             "save_interval": 300,
             "shard_size": 10000,
             "min_shard_size": 1000,
@@ -132,6 +132,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mode": "io",
         "sample_size": -1,
         "encoding": "o200k_base",
+    },
+    "workspace": {
+        "roots": {"project": "."},
+        "state_dir": "./.dataflux/jobs",
+    },
+    "scheduler": {
+        "max_active_jobs": "auto",
+        "cpu_high_watermark": 85,
+        "memory_high_watermark": 80,
+        "min_free_memory_mb": 512,
+        "sample_interval_seconds": 2,
+    },
+    "server": {
+        "host": "127.0.0.1",
+        "control_port": 8790,
+        "gateway_port": 8787,
+        "token": "",
     },
 }
 
@@ -168,6 +185,104 @@ ALLOWED_TOP_LEVEL_KEYS = {
     "prompt",
     "token_estimation",
     "routing",
+    "workspace",
+    "scheduler",
+    "server",
+}
+
+MODEL_CAPABILITIES = {
+    "chat_completions",
+    "responses",
+    "stream",
+    "multimodal",
+    "tools",
+    "n",
+    "json_schema",
+    "logprobs",
+    "previous_response_id",
+}
+
+_SECTION_KEYS: dict[str, set[str]] = {
+    "global": {"log", "flux_api_url"},
+    "global.log": {"level", "format", "output", "file_path", "date_format"},
+    "gateway": {"max_connections", "max_connections_per_host"},
+    "datasource": {
+        "type",
+        "engine",
+        "excel_reader",
+        "excel_writer",
+        "require_all_input_fields",
+        "concurrency",
+    },
+    "datasource.concurrency": {
+        "batch_size",
+        "max_in_flight",
+        "save_interval",
+        "shard_size",
+        "min_shard_size",
+        "max_shard_size",
+        "api_pause_duration",
+        "api_error_trigger_window",
+        "max_connections",
+        "max_connections_per_host",
+        "retry_limits",
+    },
+    "datasource.concurrency.retry_limits": {
+        "api_error",
+        "content_error",
+        "system_error",
+    },
+    "workspace": {"roots", "state_dir"},
+    "scheduler": {
+        "max_active_jobs",
+        "cpu_high_watermark",
+        "memory_high_watermark",
+        "min_free_memory_mb",
+        "sample_interval_seconds",
+    },
+    "server": {"host", "control_port", "gateway_port", "token"},
+    "token_estimation": {"mode", "sample_size", "encoding"},
+    "prompt": {
+        "required_fields",
+        "use_json_schema",
+        "temperature",
+        "temperature_override",
+        "system_prompt",
+        "template",
+    },
+    "validation": {"enabled", "field_rules"},
+    "excel": {"input_path", "output_path"},
+    "csv": {"input_path", "output_path"},
+    "sqlite": {"db_path", "table_name"},
+    "mysql": {
+        "host",
+        "port",
+        "user",
+        "password",
+        "database",
+        "table_name",
+        "pool_size",
+    },
+    "postgresql": {
+        "host",
+        "port",
+        "user",
+        "password",
+        "database",
+        "table_name",
+        "schema_name",
+        "pool_size",
+    },
+    "feishu": {
+        "app_id",
+        "app_secret",
+        "app_token",
+        "table_id",
+        "spreadsheet_token",
+        "sheet_id",
+        "max_retries",
+        "qps_limit",
+    },
 }
 
 
@@ -228,9 +343,13 @@ def validate_config(
 
     unknown_top_level = sorted(set(config) - ALLOWED_TOP_LEVEL_KEYS)
     if unknown_top_level:
-        warnings.append(f"发现未知顶层配置键，将被忽略: {unknown_top_level}")
+        errors.append(f"发现未知顶层配置键: {unknown_top_level}")
 
     _validate_global_config(config.get("global", {}), errors, warnings)
+    _validate_known_section(config.get("global", {}), "global", errors)
+    global_map = config.get("global", {})
+    if isinstance(global_map, dict):
+        _validate_known_section(global_map.get("log", {}), "global.log", errors)
     datasource = _ensure_mapping(config.get("datasource", {}), "datasource", errors)
     datasource_type = (
         _normalize_nonempty_str(datasource.get("type")) or "excel"
@@ -242,11 +361,39 @@ def validate_config(
         )
 
     _validate_datasource_options(datasource, errors, warnings)
+    _validate_known_section(datasource, "datasource", errors)
+    if isinstance(datasource.get("concurrency"), dict):
+        concurrency = datasource["concurrency"]
+        _validate_known_section(concurrency, "datasource.concurrency", errors)
+        _validate_known_section(
+            concurrency.get("retry_limits", {}),
+            "datasource.concurrency.retry_limits",
+            errors,
+        )
     _validate_columns_config(config, errors)
     _validate_prompt_config(config.get("prompt", {}), "prompt", errors)
     _validate_validation_config(config.get("validation", {}), "validation", errors)
     _validate_data_source_section(config, datasource_type, errors)
     _validate_routing_config(config, config_path, errors)
+    _validate_runtime_sections(config, config_path, errors, warnings)
+
+    for section in (
+        "gateway",
+        "workspace",
+        "scheduler",
+        "server",
+        "token_estimation",
+        "prompt",
+        "validation",
+        "excel",
+        "csv",
+        "sqlite",
+        "mysql",
+        "postgresql",
+        "feishu",
+    ):
+        if section in config:
+            _validate_known_section(config.get(section), section, errors)
 
     return {"errors": errors, "warnings": warnings}
 
@@ -267,6 +414,21 @@ def _ensure_mapping(value: Any, path: str, errors: list[str]) -> dict[str, Any]:
         errors.append(f"{path} 必须是字典")
         return {}
     return value
+
+
+def _validate_known_section(value: Any, path: str, errors: list[str]) -> None:
+    """Reject unknown keys in canonical v3.2 configuration sections."""
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        return
+    allowed = _SECTION_KEYS.get(path)
+    if allowed is None:
+        return
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        errors.append(f"{path} 包含未知或已移除的配置键: {unknown}")
 
 
 def _validate_global_config(
@@ -330,6 +492,9 @@ def _validate_datasource_options(
     )
     _validate_positive_int(concurrency, "batch_size", "datasource.concurrency", errors)
     _validate_positive_int(
+        concurrency, "max_in_flight", "datasource.concurrency", errors
+    )
+    _validate_positive_int(
         concurrency, "save_interval", "datasource.concurrency", errors
     )
     _validate_positive_int(concurrency, "shard_size", "datasource.concurrency", errors)
@@ -375,8 +540,8 @@ def _validate_datasource_options(
         set(concurrency).intersection({"max_workers", "retry_times", "backoff_factor"})
     )
     for key in ignored_keys:
-        warnings.append(
-            f"datasource.concurrency.{key} 是旧配置键，当前处理引擎不会读取"
+        errors.append(
+            f"datasource.concurrency.{key} 已移除，请使用 batch_size/max_in_flight/retry_limits"
         )
 
 
@@ -423,6 +588,18 @@ def _validate_prompt_config(
 
     if "use_json_schema" in prompt and not isinstance(prompt["use_json_schema"], bool):
         errors.append(f"{path}.use_json_schema 必须是布尔值")
+    if "temperature_override" in prompt and not isinstance(
+        prompt["temperature_override"], bool
+    ):
+        errors.append(f"{path}.temperature_override 必须是布尔值")
+    if "temperature" in prompt:
+        temperature = prompt["temperature"]
+        if (
+            not isinstance(temperature, (int, float))
+            or isinstance(temperature, bool)
+            or not 0 <= temperature <= 2
+        ):
+            errors.append(f"{path}.temperature 必须在 0 到 2 之间")
 
 
 def _validate_validation_config(value: Any, path: str, errors: list[str]) -> None:
@@ -476,41 +653,332 @@ def _validate_data_source_section(
 
     if datasource_type in {"feishu_bitable", "feishu_sheet"}:
         feishu = _ensure_mapping(config.get("feishu", {}), "feishu", errors)
-        datasource = _ensure_mapping(config.get("datasource", {}), "datasource", errors)
         for key in ("app_id", "app_secret"):
             if not _normalize_nonempty_str(feishu.get(key)):
                 errors.append(f"feishu.{key} 是必填项")
 
         if datasource_type == "feishu_bitable":
             app_token = _normalize_nonempty_str(feishu.get("app_token"))
-            app_token = app_token or _normalize_nonempty_str(
-                datasource.get("app_token")
-            )
             table_id = _normalize_nonempty_str(feishu.get("table_id"))
-            table_id = table_id or _normalize_nonempty_str(datasource.get("table_id"))
             if app_token is None:
-                errors.append(
-                    "feishu_bitable 需要 feishu.app_token 或 datasource.app_token"
-                )
+                errors.append("feishu_bitable 需要 feishu.app_token")
             if table_id is None:
-                errors.append(
-                    "feishu_bitable 需要 feishu.table_id 或 datasource.table_id"
-                )
+                errors.append("feishu_bitable 需要 feishu.table_id")
         else:
             spreadsheet_token = _normalize_nonempty_str(feishu.get("spreadsheet_token"))
-            spreadsheet_token = spreadsheet_token or _normalize_nonempty_str(
-                datasource.get("spreadsheet_token")
-            )
             sheet_id = _normalize_nonempty_str(feishu.get("sheet_id"))
-            sheet_id = sheet_id or _normalize_nonempty_str(datasource.get("sheet_id"))
             if spreadsheet_token is None:
-                errors.append(
-                    "feishu_sheet 需要 feishu.spreadsheet_token 或 datasource.spreadsheet_token"
-                )
+                errors.append("feishu_sheet 需要 feishu.spreadsheet_token")
             if sheet_id is None:
+                errors.append("feishu_sheet 需要 feishu.sheet_id")
+
+
+def _validate_runtime_sections(
+    config: dict[str, Any],
+    config_path: str | Path | None,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    gateway = _ensure_mapping(config.get("gateway", {}), "gateway", errors)
+    _validate_positive_int(gateway, "max_connections", "gateway", errors)
+    _validate_positive_int(gateway, "max_connections_per_host", "gateway", errors)
+
+    token = _ensure_mapping(
+        config.get("token_estimation", {}), "token_estimation", errors
+    )
+    if "tiktoken_model" in token:
+        errors.append(
+            "token_estimation.tiktoken_model 已移除，请使用 token_estimation.encoding"
+        )
+    mode = token.get("mode", "io")
+    if mode not in {"in", "out", "io"}:
+        errors.append("token_estimation.mode 必须是 in、out 或 io")
+    sample_size = token.get("sample_size", -1)
+    if (
+        not isinstance(sample_size, int)
+        or isinstance(sample_size, bool)
+        or sample_size == 0
+        or sample_size < -1
+    ):
+        errors.append("token_estimation.sample_size 必须为 -1 或正整数")
+    if not _normalize_nonempty_str(token.get("encoding", "o200k_base")):
+        errors.append("token_estimation.encoding 必须是非空字符串")
+
+    scheduler = _ensure_mapping(config.get("scheduler", {}), "scheduler", errors)
+    max_jobs = scheduler.get("max_active_jobs", "auto")
+    if max_jobs != "auto" and (
+        not isinstance(max_jobs, int) or isinstance(max_jobs, bool) or max_jobs <= 0
+    ):
+        errors.append("scheduler.max_active_jobs 必须是 auto 或正整数")
+    for key in ("cpu_high_watermark", "memory_high_watermark"):
+        value = scheduler.get(key)
+        if value is not None and (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+            or value > 100
+        ):
+            errors.append(f"scheduler.{key} 必须在 0 到 100 之间")
+    _validate_nonnegative_int(scheduler, "min_free_memory_mb", "scheduler", errors)
+    _validate_positive_number(scheduler, "sample_interval_seconds", "scheduler", errors)
+
+    server = _ensure_mapping(config.get("server", {}), "server", errors)
+    if "host" in server and not _normalize_nonempty_str(server.get("host")):
+        errors.append("server.host 必须是非空字符串")
+    for key in ("control_port", "gateway_port"):
+        value = server.get(key)
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 1 <= value <= 65535
+        ):
+            errors.append(f"server.{key} 必须是 1-65535 的整数")
+
+    _validate_workspace(config, config_path, errors, warnings)
+    _validate_models_and_channels(config, errors)
+
+
+def _validate_workspace(
+    config: dict[str, Any],
+    config_path: str | Path | None,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    workspace = _ensure_mapping(config.get("workspace", {}), "workspace", errors)
+    roots = workspace.get("roots", {"project": "."})
+    if not isinstance(roots, dict) or not roots:
+        errors.append("workspace.roots 必须是非空的名称到路径映射")
+        return
+    for root_id, raw_path in roots.items():
+        if not isinstance(root_id, str) or not re_full_identifier(root_id):
+            errors.append(f"workspace.roots 名称非法: {root_id!r}")
+        if not _normalize_nonempty_str(raw_path):
+            errors.append(f"workspace.roots.{root_id} 必须是非空路径")
+
+    try:
+        resolved = resolve_workspace_roots(config, config_path)
+    except ConfigError as exc:
+        errors.append(str(exc))
+        return
+    for root_id, root_path in resolved.items():
+        if not root_path.exists():
+            warnings.append(f"workspace.roots.{root_id} 当前不存在: {root_path}")
+
+    raw_state_dir = workspace.get("state_dir", "./.dataflux/jobs")
+    state_path = _resolve_config_relative_path(raw_state_dir, config_path)
+    if not any(_path_is_within(state_path, root) for root in resolved.values()):
+        errors.append("workspace.state_dir 必须位于 workspace.roots 之一以内")
+
+
+def _validate_models_and_channels(config: dict[str, Any], errors: list[str]) -> None:
+    channels = config.get("channels", {})
+    if not isinstance(channels, dict):
+        errors.append("channels 必须是字典")
+        channels = {}
+    channel_ids: set[str] = set()
+    channel_endpoints: dict[str, set[str]] = {}
+    for raw_channel_id, raw_channel in channels.items():
+        channel_id = str(raw_channel_id).strip()
+        if not channel_id:
+            errors.append("channel ID 必须是非空字符串")
+            continue
+        if not isinstance(raw_channel_id, str):
+            errors.append(f"channel ID 必须使用字符串: {raw_channel_id!r}")
+        channel_ids.add(channel_id)
+        channel = _ensure_mapping(raw_channel, f"channels.{channel_id}", errors)
+        allowed = {
+            "name",
+            "base_url",
+            "endpoints",
+            "timeout",
+            "proxy",
+            "ssl_verify",
+            "ip_pool",
+        }
+        unknown = sorted(set(channel) - allowed)
+        if unknown:
+            errors.append(f"channels.{channel_id} 包含未知或已移除的键: {unknown}")
+        if "api_path" in channel:
+            errors.append(f"channels.{channel_id}.api_path 已移除，请使用 endpoints")
+        if not _normalize_nonempty_str(channel.get("base_url")):
+            errors.append(f"channels.{channel_id}.base_url 必须是非空字符串")
+        _validate_positive_int(
+            channel,
+            "timeout",
+            f"channels.{channel_id}",
+            errors,
+        )
+        endpoints = _ensure_mapping(
+            channel.get("endpoints", {}), f"channels.{channel_id}.endpoints", errors
+        )
+        endpoint_unknown = sorted(set(endpoints) - {"chat_completions", "responses"})
+        if endpoint_unknown:
+            errors.append(
+                f"channels.{channel_id}.endpoints 包含未知键: {endpoint_unknown}"
+            )
+        for endpoint in ("chat_completions", "responses"):
+            if endpoint in endpoints and not _normalize_nonempty_str(
+                endpoints.get(endpoint)
+            ):
                 errors.append(
-                    "feishu_sheet 需要 feishu.sheet_id 或 datasource.sheet_id"
+                    f"channels.{channel_id}.endpoints.{endpoint} 必须是非空字符串"
                 )
+        channel_endpoints[channel_id] = {
+            endpoint
+            for endpoint in ("chat_completions", "responses")
+            if _normalize_nonempty_str(endpoints.get(endpoint))
+        }
+
+    models = config.get("models", [])
+    if not isinstance(models, list):
+        errors.append("models 必须是列表")
+        return
+    seen_ids: set[str] = set()
+    alias_owners: dict[str, int] = {}
+    allowed_model_keys = {
+        "id",
+        "name",
+        "model",
+        "channel_id",
+        "api_key",
+        "timeout",
+        "weight",
+        "temperature",
+        "safe_rps",
+        "capabilities",
+    }
+    for index, raw_model in enumerate(models):
+        model = _ensure_mapping(raw_model, f"models[{index}]", errors)
+        unknown = sorted(set(model) - allowed_model_keys)
+        if unknown:
+            errors.append(f"models[{index}] 包含未知或已移除的键: {unknown}")
+        for key in ("id", "name", "model", "channel_id"):
+            if not isinstance(model.get(key), str) or not model[key].strip():
+                errors.append(f"models[{index}].{key} 必须是非空字符串")
+        model_id = model.get("id")
+        if isinstance(model_id, str):
+            if model_id in seen_ids:
+                errors.append(f"models[{index}].id 重复: {model_id}")
+            seen_ids.add(model_id)
+        for alias_key in ("id", "name", "model"):
+            alias = model.get(alias_key)
+            if not isinstance(alias, str) or not alias.strip():
+                continue
+            normalized_alias = alias.strip()
+            previous_index = alias_owners.get(normalized_alias)
+            if previous_index is not None and previous_index != index:
+                errors.append(
+                    f"models[{index}].{alias_key} alias 与 models[{previous_index}] 冲突: "
+                    f"{normalized_alias}"
+                )
+            else:
+                alias_owners[normalized_alias] = index
+        model_channel_id = model.get("channel_id")
+        if isinstance(model_channel_id, str) and model_channel_id not in channel_ids:
+            errors.append(f"models[{index}].channel_id 不存在: {model_channel_id}")
+        _validate_positive_int(model, "timeout", f"models[{index}]", errors)
+        _validate_nonnegative_int(model, "weight", f"models[{index}]", errors)
+        _validate_positive_number(model, "safe_rps", f"models[{index}]", errors)
+        if "temperature" in model:
+            temperature = model["temperature"]
+            if (
+                not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool)
+                or not 0 <= temperature <= 2
+            ):
+                errors.append(f"models[{index}].temperature 必须在 0 到 2 之间")
+        capabilities = model.get("capabilities")
+        if not isinstance(capabilities, list) or not capabilities:
+            errors.append(f"models[{index}].capabilities 必须是非空列表")
+        else:
+            if not all(
+                isinstance(value, str) and value.strip() for value in capabilities
+            ):
+                errors.append(
+                    f"models[{index}].capabilities 中的每一项都必须是非空字符串"
+                )
+            invalid = sorted(
+                {str(value) for value in capabilities} - MODEL_CAPABILITIES
+            )
+            if invalid:
+                errors.append(f"models[{index}].capabilities 不支持: {invalid}")
+            normalized = {str(value) for value in capabilities}
+            if len(normalized) != len(capabilities):
+                errors.append(f"models[{index}].capabilities 不得包含重复项")
+            endpoint_capabilities = normalized.intersection(
+                {"chat_completions", "responses"}
+            )
+            if not endpoint_capabilities:
+                errors.append(
+                    f"models[{index}].capabilities 必须包含 chat_completions 或 responses"
+                )
+            available_endpoints = channel_endpoints.get(str(model_channel_id), set())
+            missing_endpoints = sorted(endpoint_capabilities - available_endpoints)
+            if missing_endpoints:
+                errors.append(
+                    f"models[{index}] 声明的 endpoint capability 未在 channel 中配置: "
+                    f"{missing_endpoints}"
+                )
+            if "previous_response_id" in normalized and "responses" not in normalized:
+                errors.append(
+                    f"models[{index}].capabilities 使用 previous_response_id 时必须包含 responses"
+                )
+
+
+def re_full_identifier(value: str) -> bool:
+    return bool(value) and value.replace("_", "a").replace("-", "a").isalnum()
+
+
+def _resolve_config_relative_path(
+    raw_path: str | Path, config_path: str | Path | None
+) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        base = Path(config_path).resolve().parent if config_path else Path.cwd()
+        path = base / path
+    return path.resolve(strict=False)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath((str(path), str(root))) == str(root)
+    except ValueError:
+        return False
+
+
+def resolve_workspace_roots(
+    config: dict[str, Any], config_path: str | Path | None = None
+) -> dict[str, Path]:
+    workspace = config.get("workspace", {})
+    roots = workspace.get("roots", {"project": "."})
+    if not isinstance(roots, dict) or not roots:
+        raise ConfigError("workspace.roots 必须是非空字典")
+    result: dict[str, Path] = {}
+    for root_id, raw_path in roots.items():
+        if not isinstance(root_id, str) or not re_full_identifier(root_id):
+            raise ConfigError(f"workspace root 名称非法: {root_id!r}")
+        if not _normalize_nonempty_str(raw_path):
+            raise ConfigError(f"workspace.roots.{root_id} 路径无效")
+        result[root_id] = _resolve_config_relative_path(raw_path, config_path)
+    return result
+
+
+def resolve_workspace_path(
+    config: dict[str, Any],
+    root_id: str,
+    relative_path: str = ".",
+    config_path: str | Path | None = None,
+) -> Path:
+    roots = resolve_workspace_roots(config, config_path)
+    if root_id not in roots:
+        raise ConfigError(f"未知 workspace root: {root_id}")
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        raise ConfigError("workspace relative_path 不能是绝对路径")
+    resolved = (roots[root_id] / relative).resolve(strict=False)
+    if not _path_is_within(resolved, roots[root_id]):
+        raise ConfigError("workspace 路径超出允许根目录")
+    return resolved
 
 
 def _validate_routing_config(
@@ -718,7 +1186,7 @@ def get_nested(config: dict[str, Any], *keys: str, default: Any = None) -> Any:
         >>> get_nested(config, "a", "x", default=0)
         0
     """
-    result = config
+    result: Any = config
     for key in keys:
         if isinstance(result, dict):
             result = result.get(key)

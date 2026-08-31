@@ -150,11 +150,19 @@ SQL 查询示例:
     4. 大批量更新建议分批进行，避免长事务
 """
 
+import asyncio
 import logging
 import threading
+import uuid
 from typing import Any
 
 from .base import BaseTaskPool
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WritebackReceipt,
+)
 
 # ==================== 条件导入 MySQL 连接器 ====================
 # mysql-connector-python 是可选依赖，不可用时提供占位符类
@@ -534,7 +542,7 @@ class MySQLTaskPool(BaseTaskPool):
         未处理条件: 输入列有值 AND 任一输出列为空。
 
         Returns:
-            int: 未处理任务数量，查询失败返回 0
+            int: 未处理任务数量；查询失败时抛出异常
         """
 
         def _get_count(conn: Any, cursor: Any) -> int:
@@ -549,11 +557,7 @@ class MySQLTaskPool(BaseTaskPool):
             logging.info(f"数据库中未处理的任务总数: {count}")
             return count
 
-        try:
-            return self.execute_with_connection(_get_count)
-        except Exception as e:
-            logging.error(f"获取总任务数时出错: {e}")
-            return 0
+        return self.execute_with_connection(_get_count)
 
     def get_processed_task_count(self) -> int:
         """
@@ -563,7 +567,7 @@ class MySQLTaskPool(BaseTaskPool):
         用于进度统计和 Token 估算采样。
 
         Returns:
-            int: 已处理任务数量，查询失败返回 0
+            int: 已处理任务数量；查询失败时抛出异常
         """
 
         def _get_count(conn: Any, cursor: Any) -> int:
@@ -578,13 +582,9 @@ class MySQLTaskPool(BaseTaskPool):
             logging.info(f"数据库中已处理的任务总数: {count}")
             return count
 
-        try:
-            return self.execute_with_connection(_get_count)
-        except Exception as e:
-            logging.error(f"获取已处理任务数时出错: {e}")
-            return 0
+        return self.execute_with_connection(_get_count)
 
-    def get_id_boundaries(self) -> tuple[int, int]:
+    def get_id_boundaries(self) -> tuple[Any, Any]:
         """
         获取表中 ID 的边界值
 
@@ -595,7 +595,7 @@ class MySQLTaskPool(BaseTaskPool):
             表为空或查询失败返回 (0, 0)
         """
 
-        def _get_boundaries(conn: Any, cursor: Any) -> tuple[int, int]:
+        def _get_boundaries(conn: Any, cursor: Any) -> tuple[Any, Any]:
             sql = (
                 f"SELECT MIN(id) as min_id, MAX(id) as max_id FROM `{self.table_name}`"
             )
@@ -605,8 +605,8 @@ class MySQLTaskPool(BaseTaskPool):
             result = cursor.fetchone()
 
             if result and result["min_id"] is not None and result["max_id"] is not None:
-                min_id = int(result["min_id"])
-                max_id = int(result["max_id"])
+                min_id = result["min_id"]
+                max_id = result["max_id"]
                 logging.info(f"数据库 ID 范围: {min_id} - {max_id}")
                 return (min_id, max_id)
             else:
@@ -619,7 +619,7 @@ class MySQLTaskPool(BaseTaskPool):
             logging.error(f"获取 ID 边界时出错: {e}")
             return (0, 0)
 
-    def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
+    def initialize_shard(self, shard_id: int, min_id: Any, max_id: Any) -> int:
         """
         初始化分片，从数据库加载指定 ID 范围的未处理任务
 
@@ -726,7 +726,65 @@ class MySQLTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=True,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
+
+    async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
+        """Read one MySQL keyset page without coercing string identifiers."""
+
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        if cursor is not None and (
+            not isinstance(cursor, dict) or set(cursor) != {"last_id"}
+        ):
+            raise ValueError("invalid MySQL cursor")
+
+        def read_page(conn: Any, db_cursor: Any) -> TaskBatch:
+            columns = ", ".join(
+                f"`{col.replace('`', '``')}`" for col in self.select_columns
+            )
+            where = self._build_unprocessed_condition()
+            params: list[Any] = []
+            keyset = ""
+            if cursor is not None:
+                keyset = "id > %s AND "
+                params.append(cursor["last_id"])
+            params.append(limit)
+            db_cursor.execute(
+                f"SELECT {columns} FROM `{self.table_name}` "
+                f"WHERE {keyset}{where} ORDER BY id ASC LIMIT %s",
+                tuple(params),
+            )
+            rows = db_cursor.fetchall()
+            records = tuple(
+                TaskRecord(
+                    record_id=row["id"],
+                    data={col: row.get(col) for col in self.columns_to_extract},
+                )
+                for row in rows
+            )
+            return TaskBatch(
+                records=records,
+                next_cursor=(
+                    {"last_id": records[-1].record_id}
+                    if len(records) == limit
+                    else None
+                ),
+            )
+
+        return await asyncio.to_thread(
+            self.execute_with_connection, read_page, is_write=False
+        )
+
+    def update_task_results(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         """
         批量写回任务结果到数据库
 
@@ -746,10 +804,10 @@ class MySQLTaskPool(BaseTaskPool):
             UPDATE table SET out1 = %s, out2 = %s WHERE id = %s
         """
         if not results:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
 
         # 准备更新数据
-        updates_data: list[tuple[int, dict[str, Any]]] = []
+        updates_data: list[tuple[Any, dict[str, Any]]] = []
         for record_id, row_result in results.items():
             if "_error" in row_result:
                 continue
@@ -765,14 +823,12 @@ class MySQLTaskPool(BaseTaskPool):
 
         if not updates_data:
             logging.info("没有成功的记录需要更新到数据库")
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
 
         logging.info(f"准备将 {len(updates_data)} 条记录的结果更新回数据库...")
 
-        def _perform_updates(conn: Any, cursor: Any) -> None:
-            success_count = 0
-            error_count = 0
-
+        def _perform_updates(conn: Any, cursor: Any) -> list[Any]:
+            persisted_ids: list[Any] = []
             for record_id, values_dict in updates_data:
                 set_parts = []
                 params = []
@@ -787,27 +843,20 @@ class MySQLTaskPool(BaseTaskPool):
                 sql = f"UPDATE `{self.table_name}` SET {', '.join(set_parts)} WHERE id = %s"
                 params.append(record_id)
 
-                try:
-                    cursor.execute(sql, tuple(params))
-                    if cursor.rowcount >= 0:
-                        success_count += 1
-                    else:
-                        error_count += 1
-                except mysql.connector.Error as err:
-                    logging.error(f"更新记录 {record_id} 失败: {err}")
-                    error_count += 1
+                cursor.execute(sql, tuple(params))
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        f"记录 {record_id} 更新行数异常: {cursor.rowcount}"
+                    )
+                persisted_ids.append(record_id)
 
-            if error_count > 0:
-                logging.error(f"数据库更新完成，但有 {error_count} 次更新失败")
+            logging.info(f"数据库更新完成，成功更新 {len(persisted_ids)} 条记录")
+            return persisted_ids
 
-            logging.info(f"数据库更新完成，成功更新 {success_count} 条记录")
+        persisted_ids = self.execute_with_connection(_perform_updates, is_write=True)
+        return WritebackReceipt.persisted(uuid.uuid4().hex, persisted_ids, atomic=True)
 
-        try:
-            self.execute_with_connection(_perform_updates, is_write=True)
-        except Exception as e:
-            logging.error(f"更新数据库记录失败: {e}")
-
-    def reload_task_data(self, record_id: int) -> dict[str, Any] | None:
+    def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
 

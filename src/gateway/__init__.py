@@ -60,11 +60,13 @@ API 端点:
         详见 src/gateway/service.py
 """
 
-from .app import create_app, run_server
-from .service import FluxApiService
+from .app import IncomingTokenChecker, create_app, run_server
+from .service import FluxApiService, GatewayAPIError
 
 __all__ = [
     "create_app",
     "run_server",
     "FluxApiService",
+    "GatewayAPIError",
+    "IncomingTokenChecker",
 ]

@@ -190,9 +190,12 @@ if not POLARS_AVAILABLE:
 EngineType = Literal["pandas", "polars", "auto"]
 ReaderType = Literal["openpyxl", "calamine", "auto"]
 WriterType = Literal["openpyxl", "xlsxwriter", "auto"]
+ResolvedEngineType = Literal["pandas", "polars"]
+ResolvedReaderType = Literal["openpyxl", "calamine"]
+ResolvedWriterType = Literal["openpyxl", "xlsxwriter"]
 
 
-def _resolve_reader(reader_type: ReaderType) -> str:
+def _resolve_reader(reader_type: ReaderType) -> ResolvedReaderType:
     """
     解析实际使用的 Excel 读取器
 
@@ -216,7 +219,7 @@ def _resolve_reader(reader_type: ReaderType) -> str:
     return "openpyxl"
 
 
-def _resolve_writer(writer_type: WriterType) -> str:
+def _resolve_writer(writer_type: WriterType) -> ResolvedWriterType:
     """
     解析实际使用的 Excel 写入器
 
@@ -240,7 +243,7 @@ def _resolve_writer(writer_type: WriterType) -> str:
     return "openpyxl"
 
 
-def _resolve_engine(engine_type: EngineType) -> str:
+def _resolve_engine(engine_type: EngineType) -> ResolvedEngineType:
     """
     解析实际使用的 DataFrame 引擎
 

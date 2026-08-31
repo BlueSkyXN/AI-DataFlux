@@ -30,13 +30,18 @@ on:
       - 'main.py'
       - 'gateway.py'
       - 'requirements.txt'
+      - 'config-example.yaml'
       - 'web/**'
+      - '.github/scripts/smoke_control.py'
       - '.github/workflows/build-pyinstaller.yml'
   pull_request:
     paths:
       - 'src/**'
       - '*.py'
+      - 'config-example.yaml'
       - 'web/**'
+      - '.github/scripts/smoke_control.py'
+      - '.github/workflows/build-pyinstaller.yml'
   workflow_dispatch:                       # 支持手动触发
     inputs:
       version:
@@ -102,11 +107,14 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      - name: Build frontend              # 构建 Web GUI → web/dist/
+      - name: Validate and build frontend
         if: matrix.build_type == 'full'
         run: |
           cd web
           npm ci
+          npm run lint
+          npm run test
+          npm audit --audit-level=high
           npm run build
 
       # --- Python 环境与依赖 ---
@@ -120,7 +128,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller==6.19.0 pip-audit==2.9.0
+
+      - name: Audit Python runtime dependencies
+        run: pip-audit -r requirements.txt
 
       # --- 构建前验证 ---
       - name: Verify CLI
@@ -131,38 +142,138 @@ jobs:
       # --- PyInstaller 打包（区分 Full/CLI-only 和平台）---
       - name: Build with PyInstaller (Unix - Full)
         if: runner.os != 'Windows' && matrix.build_type == 'full'
+        shell: bash
         run: |
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist:web/dist" cli.py
 
       - name: Build with PyInstaller (Unix - CLI-only)
         if: runner.os != 'Windows' && matrix.build_type == 'cli-only'
+        shell: bash
         run: |
           # Remove web/dist if exists to ensure CLI version doesn't include any frontend assets
           rm -rf web/dist || true
-          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control.server cli.py
 
       - name: Build with PyInstaller (Windows - Full)
         if: runner.os == 'Windows' && matrix.build_type == 'full'
+        shell: pwsh
         run: |
           pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --add-data "web/dist;web/dist" cli.py
 
       - name: Build with PyInstaller (Windows - CLI-only)
         if: runner.os == 'Windows' && matrix.build_type == 'cli-only'
+        shell: pwsh
         run: |
           # Remove web/dist if exists to ensure CLI version doesn't include any frontend assets
           if (Test-Path "web/dist") { Remove-Item -Recurse -Force "web/dist" }
-          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control cli.py
+          pyinstaller --onefile --clean --name ${{ env.APP_NAME }} --exclude-module=src.control.server cli.py
 
       # --- 重命名并上传构建产物 ---
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           mv dist/${{ env.APP_NAME }} dist/${{ matrix.artifact_name }}
 
       - name: Rename artifact (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           move dist\${{ env.APP_NAME }}.exe dist\${{ matrix.artifact_name }}
+
+      - name: Smoke packaged binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          DATAFLUX_TOKEN: packaged-control-smoke-token
+        run: |
+          artifact="dist/${{ matrix.artifact_name }}"
+          chmod +x "$artifact"
+          "$artifact" version
+          "$artifact" --help
+          "$artifact" check
+          "$artifact" process --config config-example.yaml --validate
+          "$artifact" config validate --config config-example.yaml --json
+          "$artifact" worker --help
+          "$artifact" job --help
+          "$artifact" job list --config config-example.yaml --json
+          if [ "${{ matrix.build_type }}" = "full" ]; then
+            "$artifact" gui --help
+            port="$(python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+            "$artifact" gui --config config-example.yaml --host 127.0.0.1 --port "$port" --no-browser > control-smoke.stdout.log 2> control-smoke.stderr.log &
+            control_pid=$!
+            cleanup_control() {
+              if kill -0 "$control_pid" 2>/dev/null; then
+                kill "$control_pid" 2>/dev/null || true
+              fi
+              wait "$control_pid" 2>/dev/null || true
+            }
+            trap cleanup_control EXIT
+            if ! python .github/scripts/smoke_control.py "http://127.0.0.1:${port}/health" --timeout 60; then
+              sed -n '1,200p' control-smoke.stdout.log
+              sed -n '1,200p' control-smoke.stderr.log >&2
+              exit 1
+            fi
+            cleanup_control
+            trap - EXIT
+          elif "$artifact" gui --help > /tmp/dataflux-gui-help.txt 2>&1; then
+            echo "CLI-only artifact unexpectedly exposes gui"
+            exit 1
+          fi
+
+      - name: Smoke packaged binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DATAFLUX_TOKEN: packaged-control-smoke-token
+        run: |
+          $artifact = "dist\${{ matrix.artifact_name }}"
+          & $artifact version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact process --config config-example.yaml --validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact config validate --config config-example.yaml --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact worker --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact job --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact job list --config config-example.yaml --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ("${{ matrix.build_type }}" -eq "full") {
+            & $artifact gui --help
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $listener.Stop()
+            $stdoutLog = "control-smoke.stdout.log"
+            $stderrLog = "control-smoke.stderr.log"
+            $control = Start-Process -FilePath $artifact -ArgumentList @("gui", "--config", "config-example.yaml", "--host", "127.0.0.1", "--port", "$port", "--no-browser") -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+            try {
+              python .github/scripts/smoke_control.py "http://127.0.0.1:$port/health" --timeout 60
+              if ($LASTEXITCODE -ne 0) {
+                Get-Content $stdoutLog -ErrorAction SilentlyContinue
+                Get-Content $stderrLog -ErrorAction SilentlyContinue | Write-Error
+                exit $LASTEXITCODE
+              }
+            } finally {
+              if (-not $control.HasExited) {
+                Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue
+              }
+              Wait-Process -Id $control.Id -ErrorAction SilentlyContinue
+            }
+          } else {
+            & $artifact gui --help *> smoke-gui-help.txt
+            if ($LASTEXITCODE -eq 0) {
+              Write-Error "CLI-only artifact unexpectedly exposes gui"
+              exit 1
+            }
+          }
 
       - name: Upload artifact               # 上传到 GitHub Artifacts，保留30天
         uses: actions/upload-artifact@v4
@@ -200,13 +311,13 @@ jobs:
 
             **完整版（Full - 包含 Web GUI）：**
             - **Linux (x64)**: `AI-DataFlux-linux-amd64-full`
-            - **macOS (Intel)**: `AI-DataFlux-macos-amd64-full`
+            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-full`
             - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-full`
             - **Windows (x64)**: `AI-DataFlux-windows-amd64-full.exe`
 
             **CLI 版本（仅命令行，体积更小）：**
             - **Linux (x64)**: `AI-DataFlux-linux-amd64-cli`
-            - **macOS (Intel)**: `AI-DataFlux-macos-amd64-cli`
+            - **Linux (ARM64)**: `AI-DataFlux-linux-arm64-cli`
             - **macOS (Apple Silicon)**: `AI-DataFlux-macos-arm64-cli`
             - **Windows (x64)**: `AI-DataFlux-windows-amd64-cli.exe`
 

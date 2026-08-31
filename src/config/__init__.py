@@ -40,6 +40,15 @@ from .settings import (
     merge_config,
     get_nested,
     validate_config,
+    resolve_workspace_path,
+    resolve_workspace_roots,
+)
+from .security import (
+    AccessToken,
+    is_loopback_host,
+    make_token_checker,
+    redact_sensitive_text,
+    resolve_access_token,
 )
 
 __all__ = [
@@ -49,4 +58,11 @@ __all__ = [
     "merge_config",
     "get_nested",
     "validate_config",
+    "resolve_workspace_path",
+    "resolve_workspace_roots",
+    "AccessToken",
+    "is_loopback_host",
+    "make_token_checker",
+    "redact_sensitive_text",
+    "resolve_access_token",
 ]

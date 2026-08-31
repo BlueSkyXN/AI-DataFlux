@@ -6,7 +6,7 @@ PostgreSQL 数据源任务池实现模块
 
 核心特性:
     - 高性能连接池: ThreadedConnectionPool 支持多线程并发
-    - 批量更新优化: execute_batch() 比逐条更新快 5-10 倍
+    - 可信写回: 同一事务逐条确认 UPDATE 实际命中一行
     - MVCC 并发: 读写互不阻塞，适合高并发场景
     - SQL 注入防护: 使用 psycopg2.sql 模块构建安全查询
     - Schema 支持: 支持指定数据库 Schema（默认 public）
@@ -55,7 +55,7 @@ PostgreSQL 数据源任务池实现模块
             - get_task_batch(batch_size) -> list[tuple]
                 从内存队列弹出一批任务
             - update_task_results(results) -> None
-                使用 execute_batch() 批量写回结果（性能 5-10x）
+                同一事务写回并逐条验证 rowcount
             - reload_task_data(record_id) -> dict | None
                 SELECT 重新加载指定记录的输入数据
             - close() -> None
@@ -94,18 +94,18 @@ PostgreSQL 数据源任务池实现模块
         - base.BaseTaskPool: 抽象基类
         - psycopg2: PostgreSQL 连接器（可选依赖）
         - psycopg2.pool: 线程安全连接池
-        - psycopg2.extras: RealDictCursor, execute_batch
+        - psycopg2.extras: RealDictCursor
         - psycopg2.sql: 安全 SQL 构建器
 
 与 MySQL 版本的差异:
     1. 标识符引用: PostgreSQL 用双引号，MySQL 用反引号
     2. 连接池: ThreadedConnectionPool vs MySQLConnectionPool
-    3. 批量更新: execute_batch() vs 逐条 execute()
+    3. 写回确认: PostgreSQL 与 MySQL 均逐条检查 UPDATE rowcount
     4. Schema: 支持多 Schema，MySQL 只有 database
     5. 字符串比较: 大小写敏感（MySQL 默认不敏感）
 
 性能优化:
-    - execute_batch(page_size=100): 批量发送，减少网络往返
+    - 单事务写回: 任一 UPDATE 失败或未命中时整体 rollback
     - statement_timeout=30000: 防止慢查询阻塞
     - 连接池大小: 建议 batch_size/10，最小 5
 
@@ -142,12 +142,21 @@ PostgreSQL 数据源任务池实现模块
     4. 查询超时默认 30 秒
 """
 
+import asyncio
 import logging
 import re
 import threading
+import uuid
 from typing import Any
 
 from .base import BaseTaskPool
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WriteFailure,
+    WritebackReceipt,
+)
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -317,7 +326,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
     与 MySQL 版本的主要差异:
         1. SQL 构建: 使用 psycopg2.sql 模块（更安全）
-        2. 批量更新: 使用 execute_batch()（更高效）
+        2. 写回确认: 每条 UPDATE 必须命中一行，否则整个事务 rollback
         3. 游标: 使用 RealDictCursor（更易用）
         4. Schema: 支持多 Schema（更灵活）
 
@@ -526,7 +535,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
         使用 psycopg2.sql 模块安全构建 COUNT(*) 查询。
 
         Returns:
-            int: 未处理任务数量，查询失败返回 0
+            int: 未处理任务数量；查询失败时抛出异常
         """
 
         def _get_count(conn: Any, cursor: Any) -> int:
@@ -546,11 +555,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
             logging.info(f"PostgreSQL 中未处理的任务总数: {count}")
             return count
 
-        try:
-            return self.execute_with_connection(_get_count)
-        except Exception as e:
-            logging.error(f"获取总任务数时出错: {e}")
-            return 0
+        return self.execute_with_connection(_get_count)
 
     def get_processed_task_count(self) -> int:
         """
@@ -559,7 +564,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
         统计所有输出列都非空的记录数。
 
         Returns:
-            int: 已处理任务数量，查询失败返回 0
+            int: 已处理任务数量；查询失败时抛出异常
         """
 
         def _get_count(conn: Any, cursor: Any) -> int:
@@ -577,13 +582,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
             logging.info(f"PostgreSQL 中已处理的任务总数: {count}")
             return count
 
-        try:
-            return self.execute_with_connection(_get_count)
-        except Exception as e:
-            logging.error(f"获取已处理任务数时出错: {e}")
-            return 0
+        return self.execute_with_connection(_get_count)
 
-    def get_id_boundaries(self) -> tuple[int, int]:
+    def get_id_boundaries(self) -> tuple[Any, Any]:
         """
         获取表中 ID 的边界值
 
@@ -591,7 +592,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
             tuple[int, int]: (最小ID, 最大ID)，表为空返回 (0, 0)
         """
 
-        def _get_boundaries(conn: Any, cursor: Any) -> tuple[int, int]:
+        def _get_boundaries(conn: Any, cursor: Any) -> tuple[Any, Any]:
             query = sql.SQL(
                 "SELECT MIN(id) as min_id, MAX(id) as max_id FROM {}.{}"
             ).format(
@@ -603,8 +604,8 @@ class PostgreSQLTaskPool(BaseTaskPool):
             result = cursor.fetchone()
 
             if result and result["min_id"] is not None and result["max_id"] is not None:
-                min_id = int(result["min_id"])
-                max_id = int(result["max_id"])
+                min_id = result["min_id"]
+                max_id = result["max_id"]
                 logging.info(f"PostgreSQL ID 范围: {min_id} - {max_id}")
                 return (min_id, max_id)
             else:
@@ -617,7 +618,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
             logging.error(f"获取 ID 边界时出错: {e}")
             return (0, 0)
 
-    def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
+    def initialize_shard(self, shard_id: int, min_id: Any, max_id: Any) -> int:
         """
         初始化分片，从数据库加载指定 ID 范围的未处理任务
 
@@ -717,27 +718,86 @@ class PostgreSQLTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
-        """
-        批量写回任务结果（使用 execute_batch 优化性能）
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=True,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
 
-        使用 psycopg2.extras.execute_batch() 批量执行 UPDATE 语句，
-        比逐条执行快 5-10 倍（减少网络往返）。
+    async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
+        """Read one PostgreSQL keyset page with a datasource-owned cursor."""
+
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        if cursor is not None and (
+            not isinstance(cursor, dict) or set(cursor) != {"last_id"}
+        ):
+            raise ValueError("invalid PostgreSQL cursor")
+
+        def read_page(conn: Any, db_cursor: Any) -> TaskBatch:
+            columns = sql.SQL(", ").join(
+                sql.Identifier(col) for col in self.select_columns
+            )
+            where = sql.SQL(self._build_unprocessed_condition())
+            params: list[Any] = []
+            if cursor is None:
+                keyset = sql.SQL("")
+            else:
+                keyset = sql.SQL("id > %s AND ")
+                params.append(cursor["last_id"])
+            params.append(limit)
+            query = sql.SQL(
+                "SELECT {} FROM {}.{} WHERE {}{} ORDER BY id ASC LIMIT %s"
+            ).format(
+                columns,
+                sql.Identifier(self.schema_name),
+                sql.Identifier(self.table_name),
+                keyset,
+                where,
+            )
+            db_cursor.execute(query, tuple(params))
+            rows = db_cursor.fetchall()
+            records = tuple(
+                TaskRecord(
+                    record_id=row["id"],
+                    data={col: row.get(col) for col in self.columns_to_extract},
+                )
+                for row in rows
+            )
+            return TaskBatch(
+                records=records,
+                next_cursor=(
+                    {"last_id": records[-1].record_id}
+                    if len(records) == limit
+                    else None
+                ),
+            )
+
+        return await asyncio.to_thread(
+            self.execute_with_connection, read_page, is_write=False
+        )
+
+    def update_task_results(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
+        """
+        在单个事务中写回任务结果并确认每条 UPDATE 实际命中。
 
         Args:
             results: 结果字典 {记录ID: {别名: 值, ...}}
-
-        优化参数:
-            - page_size=100: 每批发送 100 条语句
 
         SQL 示例:
             UPDATE schema.table SET "out1" = %s, "out2" = %s WHERE id = %s
         """
         if not results:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
 
         # 准备更新数据
-        updates_data: list[tuple[int, dict[str, Any]]] = []
+        updates_data: list[tuple[Any, dict[str, Any]]] = []
+        failures: list[WriteFailure] = []
         for record_id, row_result in results.items():
             if "_error" in row_result:
                 continue
@@ -750,54 +810,81 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
             if update_values:
                 updates_data.append((record_id, update_values))
+            else:
+                failures.append(
+                    WriteFailure(
+                        record_id=record_id,
+                        code="no_writable_fields",
+                        message="AI 结果不包含任何 columns_to_write alias",
+                        retryable=False,
+                    )
+                )
+
+        if failures:
+            failures.extend(
+                WriteFailure(
+                    record_id=record_id,
+                    code="batch_aborted",
+                    message="同一原子批次包含不可写记录",
+                    retryable=True,
+                )
+                for record_id, _ in updates_data
+            )
+            return WritebackReceipt(
+                batch_id=uuid.uuid4().hex,
+                failures=tuple(failures),
+                atomic=True,
+            )
 
         if not updates_data:
             logging.info("没有成功的记录需要更新到数据库")
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
 
         logging.info(f"准备将 {len(updates_data)} 条记录的结果更新回 PostgreSQL...")
 
         def _perform_batch_update(conn: Any, cursor: Any) -> None:
-            """使用 psycopg2.extras.execute_batch 批量更新"""
+            """Keep all updates in one transaction and reject false receipts."""
             try:
-                # 构建批量更新语句
-                set_parts = []
-                for col_name in self.write_colnames:
-                    set_parts.append(
-                        sql.SQL("{} = %s").format(sql.Identifier(col_name))
-                    )
-
-                update_query = sql.SQL("UPDATE {}.{} SET {} WHERE id = %s").format(
-                    sql.Identifier(self.schema_name),
-                    sql.Identifier(self.table_name),
-                    sql.SQL(", ").join(set_parts),
-                )
-
-                # 准备批量参数
-                batch_params = []
                 for record_id, values_dict in updates_data:
-                    params = [values_dict.get(col) for col in self.write_colnames]
+                    columns = [
+                        col_name
+                        for col_name in self.write_colnames
+                        if col_name in values_dict
+                    ]
+                    set_parts = [
+                        sql.SQL("{} = %s").format(sql.Identifier(col_name))
+                        for col_name in columns
+                    ]
+                    update_query = sql.SQL("UPDATE {}.{} SET {} WHERE id = %s").format(
+                        sql.Identifier(self.schema_name),
+                        sql.Identifier(self.table_name),
+                        sql.SQL(", ").join(set_parts),
+                    )
+                    params = [values_dict[col_name] for col_name in columns]
                     params.append(record_id)
-                    batch_params.append(tuple(params))
-
-                # 执行批量更新（page_size=100 性能最佳）
-                extras.execute_batch(cursor, update_query, batch_params, page_size=100)
-                success_count = len(batch_params)
+                    cursor.execute(update_query, tuple(params))
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            f"记录 {record_id!r} 更新行数异常: {cursor.rowcount}"
+                        )
 
                 logging.info(
-                    f"PostgreSQL 批量更新完成，成功更新 {success_count} 条记录"
+                    "PostgreSQL 事务更新完成，确认持久化 %s 条记录",
+                    len(updates_data),
                 )
 
             except psycopg2.Error as err:
                 logging.error(f"批量更新失败: {err}")
                 raise
 
-        try:
-            self.execute_with_connection(_perform_batch_update, is_write=True)
-        except Exception as e:
-            logging.error(f"更新 PostgreSQL 记录失败: {e}")
+        self.execute_with_connection(_perform_batch_update, is_write=True)
+        return WritebackReceipt.persisted(
+            uuid.uuid4().hex,
+            [record_id for record_id, _ in updates_data],
+            atomic=True,
+        )
 
-    def reload_task_data(self, record_id: int) -> dict[str, Any] | None:
+    def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
 

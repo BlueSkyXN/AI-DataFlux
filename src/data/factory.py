@@ -13,7 +13,7 @@
     - postgresql: PostgreSQL 数据库
         - 使用 psycopg2 连接
         - 支持 ThreadedConnectionPool
-        - 使用 execute_batch() 批量更新
+        - 在单一事务内逐条更新并确认 rowcount
         - 适合企业级高性能场景
 
     - sqlite: SQLite 数据库
@@ -106,7 +106,6 @@ import logging
 from typing import Any
 
 from .base import BaseTaskPool
-
 
 # ==================== 可用性检测标志 ====================
 # 通过尝试导入来检测各依赖库是否可用
@@ -201,6 +200,8 @@ def create_task_pool(
     """
     # 提取数据源配置
     datasource_config = config.get("datasource", {})
+    if not isinstance(datasource_config, dict):
+        raise ValueError("datasource 配置必须是字典")
     datasource_type = datasource_config.get("type", "excel").lower()
 
     # 获取公共配置
@@ -601,27 +602,16 @@ def _create_feishu_bitable_pool(
     from .feishu.bitable import FeishuBitableTaskPool
 
     feishu_config = config.get("feishu", {})
-    datasource_config = config.get("datasource", {})
-
     # 验证全局凭据
     if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
         raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
 
-    # 兼容两种配置路径:
-    # 1) feishu.app_token/table_id（GUI 当前写入路径）
-    # 2) datasource.app_token/table_id（旧路径）
     app_token = _normalize_nonempty_str(feishu_config.get("app_token"))
-    if app_token is None:
-        app_token = _normalize_nonempty_str(datasource_config.get("app_token"))
     table_id = _normalize_nonempty_str(feishu_config.get("table_id"))
-    if table_id is None:
-        table_id = _normalize_nonempty_str(datasource_config.get("table_id"))
     if app_token is None:
-        raise ValueError(
-            "缺少飞书多维表格配置: feishu.app_token 或 datasource.app_token"
-        )
+        raise ValueError("缺少飞书多维表格配置: feishu.app_token")
     if table_id is None:
-        raise ValueError("缺少飞书多维表格配置: feishu.table_id 或 datasource.table_id")
+        raise ValueError("缺少飞书多维表格配置: feishu.table_id")
 
     return FeishuBitableTaskPool(
         app_id=feishu_config["app_id"],
@@ -664,29 +654,17 @@ def _create_feishu_sheet_pool(
     from .feishu.sheet import FeishuSheetTaskPool
 
     feishu_config = config.get("feishu", {})
-    datasource_config = config.get("datasource", {})
 
     # 验证全局凭据
     if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
         raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
 
-    # 兼容两种配置路径:
-    # 1) feishu.spreadsheet_token/sheet_id（GUI 当前写入路径）
-    # 2) datasource.spreadsheet_token/sheet_id（旧路径）
     spreadsheet_token = _normalize_nonempty_str(feishu_config.get("spreadsheet_token"))
-    if spreadsheet_token is None:
-        spreadsheet_token = _normalize_nonempty_str(
-            datasource_config.get("spreadsheet_token")
-        )
     sheet_id = _normalize_nonempty_str(feishu_config.get("sheet_id"))
-    if sheet_id is None:
-        sheet_id = _normalize_nonempty_str(datasource_config.get("sheet_id"))
     if spreadsheet_token is None:
-        raise ValueError(
-            "缺少飞书电子表格配置: feishu.spreadsheet_token 或 datasource.spreadsheet_token"
-        )
+        raise ValueError("缺少飞书电子表格配置: feishu.spreadsheet_token")
     if sheet_id is None:
-        raise ValueError("缺少飞书电子表格配置: feishu.sheet_id 或 datasource.sheet_id")
+        raise ValueError("缺少飞书电子表格配置: feishu.sheet_id")
 
     return FeishuSheetTaskPool(
         app_id=feishu_config["app_id"],

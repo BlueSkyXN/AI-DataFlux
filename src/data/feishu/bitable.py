@@ -72,13 +72,16 @@ AI-DataFlux 的数据源进行批量 AI 处理。
     )
 """
 
+import asyncio
 import logging
 import threading
+import uuid
 from typing import Any
 
 from ..base import BaseTaskPool
+from ..contracts import AdapterCapabilities, WriteFailure, WritebackReceipt
 from . import run_async
-from .client import FeishuClient
+from .client import BITABLE_BATCH_UPDATE_LIMIT, FeishuClient
 
 
 class FeishuBitableTaskPool(BaseTaskPool):
@@ -296,7 +299,18 @@ class FeishuBitableTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=False,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
+
+    def update_task_results(
+        self, results: dict[int, dict[str, Any]]
+    ) -> WritebackReceipt:
         """
         批量写回任务结果到飞书多维表格
 
@@ -307,17 +321,26 @@ class FeishuBitableTaskPool(BaseTaskPool):
             results: {task_id: {alias: value, ...}, ...}
         """
         if not results:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex)
 
         # 构建待更新记录
         update_records: list[dict[str, Any]] = []
+        task_ids_by_record: dict[str, int] = {}
+        failures: list[WriteFailure] = []
         for task_id, row_result in results.items():
             if "_error" in row_result:
                 continue
 
             record_id = self._id_map.get(task_id)
             if not record_id:
-                self._logger.warning(f"task_id={task_id} 无对应 record_id，跳过")
+                failures.append(
+                    WriteFailure(
+                        record_id=task_id,
+                        code="record_not_found",
+                        message="task_id 无对应 record_id",
+                        retryable=False,
+                    )
+                )
                 continue
 
             fields: dict[str, Any] = {}
@@ -332,26 +355,86 @@ class FeishuBitableTaskPool(BaseTaskPool):
                         "fields": fields,
                     }
                 )
+                task_ids_by_record[record_id] = task_id
 
         if not update_records:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, failures=tuple(failures))
 
-        # 同步调用异步写入；写回失败仅记录错误，避免中断整体处理流程
-        try:
-            run_async(self._batch_update(update_records))
-        except Exception as e:
-            self._logger.error(f"Bitable 批量更新失败: {e}", exc_info=True)
-
-    async def _batch_update(self, records: list[dict[str, Any]]) -> None:
-        """异步执行批量更新"""
-        result = await self.client.bitable_batch_update(
-            self.app_token, self.table_id, records
+        persisted_record_ids, chunk_failures = run_async(
+            self._batch_update(update_records)
         )
-        self._logger.info(f"Bitable 批量更新完成，成功 {len(result)} 条")
+        persisted_task_ids = [
+            task_ids_by_record[record_id]
+            for record_id in persisted_record_ids
+            if record_id in task_ids_by_record
+        ]
+        failures.extend(
+            WriteFailure(
+                record_id=task_ids_by_record[record_id],
+                code="bitable_chunk_failed",
+                message=message,
+                retryable=True,
+            )
+            for record_id, message in chunk_failures
+            if record_id in task_ids_by_record
+        )
+        return WritebackReceipt(
+            batch_id=uuid.uuid4().hex,
+            persisted_ids=tuple(persisted_task_ids),
+            failures=tuple(failures),
+            atomic=False,
+        )
+
+    async def _batch_update(
+        self, records: list[dict[str, Any]]
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """异步执行独立 chunk，保留部分成功和逐记录失败。"""
+
+        chunks = [
+            records[index : index + BITABLE_BATCH_UPDATE_LIMIT]
+            for index in range(0, len(records), BITABLE_BATCH_UPDATE_LIMIT)
+        ]
+        outcomes = await asyncio.gather(
+            *(
+                self.client.bitable_batch_update(self.app_token, self.table_id, chunk)
+                for chunk in chunks
+            ),
+            return_exceptions=True,
+        )
+        result_ids: set[str] = set()
+        failures: list[tuple[str, str]] = []
+        for chunk, outcome in zip(chunks, outcomes):
+            if isinstance(outcome, BaseException):
+                message = f"{type(outcome).__name__}: {outcome}"
+                failures.extend((str(record["record_id"]), message) for record in chunk)
+                continue
+            result_ids.update(
+                str(item.get("record_id"))
+                for item in outcome
+                if isinstance(item, dict) and item.get("record_id")
+            )
+            acknowledged = {
+                str(item.get("record_id"))
+                for item in outcome
+                if isinstance(item, dict) and item.get("record_id")
+            }
+            failures.extend(
+                (str(record["record_id"]), "record not acknowledged by Feishu")
+                for record in chunk
+                if str(record["record_id"]) not in acknowledged
+            )
+
+        self._logger.info(
+            "Bitable 批量更新完成，成功 %s 条，失败 %s 条",
+            len(result_ids),
+            len(failures),
+        )
 
         # 同步更新内存快照，防止多 shard 重复处理（O(1) 映射查找）
         for rec in records:
             rec_id = rec["record_id"]
+            if rec_id not in result_ids:
+                continue
             fields = rec["fields"]
             task_id = self._reverse_map.get(rec_id)
             if task_id is None:
@@ -368,6 +451,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 snapshot_fields = {}
                 snapshot_rec["fields"] = snapshot_fields
             snapshot_fields.update(fields)
+        return sorted(result_ids), failures
 
     def reload_task_data(self, task_id: int) -> dict[str, Any] | None:
         """重新从快照加载任务数据"""
@@ -398,15 +482,15 @@ class FeishuBitableTaskPool(BaseTaskPool):
             return str(value)
         if isinstance(value, list):
             # 多维表格的多选、人员等字段是列表
-            parts = []
+            parts: list[str] = []
             for item in value:
                 if isinstance(item, dict):
-                    parts.append(item.get("text", item.get("name", str(item))))
+                    parts.append(str(item.get("text", item.get("name", str(item)))))
                 else:
                     parts.append(str(item))
             return ", ".join(parts)
         if isinstance(value, dict):
-            return value.get("text", value.get("link", str(value)))
+            return str(value.get("text", value.get("link", str(value))))
         return str(value)
 
     # ==================== Token 估算采样 ====================
@@ -414,7 +498,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """采样未处理行"""
         self._load_snapshot_sync()
-        samples = []
+        samples: list[dict[str, Any]] = []
         for rec in self._snapshot:
             if len(samples) >= sample_size:
                 break
@@ -431,7 +515,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """采样已处理行"""
         self._load_snapshot_sync()
-        samples = []
+        samples: list[dict[str, Any]] = []
         for rec in self._snapshot:
             if len(samples) >= sample_size:
                 break
@@ -444,3 +528,27 @@ class FeishuBitableTaskPool(BaseTaskPool):
                     }
                 )
         return samples
+
+    def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        self._load_snapshot_sync()
+        return [
+            {
+                col: self._convert_field_value(self._get_fields(record).get(col, ""))
+                for col in columns
+            }
+            for record in self._snapshot
+        ]
+
+    def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        self._load_snapshot_sync()
+        rows: list[dict[str, Any]] = []
+        for record in self._snapshot:
+            fields = self._get_fields(record)
+            if self._is_processed(fields):
+                rows.append(
+                    {
+                        col: self._convert_field_value(fields.get(col, ""))
+                        for col in columns
+                    }
+                )
+        return rows

@@ -89,9 +89,8 @@ columns_to_write:
 - 按 `id BETWEEN ...` + “未处理条件”查询（`src/data/postgresql.py`）
 
 **写回**：
-- 使用 `psycopg2.extras.execute_batch()` 批量执行 `UPDATE`（`src/data/postgresql.py`）
-- 注意：更新语句会覆盖 `columns_to_write` 中的**所有输出列**
-  - 如果某条结果缺少某个别名，参数会变成 `None`，可能把对应列写成 `NULL`
+- 在同一事务逐条执行参数化 `UPDATE`，每条都必须满足 `rowcount == 1`；任一失败或未命中会整体 rollback（`src/data/postgresql.py`）
+- 仅更新结果实际提供的 `columns_to_write` alias，缺失 alias 保持目标列原值不变
 
 ### SQLite（`sqlite`）
 
@@ -114,7 +113,7 @@ columns_to_write:
 - 先把结果写入**内存 DataFrame**
 - 达到 `save_interval`（`datasource.concurrency.save_interval`）后触发落盘；`close()` 时做最终保存（`src/data/excel.py`）
 - `output_path` 不配置时默认原地写回 `input_path`（工厂逻辑：`src/data/factory.py`）
-- Excel 保存遇到 `UnicodeEncodeError` 时，会尝试清空 AI 输出列的“问题单元格”，仍失败则回退保存为 CSV（`src/data/excel.py`）
+- Excel/CSV 只在配置目标完成临时文件写入、`fsync` 和原子替换后确认 `persisted`；`UnicodeEncodeError` 或替换失败会直接作为写回失败返回，不会清空输出值或改写到备用路径后误报成功（`src/data/excel.py`）
 
 **重要差异点**：
 - 写回时对每个输出别名使用 `row_result.get(alias, "")`
@@ -130,4 +129,3 @@ columns_to_write:
   - PostgreSQL：缺失别名 → 可能写成 `NULL`（覆盖）
   - Excel/CSV：缺失别名 → 写成 `""`（覆盖）
 - **CSV 也要求 `pandas+openpyxl`**：当前是工厂层面的依赖检测策略，后续如要“纯 CSV + polars”需要调整 `EXCEL_ENABLED` 判定逻辑。
-

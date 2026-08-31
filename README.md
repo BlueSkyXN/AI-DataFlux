@@ -23,6 +23,10 @@ AI-DataFlux 是一个高性能、可扩展的通用AI处理引擎，专为批量
 - **可视化进度**：实时显示处理进度和统计信息。
 - **组件化架构**：清晰的 `src/core/` 组件化设计（Content, State, Retry, Clients），易于扩展和维护。
 - **规则路由**：支持按记录字段值动态选择不同的 prompt 和 validation 配置，实现单文件多业务场景处理。
+- **Durable Job / Worker**：文件型 Job Repository、lease 心跳、可恢复状态、append-only event 和合作式资源调度。
+- **Chat + Responses Gateway**：按 model capability 路由 Chat Completions / Responses，保留未知字段和原始 SSE，不跨 API 模拟高级语义。
+
+> **3.2 开发版提示**：`3.2.0-dev` 尚未发布。旧配置不能直接假定兼容，请先阅读 [3.2 配置迁移](./docs/MIGRATION_3_2.md)。Job/Worker 契约见 [JOBS.md](./docs/JOBS.md)，Control REST/SSE 与 CLI 自动化边界见 [CONTROL_API.md](./docs/CONTROL_API.md)，Gateway 契约见 [GATEWAY_API.md](./docs/GATEWAY_API.md)，发布/UAT 边界见 [RELEASE_GATES.md](./docs/RELEASE_GATES.md)。
 
 ## 快速开始
 
@@ -84,7 +88,7 @@ python cli.py version
 python cli.py gui
 
 # 启动 API 网关
-python cli.py gateway --port 8787
+DATAFLUX_TOKEN=your-strong-token python cli.py gateway --port 8787
 
 # 运行数据处理
 python cli.py process --config config.yaml
@@ -114,7 +118,7 @@ python cli.py gui
 python cli.py gui --port 8080
 
 # 不自动打开浏览器
-python cli.py gui --no-browser
+DATAFLUX_TOKEN=your-strong-token python cli.py gui --no-browser
 ```
 
 控制面板功能：
@@ -136,14 +140,14 @@ python cli.py gui --no-browser
 控制面安全策略（默认开启）：
 
 - `/api/*` 与 `/api/logs` 需要 `Authorization: Bearer <token>`
-- 若未设置 `DATAFLUX_CONTROL_TOKEN`，启动时会自动生成临时 token（自动打开浏览器时会附带 `#token=...`）
+- token 优先从 `DATAFLUX_TOKEN` 读取，其次为 `server.token`；仅 loopback 绑定可自动生成临时 token
 - `/api/logs` 的浏览器鉴权通过 `Sec-WebSocket-Protocol: dataflux-token-b64.<base64url>` 透传
 - 配置读写接口仅允许 `.yaml/.yml` 文件，禁止访问/改写脚本等非配置文件
 
 如需固定 token（推荐）：
 
 ```bash
-DATAFLUX_CONTROL_TOKEN=your-strong-token python cli.py gui --no-browser
+DATAFLUX_TOKEN=your-strong-token python cli.py gui --no-browser
 ```
 
 **详细文档**：[Web GUI 控制面板指南](./docs/GUI.md)
@@ -198,14 +202,16 @@ routing:
 
 ```bash
 # 使用统一入口
-python cli.py gateway --port 8787
+DATAFLUX_TOKEN=your-strong-token python cli.py gateway --port 8787
 
 # 或使用独立入口
-python gateway.py --config config.yaml --port 8787
+DATAFLUX_TOKEN=your-strong-token python gateway.py --config config.yaml --port 8787
 
 # 后台运行
-nohup python cli.py gateway --port 8787 > gateway.log 2>&1 &
+DATAFLUX_TOKEN=your-strong-token nohup python cli.py gateway --port 8787 > gateway.log 2>&1 &
 ```
+
+Gateway 默认绑定 `0.0.0.0`，因此必须设置 `DATAFLUX_TOKEN` 或 `server.token`；只有显式绑定 loopback 地址时才允许自动生成临时 token。
 
 ### 运行数据处理引擎
 
@@ -407,7 +413,7 @@ validation:
 ```yaml
 # 模型配置
 models:
-  - id: 1
+  - id: "model-1"
     name: "model-1"              # 模型显示名称
     model: "gpt-4-turbo"         # 实际模型名称
     channel_id: "1"              # 所属通道ID
@@ -416,15 +422,20 @@ models:
     weight: 10                   # 调度权重（使用加权随机算法）
     temperature: 0.3             # 模型默认温度（请求未提供时生效）
     safe_rps: 5                  # 每秒安全请求数（令牌桶限流）
-    supports_json_schema: true   # 是否支持JSON Schema
-    supports_advanced_params: false  # 是否支持高级参数（presence_penalty等）
+    capabilities:
+      - chat_completions
+      - stream
+      - tools
+      - json_schema
 
 # 通道配置
 channels:
   "1":
     name: "openai-api"
     base_url: "https://api.openai.com"
-    api_path: "/v1/chat/completions"
+    endpoints:
+      chat_completions: "/v1/chat/completions"
+      responses: "/v1/responses"
     timeout: 300
     proxy: ""  # 可选代理设置，例如 "http://127.0.0.1:7890"
     ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
@@ -511,15 +522,17 @@ AI-DataFlux 采用双组件架构设计，由数据处理引擎和API网关两�
 启动方式：
 
 ```bash
-python gateway.py --config config.yaml
+DATAFLUX_TOKEN=<token> python gateway.py --config config.yaml
 ```
 
 默认监听 `http://0.0.0.0:8787`，提供以下API端点：
 
 - `/` - 网关根路径与版本信息
 - `/v1/chat/completions` - OpenAI兼容的聊天补全接口
+- `/v1/responses` - OpenAI Responses 透明代理接口
 - `/v1/models` - 可用模型列表
 - `/admin/models` - 模型详细状态和指标
+- `/admin/capabilities` - 模型 capability 与 endpoint 列表
 - `/admin/health` - 系统健康状态
 
 ### 2. 数据处理引擎 (main.py)

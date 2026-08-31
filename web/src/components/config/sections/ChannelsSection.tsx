@@ -2,7 +2,7 @@
  * API 渠道（Channels）配置分区组件
  *
  * 用途：管理 API 渠道列表，支持添加、删除、编辑渠道的连接参数
- *       每个渠道包含名称、Base URL、API Path、超时、代理、SSL 验证、IP 池等配置
+ *       每个渠道包含名称、Base URL、versioned endpoints、超时、代理、SSL 验证、IP 池等配置
  *
  * 导出：ChannelsSection（默认导出）
  *   Props: SectionProps（formData, updateConfig, getConfig, language）
@@ -24,7 +24,10 @@ import StringListEditor from '../shared/StringListEditor';
 interface ChannelConfig {
   name: string;
   base_url: string;
-  api_path: string;
+  endpoints: {
+    chat_completions?: string;
+    responses?: string;
+  };
   timeout: number;
   proxy: string;
   ssl_verify: boolean;
@@ -35,7 +38,10 @@ interface ChannelConfig {
 const defaultChannel: ChannelConfig = {
   name: '',
   base_url: '',
-  api_path: '/v1/chat/completions',
+  endpoints: {
+    chat_completions: '/v1/chat/completions',
+    responses: '/v1/responses',
+  },
   timeout: 300,
   proxy: '',
   ssl_verify: true,
@@ -57,6 +63,22 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
   /** 更新指定渠道的某个字段 */
   const handleUpdate = (id: string, field: keyof ChannelConfig, value: unknown) => {
     const next = { ...channels, [id]: { ...channels[id], [field]: value } };
+    updateConfig(['channels'], next);
+  };
+
+  const handleEndpointUpdate = (
+    id: string,
+    endpoint: 'chat_completions' | 'responses',
+    value: string,
+  ) => {
+    const channel = channels[id];
+    const next = {
+      ...channels,
+      [id]: {
+        ...channel,
+        endpoints: { ...channel.endpoints, [endpoint]: value },
+      },
+    };
     updateConfig(['channels'], next);
   };
 
@@ -107,11 +129,19 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
                     monospace
                   />
                 </FormField>
-                <FormField label="API Path" required>
+                <FormField label="Chat Completions endpoint" required>
                   <TextInput
-                    value={ch.api_path ?? '/v1/chat/completions'}
-                    onChange={(v) => handleUpdate(id, 'api_path', v)}
+                    value={ch.endpoints?.chat_completions ?? '/v1/chat/completions'}
+                    onChange={(v) => handleEndpointUpdate(id, 'chat_completions', v)}
                     placeholder="/v1/chat/completions"
+                    monospace
+                  />
+                </FormField>
+                <FormField label="Responses endpoint">
+                  <TextInput
+                    value={ch.endpoints?.responses ?? '/v1/responses'}
+                    onChange={(v) => handleEndpointUpdate(id, 'responses', v)}
+                    placeholder="/v1/responses"
                     monospace
                   />
                 </FormField>

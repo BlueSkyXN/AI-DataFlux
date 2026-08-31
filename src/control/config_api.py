@@ -55,13 +55,16 @@
     - .runtime: 项目根目录解析
 """
 
+import hashlib
 import os
 import shutil
+import tempfile
+import threading
+from pathlib import Path
 
 from fastapi import HTTPException
 
 from . import runtime
-
 
 # 项目根目录：
 # - 源码：仓库根
@@ -69,6 +72,88 @@ from . import runtime
 # - 可通过环境变量覆盖
 PROJECT_ROOT = str(runtime.get_project_root())
 ALLOWED_CONFIG_EXTENSIONS = {".yaml", ".yml"}
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
+class ConfigRevisionConflictError(RuntimeError):
+    """Raised when If-Match no longer matches the file on disk."""
+
+
+def _validate_yaml_path(path: Path) -> None:
+    if path.suffix.lower() not in ALLOWED_CONFIG_EXTENSIONS:
+        raise PermissionError("only YAML config files are allowed")
+
+
+def config_revision(path: str | Path) -> str:
+    """Return the SHA-256 revision of the exact config bytes."""
+
+    target = Path(path)
+    _validate_yaml_path(target)
+    digest = hashlib.sha256()
+    with target.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_workspace_config(path: str | Path) -> tuple[str, str]:
+    """Read one already-contained YAML file and return content plus revision."""
+
+    target = Path(path)
+    _validate_yaml_path(target)
+    if not target.is_file():
+        raise FileNotFoundError(str(target))
+    encoded = target.read_bytes()
+    content = encoded.decode("utf-8")
+    return content, hashlib.sha256(encoded).hexdigest()
+
+
+def write_workspace_config(
+    path: str | Path,
+    content: str,
+    *,
+    expected_revision: str,
+) -> str:
+    """Atomically replace one config after an optimistic revision check."""
+
+    target = Path(path)
+    _validate_yaml_path(target)
+    if not expected_revision:
+        raise ConfigRevisionConflictError("If-Match is required")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _CONFIG_WRITE_LOCK:
+        current_revision = config_revision(target) if target.is_file() else "missing"
+        normalized = expected_revision.strip().strip('"')
+        if normalized not in {current_revision, "*"}:
+            raise ConfigRevisionConflictError(
+                f"expected revision {normalized}, found {current_revision}"
+            )
+
+        encoded = content.encode("utf-8")
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, target)
+            try:
+                directory_fd = os.open(target.parent, os.O_RDONLY)
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_path(path: str) -> str:

@@ -4,6 +4,16 @@
 
 ## 📚 核心文档
 
+### 3.2 开发版契约
+
+- [MIGRATION_3_2.md](./MIGRATION_3_2.md) - 3.2 严格配置迁移，包括 workspace、scheduler、server token、channel endpoints 和 model capabilities
+- [JOBS.md](./JOBS.md) - durable Job Repository、Worker、state/event/lease/command schema 与对外交付边界
+- [CONTROL_API.md](./CONTROL_API.md) - workspace、ETag 配置读写、Job REST/SSE、认证、错误和 CLI 自动化边界
+- [GATEWAY_API.md](./GATEWAY_API.md) - Chat Completions / Responses 透传、capability 矩阵、错误和 failover 边界
+- [RELEASE_GATES.md](./RELEASE_GATES.md) - CI、coverage、dependency audit、打包 smoke、Release/部署/UAT 证据层
+
+> 这些文档描述 `3.2.0-dev` 的当前契约。页面、类或测试存在不等于已发布、已部署或已通过业务 UAT。
+
 ### [ARCH.md](./ARCH.md) - 系统架构文档 ⭐️
 
 **完整的系统架构说明**，包含 13 个章节，2048 行详细内容：
@@ -33,7 +43,7 @@
 
 **本地 Web GUI 控制面板使用指南**：
 
-- **功能概述** - 配置编辑、进程管理、日志查看
+- **功能概述** - workspace 选择、配置编辑、durable Jobs、进程管理和日志查看
 - **快速开始** - 启动控制面板的命令和参数
 - **架构设计** - Control Server 与子进程的关系
 - **API 接口** - REST API 和 WebSocket 接口说明
@@ -101,7 +111,7 @@ python cli.py gui --port 8080  # 指定端口
 - 任务“未处理/已处理”的判定规则
 - 分片读取方案与 `task_id` 定位方式
 - 各数据源写回策略与关键差异（如缺失字段写回语义）
-- Excel 保存与 CSV 回退策略
+- Excel/CSV 原子替换与写回失败语义
 
 ---
 
@@ -143,10 +153,11 @@ python cli.py gui --port 8080  # 指定端口
 
 1. **了解系统** → 阅读 [ARCH.md](./ARCH.md) 第1章「系统概览」
 2. **配置项目** → 参考 [CONFIG.md](./CONFIG.md) 和 `config-example.yaml`
-3. **使用 GUI** → 运行 `python cli.py gui` 或参考 [GUI.md](./GUI.md)
-4. **规则路由** → 查看 [ROUTING.md](./ROUTING.md) 和 `config-example.yaml`
-5. **开发贡献** → 查看 [../CLAUDE.md](../CLAUDE.md) 了解开发流程
-6. **运行测试** → `pytest tests/` 确保代码质量
+3. **从 3.1/旧配置迁移** → 先阅读 [MIGRATION_3_2.md](./MIGRATION_3_2.md)
+4. **使用 GUI / Control API** → 运行 `python cli.py gui`，参考 [GUI.md](./GUI.md) 和 [CONTROL_API.md](./CONTROL_API.md)
+5. **规则路由** → 查看 [ROUTING.md](./ROUTING.md) 和 `config-example.yaml`
+6. **验证发布边界** → 阅读 [RELEASE_GATES.md](./RELEASE_GATES.md)
+7. **运行测试** → `pytest tests/` 确保代码质量
 
 ---
 
@@ -162,4 +173,4 @@ python cli.py gui --port 8080  # 指定端口
 
 ---
 
-*最后更新: 2026-02-04*
+*最后更新: 2026-08-30*

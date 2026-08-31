@@ -18,6 +18,19 @@ from src.gateway.service import FluxApiService
 def _write_gateway_config(tmp_path: Path, models: list[dict]) -> Path:
     config = {
         "global": {"log": {"level": "error"}},
+        "datasource": {
+            "type": "csv",
+            "engine": "pandas",
+            "concurrency": {"batch_size": 1, "max_in_flight": 1},
+        },
+        "csv": {"input_path": "input.csv"},
+        "columns_to_extract": ["input"],
+        "columns_to_write": {"result": "result"},
+        "prompt": {"template": "{input}"},
+        "workspace": {
+            "roots": {"project": "."},
+            "state_dir": ".dataflux/jobs",
+        },
         "gateway": {
             "max_connections": 10,
             "max_connections_per_host": 10,
@@ -26,7 +39,10 @@ def _write_gateway_config(tmp_path: Path, models: list[dict]) -> Path:
             "openai": {
                 "name": "openai",
                 "base_url": "https://api.example.test",
-                "api_path": "/v1/chat/completions",
+                "endpoints": {
+                    "chat_completions": "/v1/chat/completions",
+                    "responses": "/v1/responses",
+                },
                 "timeout": 60,
                 "proxy": "",
                 "ssl_verify": True,
@@ -45,9 +61,21 @@ def _model_config(
     model: str | None = None,
     weight: int = 1,
     supports_json_schema: bool = True,
-    supports_advanced_params: bool = True,
+    capabilities: list[str] | None = None,
 ) -> dict:
-    return {
+    effective_capabilities = capabilities or [
+        "chat_completions",
+        "responses",
+        "stream",
+        "multimodal",
+        "tools",
+        "n",
+        "logprobs",
+        "previous_response_id",
+    ]
+    if supports_json_schema:
+        effective_capabilities = [*effective_capabilities, "json_schema"]
+    config = {
         "id": model_id,
         "name": model_id,
         "model": model or model_id,
@@ -57,9 +85,9 @@ def _model_config(
         "weight": weight,
         "temperature": 0.3,
         "safe_rps": 100,
-        "supports_json_schema": supports_json_schema,
-        "supports_advanced_params": supports_advanced_params,
+        "capabilities": effective_capabilities,
     }
+    return config
 
 
 def _chat_request(**extra) -> ChatCompletionRequest:
@@ -106,13 +134,13 @@ def test_build_upstream_payload_forwards_extra_openai_params(tmp_path):
     payload = service._build_upstream_payload(model, request)
 
     assert payload["model"] == "model-a"
-    assert payload["messages"] == [{"role": "user", "content": "hello", "name": None}]
+    assert payload["messages"] == [{"role": "user", "content": "hello"}]
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["tools"][0]["function"]["name"] == "lookup"
     assert payload["tool_choice"] == "auto"
     assert payload["seed"] == 42
     assert payload["parallel_tool_calls"] is False
-    assert payload["metadata"] == {"trace_id": "unit-test"}
+    assert payload["metadata"] == {"trace_id": "unit-test", "empty": None}
 
 
 def test_build_upstream_payload_preserves_response_format_extra_fields(tmp_path):

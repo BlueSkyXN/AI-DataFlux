@@ -63,7 +63,6 @@
 
 import pytest
 
-
 # ==================== 工厂集成测试 ====================
 
 
@@ -508,8 +507,8 @@ class TestFeishuBitableTaskPool:
 
         assert bitable_pool._snapshot[1]["fields"]["ai_answer"] == "updated"
 
-    def test_update_task_results_write_failure_does_not_raise(self, bitable_pool):
-        """测试写回失败不会抛出异常中断主流程"""
+    def test_update_task_results_returns_failure_receipt(self, bitable_pool):
+        """写回失败必须作为逐记录 failure 交给 Runner 重试。"""
         import unittest.mock as mock
 
         with mock.patch.object(
@@ -517,13 +516,47 @@ class TestFeishuBitableTaskPool:
             "bitable_batch_update",
             side_effect=Exception("network down"),
         ):
-            bitable_pool.update_task_results(
+            receipt = bitable_pool.update_task_results(
                 {0: {"answer": "AI 是人工智能", "category": "tech"}}
             )
 
         # 写回失败后快照应保持未更新
+        assert receipt.persisted_ids == ()
+        assert [failure.record_id for failure in receipt.failures] == [0]
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == ""
         assert bitable_pool.get_total_task_count() == 2
+
+    def test_update_task_results_keeps_partial_chunk_success(
+        self, bitable_pool, monkeypatch
+    ):
+        import unittest.mock as mock
+
+        monkeypatch.setattr("src.data.feishu.bitable.BITABLE_BATCH_UPDATE_LIMIT", 1)
+        calls = 0
+
+        async def partial(_app_token, _table_id, records):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second chunk failed")
+            return records
+
+        with mock.patch.object(
+            bitable_pool.client,
+            "bitable_batch_update",
+            side_effect=partial,
+        ):
+            receipt = bitable_pool.update_task_results(
+                {
+                    0: {"answer": "first", "category": "ok"},
+                    1: {"answer": "second", "category": "retry"},
+                }
+            )
+
+        assert receipt.persisted_ids == (0,)
+        assert [failure.record_id for failure in receipt.failures] == [1]
+        assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "first"
+        assert bitable_pool._snapshot[1]["fields"]["ai_answer"] == ""
 
 
 # ==================== Sheet TaskPool 测试 ====================

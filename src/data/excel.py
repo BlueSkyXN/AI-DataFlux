@@ -11,7 +11,7 @@ Excel 数据源任务池实现模块
     - 高性能写入: 可选 xlsxwriter，比 openpyxl 快 3 倍
     - 向量化过滤: 使用 DataFrame 原生操作，避免逐行遍历
     - 自动保存: 定时持久化，防止数据丢失
-    - 编码修复: 自动处理 Unicode 编码问题
+    - 编码安全: Unicode 写入失败时不修改结果、不切换目标并返回失败
     - CSV 兼容: 自动检测文件类型，同一接口处理 Excel 和 CSV
 
 架构设计:
@@ -69,9 +69,7 @@ Excel 数据源任务池实现模块
             - _filter_unprocessed_indices(min_idx, max_idx) -> list[int]
                 向量化过滤未处理索引（核心性能优化）
             - _save_excel() -> None
-                保存文件，含 Unicode 编码修复和 CSV 降级策略
-            - _clear_problematic_cells(df) -> tuple[df, int]
-                清空有编码问题的 AI 输出单元格
+                原子保存到配置的 Excel/CSV 目标
 
         关键属性:
             - input_path (Path): 输入文件路径
@@ -140,13 +138,29 @@ Excel 数据源任务池实现模块
     4. 自动保存在锁外执行，避免阻塞
 """
 
+import asyncio
 import logging
+import os
 import time
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .base import BaseTaskPool
-from .engines import get_engine, BaseEngine
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WriteFailure,
+    WritebackReceipt,
+)
+from .engines import (
+    BaseEngine,
+    EngineType,
+    ReaderType,
+    WriterType,
+    get_engine,
+)
 
 
 class ExcelTaskPool(BaseTaskPool):
@@ -266,9 +280,9 @@ class ExcelTaskPool(BaseTaskPool):
 
         # 获取 DataFrame 引擎 (支持高性能读写器配置)
         self.engine: BaseEngine = get_engine(
-            engine_type=engine_type,
-            excel_reader=excel_reader,
-            excel_writer=excel_writer,
+            engine_type=cast(EngineType, engine_type),
+            excel_reader=cast(ReaderType, excel_reader),
+            excel_writer=cast(WriterType, excel_writer),
         )
         logging.info(f"使用 DataFrame 引擎: {self.engine.name}")
 
@@ -528,86 +542,163 @@ class ExcelTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
-        """
-        批量写回任务结果到 DataFrame
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=False,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
 
-        将 AI 处理结果更新到内存 DataFrame 中。
-        如果达到保存间隔，自动触发文件保存。
+    async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
+        """Read a stable file page using the DataFrame index as an opaque cursor."""
 
-        Args:
-            results: 结果字典 {索引: {别名: 值, ...}}
-                例: {0: {"result": "分析结果", "score": "0.95"}}
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        if cursor is not None and (
+            not isinstance(cursor, dict) or set(cursor) != {"last_index"}
+        ):
+            raise ValueError("invalid Excel/CSV cursor")
 
-        处理逻辑:
-            1. 跳过包含 "_error" 键的失败结果
-            2. 根据 columns_to_write 映射写入对应列
-            3. 检查是否达到 save_interval，触发自动保存
+        def read_page() -> TaskBatch:
+            min_idx, max_idx = self.get_id_boundaries()
+            if max_idx < min_idx:
+                return TaskBatch(records=(), next_cursor=None)
 
-        自动保存:
-            - 保存在锁外执行，避免长时间阻塞
-            - 保存失败只记录错误，不抛出异常
+            indices = self._filter_unprocessed_indices(min_idx, max_idx)
+            if cursor is not None:
+                last_index = cursor["last_index"]
+                indices = [idx for idx in indices if idx > last_index]
+            page = indices[:limit]
 
-        注意:
-            - 结果中的别名必须在 columns_to_write 中定义
-            - 索引必须存在于 DataFrame 中
-        """
+            records: list[TaskRecord] = []
+            for raw_index in page:
+                record_id = (
+                    raw_index.item() if hasattr(raw_index, "item") else raw_index
+                )
+                row_data = self.engine.get_row(self.df, raw_index)
+                records.append(
+                    TaskRecord(
+                        record_id=record_id,
+                        data={
+                            col: self.engine.to_string(row_data.get(col, ""))
+                            for col in self.columns_to_extract
+                        },
+                    )
+                )
+
+            next_cursor = (
+                {"last_index": records[-1].record_id} if len(records) == limit else None
+            )
+            return TaskBatch(records=tuple(records), next_cursor=next_cursor)
+
+        return await asyncio.to_thread(read_page)
+
+    def update_task_results(
+        self, results: dict[int, dict[str, Any]]
+    ) -> WritebackReceipt:
+        """Update rows and acknowledge them only after an atomic file replace."""
+
+        batch_id = uuid.uuid4().hex
         if not results:
-            return
+            return WritebackReceipt(batch_id=batch_id)
 
         updated_indices: list[int] = []
-        needs_save = False
+        failures: list[WriteFailure] = []
+        original_df = self.engine.copy(self.df)
 
         try:
             with self.lock:
+                all_indices = set(self.engine.get_indices(self.df))
                 for idx, row_result in results.items():
-                    # 跳过错误结果
                     if "_error" in row_result:
                         continue
-
-                    # 检查索引是否存在
-                    all_indices = self.engine.get_indices(self.df)
                     if idx not in all_indices:
-                        logging.warning(f"尝试更新 Excel 中不存在的索引 {idx}，跳过")
+                        failures.append(
+                            WriteFailure(
+                                record_id=idx,
+                                code="record_not_found",
+                                message=f"索引 {idx} 不存在",
+                                retryable=False,
+                            )
+                        )
                         continue
 
-                    # 写入结果
-                    for alias, col_name in self.columns_to_write.items():
-                        if self.engine.has_column(self.df, col_name):
-                            value = row_result.get(alias, "")
-                            try:
+                    writable_fields = [
+                        (alias, col_name)
+                        for alias, col_name in self.columns_to_write.items()
+                        if alias in row_result
+                    ]
+                    if not writable_fields:
+                        failures.append(
+                            WriteFailure(
+                                record_id=idx,
+                                code="no_writable_fields",
+                                message="AI 结果不包含任何 columns_to_write alias",
+                                retryable=False,
+                            )
+                        )
+                        continue
+
+                    record_failed = False
+                    row_before = self.engine.get_row(self.df, idx)
+                    applied_columns: list[str] = []
+                    for alias, col_name in writable_fields:
+                        if not self.engine.has_column(self.df, col_name):
+                            record_failed = True
+                            failures.append(
+                                WriteFailure(
+                                    record_id=idx,
+                                    code="column_not_found",
+                                    message=f"输出列 {col_name} 不存在",
+                                    retryable=False,
+                                )
+                            )
+                            break
+                        try:
+                            self.df = self.engine.set_value(
+                                self.df, idx, col_name, row_result[alias]
+                            )
+                            applied_columns.append(col_name)
+                        except Exception as exc:
+                            record_failed = True
+                            failures.append(
+                                WriteFailure(
+                                    record_id=idx,
+                                    code="set_value_failed",
+                                    message=f"列 {col_name}: {exc}",
+                                )
+                            )
+                            break
+                    if record_failed:
+                        try:
+                            for col_name in applied_columns:
                                 self.df = self.engine.set_value(
-                                    self.df, idx, col_name, value
+                                    self.df,
+                                    idx,
+                                    col_name,
+                                    row_before.get(col_name),
                                 )
-                            except Exception as e:
-                                logging.warning(
-                                    f"设置索引 {idx} 列 '{col_name}' 值失败: {e}"
-                                )
+                        except Exception:
+                            self.df = original_df
+                            raise
+                    if not record_failed:
+                        updated_indices.append(idx)
 
-                    updated_indices.append(idx)
-
-                if updated_indices:
-                    logging.info(f"已在内存中更新 {len(updated_indices)} 条 Excel 记录")
-
-                    # 检查是否需要自动保存
-                    current_time = time.time()
-                    if current_time - self.last_save_time >= self.save_interval:
-                        needs_save = True
-                        self.last_save_time = current_time
-
-        except Exception as e:
-            logging.error(f"更新 Excel DataFrame 时发生错误: {e}", exc_info=True)
-            needs_save = False
-
-        # 在锁外执行保存
-        if needs_save:
-            logging.info(
-                f"达到保存间隔 ({self.save_interval}s)，准备保存 Excel 文件..."
-            )
-            try:
+            if updated_indices:
                 self._save_excel()
-            except Exception as e:
-                logging.error(f"自动保存 Excel 文件失败: {e}")
+                self.last_save_time = time.time()
+        except Exception:
+            self.df = original_df
+            raise
+
+        return WritebackReceipt(
+            batch_id=batch_id,
+            persisted_ids=tuple(updated_indices),
+            failures=tuple(failures),
+            atomic=False,
+        )
 
     def reload_task_data(self, idx: int) -> dict[str, Any] | None:
         """
@@ -658,10 +749,12 @@ class ExcelTaskPool(BaseTaskPool):
             - 调用后不应再使用此任务池实例
         """
         logging.info("正在执行 Excel 文件的最终保存操作...")
-        try:
-            self._save_excel()
-        except Exception as e:
-            logging.error(f"最终保存 Excel 文件失败: {e}")
+        self._save_excel()
+
+    def close_readonly(self) -> None:
+        """Excel token estimation owns no external handle and must not save."""
+
+        self.clear_tasks()
 
     # ==================== 内部方法 ====================
 
@@ -697,14 +790,14 @@ class ExcelTaskPool(BaseTaskPool):
 
         except Exception as e:
             logging.error(f"过滤未处理索引时出错: {e}", exc_info=True)
-            return []
+            raise
 
     def _save_excel(self) -> None:
         """
         保存文件（Excel 或 CSV）
 
-        根据文件类型和输出路径自动选择保存方式。
-        处理 Unicode 编码问题，必要时清空问题单元格或回退到 CSV。
+        根据文件类型和配置的输出路径选择保存方式。
+        只有配置目标的原子替换成功才会返回。
         """
         # 检查输出路径是否为 CSV（可能输入输出格式不同）
         output_is_csv = self.output_path.suffix.lower() == ".csv"
@@ -719,84 +812,45 @@ class ExcelTaskPool(BaseTaskPool):
 
                 # CSV 文件直接保存
                 if self._is_csv or output_is_csv:
-                    self.engine.write_csv(self.df, self.output_path)
+                    self._atomic_write(self.df, self.output_path, csv=True)
                     logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
                     return
 
-                # Excel 文件保存策略
-                # 策略1: 直接保存
-                try:
-                    self.engine.write_excel(self.df, self.output_path)
-                    logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
-                    return
-
-                except UnicodeEncodeError as e:
-                    logging.error(f"❌ Unicode 编码问题: {e}")
-                    logging.info("🧹 开始清空 AI 输出列中的问题单元格...")
-
-                    # 策略2: 清空问题单元格
-                    fixed_df = self.engine.copy(self.df)
-                    fixed_df, cleared_count = self._clear_problematic_cells(fixed_df)
-
-                    if cleared_count > 0:
-                        logging.info(
-                            f"🧹 已清空 {cleared_count} 个问题单元格，重新尝试保存..."
-                        )
-
-                        try:
-                            self.engine.write_excel(fixed_df, self.output_path)
-                            logging.info(
-                                f"✅ DataFrame 已成功保存 (已清空 {cleared_count} 个问题单元格)"
-                            )
-                            self.df = fixed_df
-                            return
-                        except UnicodeEncodeError:
-                            logging.warning(
-                                "⚠️ 清空 AI 输出列后仍有问题，可能来自原始数据"
-                            )
-
-                    # 策略3: CSV 备选方案
-                    csv_path = self.output_path.with_suffix(".csv")
-                    logging.warning(f"⚠️ Excel 保存失败，尝试保存为 CSV: {csv_path}")
-
-                    df_to_save = fixed_df if cleared_count > 0 else self.df
-                    self.engine.write_csv(df_to_save, csv_path)
-                    logging.warning(f"✅ 已保存为 CSV: {csv_path}")
+                self._atomic_write(self.df, self.output_path, csv=False)
+                logging.info(f"✅ DataFrame 已成功保存到: {self.output_path}")
+                return
 
         except Exception as e:
             logging.error(f"❌ 保存文件失败: {e}", exc_info=True)
             raise IOError(f"保存文件失败: {e}") from e
 
-    def _clear_problematic_cells(self, df: Any) -> tuple[Any, int]:
-        """
-        清空 DataFrame 中有编码问题的单元格
+    def _atomic_write(self, df: Any, destination: Path, *, csv: bool) -> None:
+        """Write beside the destination, fsync it, then atomically replace."""
 
-        只检查 AI 输出列，返回更新后的 DataFrame 和清空的单元格数量。
-        """
-        cleared_count = 0
-        ai_columns = list(self.columns_to_write.values())
-        updated_df = df
-
-        for col_name in ai_columns:
-            if not self.engine.has_column(df, col_name):
-                continue
-
-            for idx, row_data in self.engine.iter_rows(df, [col_name]):
-                value = row_data.get(col_name)
-
-                if isinstance(value, str) and value:
-                    try:
-                        value.encode("utf-8")
-                    except UnicodeEncodeError:
-                        logging.warning(
-                            f"❌ 清空问题单元格: 第 {idx} 行, '{col_name}' 列"
-                        )
-                        updated_df = self.engine.set_value(
-                            updated_df, idx, col_name, ""
-                        )
-                        cleared_count += 1
-
-        return updated_df, cleared_count
+        suffix = destination.suffix or (".csv" if csv else ".xlsx")
+        temp_path = destination.with_name(
+            f".{destination.stem}.{uuid.uuid4().hex}.tmp{suffix}"
+        )
+        try:
+            if csv:
+                self.engine.write_csv(df, temp_path)
+            else:
+                self.engine.write_excel(df, temp_path)
+            with temp_path.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temp_path, destination)
+            try:
+                directory_fd = os.open(str(destination.parent), os.O_RDONLY)
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     # ==================== Token 估算采样 ====================
 

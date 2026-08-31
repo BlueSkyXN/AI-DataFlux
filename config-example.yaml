@@ -32,6 +32,25 @@ gateway:
   max_connections: 1000          # 网关到上游的总并发连接上限
   max_connections_per_host: 1000 # 单个上游主机的并发连接上限
 
+workspace:
+  roots:
+    project: "."
+    data: "./data"
+  state_dir: "./.dataflux/jobs"
+
+scheduler:
+  max_active_jobs: auto
+  cpu_high_watermark: 85
+  memory_high_watermark: 80
+  min_free_memory_mb: 512
+  sample_interval_seconds: 2
+
+server:
+  host: "127.0.0.1"
+  control_port: 8790
+  gateway_port: 8787
+  token: ""  # DATAFLUX_TOKEN 环境变量优先
+
 # 数据源类型配置
 datasource:
   type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite, feishu_bitable, feishu_sheet
@@ -51,7 +70,8 @@ datasource:
   
   require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
   concurrency:
-    batch_size: 100        # 批处理大小（也用作最大并发任务数）
+    batch_size: 100        # 读写批次大小
+    max_in_flight: 100     # 最大 AI 并发，可由资源调度器动态下调
     save_interval: 300     # Excel文件保存间隔（秒）
     shard_size: 10000      # 默认分片大小
     min_shard_size: 1000   # 最小分片大小
@@ -146,7 +166,7 @@ validation:
 
 # 模型配置
 models:
-  - id: 1
+  - id: "model-1"
     name: "model-1"               # 模型显示名称
     model: "gpt-4-turbo"          # 实际模型标识符
     channel_id: "1"               # 所属通道ID
@@ -155,39 +175,25 @@ models:
     weight: 10                    # 调度权重（使用加权随机算法）
     temperature: 0.3              # 模型温度
     safe_rps: 5                   # 每秒安全请求数（令牌桶限流）
-    supports_json_schema: true    # 是否支持JSON Schema输出格式
-    supports_advanced_params: true  # 是否支持高级参数（presence_penalty等）
-
-  - id: 2
-    name: "model-2"
-    model: "claude-3-opus"
-    channel_id: "2"
-    api_key: "your_api_key_2"
-    timeout: 300
-    weight: 5
-    temperature: 0.3
-    safe_rps: 3
-    supports_json_schema: true
-    supports_advanced_params: false
-
-  - id: 3
-    name: "model-3"
-    model: "llama-3-70b"
-    channel_id: "3"
-    api_key: "your_api_key_3"
-    timeout: 300
-    weight: 3
-    temperature: 0.3
-    safe_rps: 10
-    supports_json_schema: false
-    supports_advanced_params: false
+    capabilities:
+      - chat_completions
+      - responses
+      - stream
+      - multimodal
+      - tools
+      - n
+      - json_schema
+      - logprobs
+      - previous_response_id
 
 # 通道配置
 channels:
   "1":
     name: "openai-api"
     base_url: "https://api.openai.com"
-    api_path: "/v1/chat/completions"
+    endpoints:
+      chat_completions: "/v1/chat/completions"
+      responses: "/v1/responses"
     timeout: 300
     proxy: ""         # 可选代理设置，例如 "http://127.0.0.1:7890"
     ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
@@ -245,7 +251,6 @@ token_estimation:
                          #   io  - 输入+输出
   sample_size: -1         # -1=全量计算(忽略处理状态), >0=采样数量
   encoding: o200k_base    # 固定使用最新编码器
-  # tiktoken_model: gpt-4o  # 可选: 当未指定 encoding 时用于选择编码器
 
 # ============================================================
 # 规则路由配置 (可选)

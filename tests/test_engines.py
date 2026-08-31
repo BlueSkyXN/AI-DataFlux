@@ -158,6 +158,14 @@ class TestPandasEngine:
 
         assert df.at[0, "answer"] == "New Answer"
 
+    def test_set_value_promotes_all_empty_numeric_column(self, pandas_engine):
+        df = pd.DataFrame({"output": [None, None]}, dtype="float64")
+
+        pandas_engine.set_value(df, 0, "output", "AI result")
+
+        assert df.at[0, "output"] == "AI result"
+        assert str(df["output"].dtype) == "object"
+
     def test_is_empty(self, pandas_engine):
         """测试空值判断"""
         assert pandas_engine.is_empty(None) is True

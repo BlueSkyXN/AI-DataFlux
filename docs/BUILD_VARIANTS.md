@@ -139,7 +139,7 @@ pyinstaller --onefile --clean \
 # 输出: gui  Start GUI control panel
 
 # 尝试启动 GUI
-./AI-DataFlux-linux-amd64-full gui --no-browser
+DATAFLUX_TOKEN=<token> ./AI-DataFlux-linux-amd64-full gui --no-browser
 # 输出: Control server started at http://127.0.0.1:8790
 ```
 
@@ -167,7 +167,7 @@ matrix:
   os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
 ```
 
-每次推送 SemVer tag（支持 `3.2.0` 和 `v3.2.0` 两种形式），或 main 分支的相关源码、依赖、前端或 workflow 发生变更时，会产出 8 个 artifact（4 平台 × 2 版本）。只有 SemVer tag 构建会进入 GitHub Release 任务。
+每次推送 SemVer tag（支持 `3.2.0` 和 `v3.2.0` 两种形式），或 main 分支的相关源码、依赖、前端或 workflow 发生变更时，PyInstaller workflow 会产出 8 个 artifact（4 平台 × 2 版本）；Nuitka workflow 另产出 4 个 Full artifact。候选版本发布核对应读取回合计 12 个产物及 checksum。只有 SemVer tag 构建会进入 GitHub Release 任务。
 
 ## 常见问题
 
@@ -190,7 +190,7 @@ A: 直接下载 Full 版替换可执行文件即可，配置文件和数据完�
 #### 测试 Full 版行为
 ```bash
 python cli.py --help  # 应显示 gui 子命令
-python cli.py gui --no-browser  # 应正常启动
+DATAFLUX_TOKEN=<token> python cli.py gui --no-browser  # 应正常启动
 ```
 
 #### 模拟 CLI 版行为

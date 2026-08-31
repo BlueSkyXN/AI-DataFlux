@@ -13,8 +13,6 @@ omit =
     tests/*
     */__pycache__/*
     */site-packages/*
-    # Gateway 模块暂时不包含在覆盖率中
-    src/gateway/*
     # Utils 工具模块
     src/utils/console.py
 

@@ -2,6 +2,8 @@
 
 本文档详细说明 AI-DataFlux 配置文件（`config.yaml`）的所有配置项，包括结构、用途、代码位置和实际影响。
 
+> **3.2 strict schema**：3.2 对未知和已移除字段采用失败而非默默忽略。从旧配置升级时必须先阅读 [MIGRATION_3_2.md](./MIGRATION_3_2.md)。Gateway 的 canonical endpoint/capability 契约见 [GATEWAY_API.md](./GATEWAY_API.md)。
+
 ---
 
 ## 目录
@@ -693,8 +695,8 @@ prompt:
 - 连接池：`psycopg2.pool.ThreadedConnectionPool`
 
 **特殊特性**：
-- 使用 `psycopg2.extras.execute_batch()` 批量更新
-- 事务自动管理
+- 同一事务内逐条确认 `UPDATE` 实际命中记录
+- 任一执行失败或未命中时整体 rollback，不签发 persisted receipt
 
 **相关文件**：
 - `src/data/postgresql.py` - PostgreSQL 任务池实现
@@ -879,17 +881,20 @@ prompt:
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
-| `id` | 整数 | ✓ | 模型唯一 ID |
+| `id` | 字符串 | ✓ | 模型唯一 ID，不接受 YAML 数字 |
 | `name` | 字符串 | ✓ | 模型显示名称 |
 | `model` | 字符串 | ✓ | 实际模型标识符（如 `gpt-4-turbo`） |
 | `channel_id` | 字符串 | ✓ | 所属通道 ID |
 | `api_key` | 字符串 | ✓ | API 密钥 |
-| `timeout` | 整数 | ✓ | 超时时间（秒） |
-| `weight` | 整数 | ✓ | 调度权重（加权随机算法） |
-| `temperature` | 浮点数 | ✓ | 模型默认温度参数（0-1），仅在请求未提供 temperature 时生效 |
-| `safe_rps` | 整数 | ✓ | 每秒安全请求数（令牌桶容量 = safe_rps × 2） |
-| `supports_json_schema` | 布尔值 | ✓ | 是否支持 JSON Schema |
-| `supports_advanced_params` | 布尔值 | ✓ | 是否支持高级参数（presence_penalty 等） |
+| `timeout` | 正整数 | ✓ | 超时时间（秒） |
+| `weight` | 非负整数 | ✓ | 调度权重（加权随机算法）；`0` 表示不参与选择 |
+| `temperature` | 数字 | ✓ | 模型默认温度参数（0-2），仅在请求未提供 temperature 时生效 |
+| `safe_rps` | 正数 | ✓ | 每秒安全请求数（令牌桶容量 = safe_rps × 2） |
+| `capabilities` | 非空字符串列表 | ✓ | 模型的可路由能力；取值见下表 |
+
+`capabilities` 只能使用 `chat_completions`、`responses`、`stream`、`multimodal`、`tools`、`n`、`logprobs`、`json_schema`、`previous_response_id`。不接受 `supports_json_schema`、`supports_advanced_params`、布尔映射或别名。
+
+每个 model 的 `id`、`name` 和物理 `model` 都会参与请求 alias 解析；跨 model 的任意 alias 冲突会在启动前报错，不能依赖配置顺序覆盖。
 
 **代码位置**：
 - 读取：`src/gateway/service.py:107-146`
@@ -949,7 +954,7 @@ for attempt in range(3):  # 最多尝试 3 个模型
         dispatcher.mark_model_failed(model)
 ```
 
-**影响**：首选模型失败 → 自动切换其他模型
+**影响**：仅当尚未向客户端开始响应，且发生连接错误、`429` 或可重试 `500/502/503/504` 时，才可切换到其他满足全部 capability 的模型。非重试 `4xx` 和已开始的 SSE 不 failover。
 
 **相关文件**：
 - `src/gateway/service.py` - 模型管理和选择
@@ -970,11 +975,13 @@ for attempt in range(3):  # 最多尝试 3 个模型
 |------|------|------|--------|------|
 | `name` | 字符串 | ✓ | - | 通道名称 |
 | `base_url` | 字符串 | ✓ | - | API 基础 URL |
-| `api_path` | 字符串 | ✓ | - | API 路径（如 `/v1/chat/completions`） |
-| `timeout` | 整数 | ✓ | - | 超时时间（秒） |
+| `endpoints` | 字典 | ✓ | - | 可包含 `chat_completions` 和/或 `responses` 路径 |
+| `timeout` | 正整数 | ✓ | - | 超时时间（秒） |
 | `proxy` | 字符串 | - | `""` | 代理地址（如 `http://127.0.0.1:7890`） |
 | `ssl_verify` | 布尔值 | - | `true` | 是否验证 SSL 证书 |
 | `ip_pool` | 字符串数组 | - | - | IP 池（轮询 DNS） |
+
+`api_path` 和 `responses_api_path` 已移除。channel 不声明 capabilities；能力只属于 model，并且必须与 channel 已配置 endpoint 一致。
 
 **代码位置**：
 - 读取：`src/gateway/service.py:147-167`
@@ -1338,7 +1345,7 @@ GUI 控制面板的 `POST /api/config/validate` 也调用同一套 `validate_con
 ```bash
 python cli.py gui              # 默认配置（端口 8790，自动打开浏览器）
 python cli.py gui --port 8080  # 自定义端口
-python cli.py gui --no-browser # 不自动打开浏览器
+DATAFLUX_TOKEN=<token> python cli.py gui --no-browser # 不自动打开浏览器
 ```
 
 ### 环境变量
@@ -1348,6 +1355,7 @@ python cli.py gui --no-browser # 不自动打开浏览器
 | `DATAFLUX_PROJECT_ROOT` | 覆盖项目根目录 | 自动检测 | `/path/to/project` |
 | `AI_DATAFLUX_PROJECT_ROOT` | 同上（别名） | 自动检测 | `/path/to/project` |
 | `DATAFLUX_GUI_CORS_ORIGINS` | CORS 白名单（逗号分隔） | `http://127.0.0.1:5173,http://localhost:5173` | `http://127.0.0.1:5173` |
+| `DATAFLUX_TOKEN` | Control/Gateway 统一 Bearer token，优先于 `server.token` | loopback 上可临时生成 | `your-strong-token` |
 
 **使用示例**：
 ```bash
@@ -1355,7 +1363,8 @@ python cli.py gui --no-browser # 不自动打开浏览器
 DATAFLUX_PROJECT_ROOT=/path/to/project python cli.py gui
 
 # 自定义 CORS 白名单（开发调试用）
-DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
+DATAFLUX_TOKEN=<token> DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 \
+  python cli.py gui --no-browser
 ```
 
 ### 进度文件
@@ -1372,11 +1381,12 @@ DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
 **文件格式**：
 ```json
 {
-  "total": 1000,                // 总任务数
-  "completed": 250,             // 已完成
-  "failed": 5,                  // 失败数
-  "success": 245,               // 成功数
-  "ts": 1707000000.0            // 更新时间戳
+  "total": 1000,
+  "processed": 245,
+  "active": 20,
+  "shard": "2/4",
+  "errors": 5,
+  "ts": 1707000000.0
 }
 ```
 
@@ -1388,13 +1398,15 @@ DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
 **超时时间**：15 秒未更新视为过期（返回 None）
 
 **代码位置**：
-- 写入：`src/core/processor.py:_update_progress_file()`
-- 读取：`src/control/process_manager.py:_read_progress_file()`
+- 写入：`src/core/processor.py:_write_progress()`
+- 读取：`src/control/process_manager.py:_read_process_progress()`
 - 路径解析：`src/control/runtime.py:get_project_root()`
 
 ### API 接口
 
 详细的 API 接口说明请参考 [GUI.md](./GUI.md#api-接口)。
+
+> `.dataflux_progress.json` 是旧 Dashboard 快照，不是 3.2 durable Job state。Job 的 `state.json` / `events.jsonl` schema 以 [JOBS.md](./JOBS.md) 为准。
 
 ---
 

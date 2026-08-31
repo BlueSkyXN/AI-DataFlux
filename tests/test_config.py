@@ -23,9 +23,35 @@
         test_prompt_config         验证提示词配置包含 template 或 system_prompt
 """
 
+import copy
+
 import pytest
 from pathlib import Path
 import yaml
+
+
+def _add_valid_gateway_config(config):
+    config["channels"] = {
+        "openai": {
+            "base_url": "https://api.example.test",
+            "endpoints": {"chat_completions": "/v1/chat/completions"},
+            "timeout": 60,
+        }
+    }
+    config["models"] = [
+        {
+            "id": "model-1",
+            "name": "model-1",
+            "model": "upstream-model-1",
+            "channel_id": "openai",
+            "api_key": "test-key",
+            "timeout": 60,
+            "weight": 1,
+            "temperature": 0.5,
+            "safe_rps": 10,
+            "capabilities": ["chat_completions"],
+        }
+    ]
 
 
 class TestConfigLoading:
@@ -160,8 +186,10 @@ class TestConfigSemanticValidation:
 
         assert any("prompt.template" in error for error in result["errors"])
 
-    def test_validate_config_warns_ignored_legacy_concurrency_keys(self, sample_config):
-        """测试已知会被忽略的旧并发配置键会给出 warning"""
+    def test_validate_config_rejects_removed_legacy_concurrency_keys(
+        self, sample_config
+    ):
+        """v3.2 单一 schema 必须拒绝旧并发配置键。"""
         from src.config import validate_config
 
         sample_config["datasource"]["concurrency"]["max_workers"] = 8
@@ -169,9 +197,8 @@ class TestConfigSemanticValidation:
 
         result = validate_config(sample_config)
 
-        assert not result["errors"]
-        assert any("max_workers" in warning for warning in result["warnings"])
-        assert any("retry_times" in warning for warning in result["warnings"])
+        assert any("max_workers" in error for error in result["errors"])
+        assert any("retry_times" in error for error in result["errors"])
 
     def test_validate_config_rejects_missing_routing_profile(
         self, sample_config, tmp_path
@@ -249,3 +276,364 @@ class TestConfigSemanticValidation:
         result = validate_config(sample_config, config_path)
 
         assert any("仅允许 prompt/validation" in error for error in result["errors"])
+
+    def test_validate_config_accepts_canonical_gateway_contract(self, sample_config):
+        from src.config import validate_config
+
+        sample_config["channels"] = {
+            "openai": {
+                "name": "OpenAI",
+                "base_url": "https://api.example.test",
+                "endpoints": {
+                    "chat_completions": "/v1/chat/completions",
+                    "responses": "/v1/responses",
+                },
+            }
+        }
+        sample_config["models"] = [
+            {
+                "id": "model-a",
+                "name": "Model A",
+                "model": "upstream-a",
+                "channel_id": "openai",
+                "api_key": "local-test-key",
+                "capabilities": [
+                    "chat_completions",
+                    "responses",
+                    "stream",
+                    "tools",
+                    "previous_response_id",
+                ],
+            }
+        ]
+
+        assert validate_config(sample_config)["errors"] == []
+
+    @pytest.mark.parametrize(
+        ("section", "legacy_key"),
+        [
+            ("channel", "api_path"),
+            ("model", "supports_json_schema"),
+            ("token", "tiktoken_model"),
+        ],
+    )
+    def test_validate_config_rejects_removed_gateway_and_token_keys(
+        self, sample_config, section, legacy_key
+    ):
+        from src.config import validate_config
+
+        sample_config["channels"] = {
+            "openai": {
+                "name": "OpenAI",
+                "base_url": "https://api.example.test",
+                "endpoints": {"chat_completions": "/v1/chat/completions"},
+            }
+        }
+        sample_config["models"] = [
+            {
+                "id": "model-a",
+                "name": "Model A",
+                "model": "upstream-a",
+                "channel_id": "openai",
+                "api_key": "local-test-key",
+                "capabilities": ["chat_completions"],
+            }
+        ]
+        if section == "channel":
+            sample_config["channels"]["openai"][legacy_key] = "/legacy"
+        elif section == "model":
+            sample_config["models"][0][legacy_key] = True
+        else:
+            sample_config.setdefault("token_estimation", {})[legacy_key] = "gpt-4"
+
+        result = validate_config(sample_config)
+        assert any(legacy_key in error for error in result["errors"])
+
+    def test_model_endpoint_capability_requires_channel_endpoint(self, sample_config):
+        from src.config import validate_config
+
+        sample_config["channels"] = {
+            "openai": {
+                "name": "OpenAI",
+                "base_url": "https://api.example.test",
+                "endpoints": {"chat_completions": "/v1/chat/completions"},
+            }
+        }
+        sample_config["models"] = [
+            {
+                "id": "model-a",
+                "name": "Model A",
+                "model": "upstream-a",
+                "channel_id": "openai",
+                "api_key": "local-test-key",
+                "capabilities": ["responses"],
+            }
+        ]
+
+        result = validate_config(sample_config)
+        assert any("endpoint capability" in error for error in result["errors"])
+
+    def test_workspace_resolution_rejects_symlink_escape(self, tmp_path):
+        from src.config import resolve_workspace_path
+        from src.models.errors import ConfigError
+
+        root = tmp_path / "root"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        try:
+            (root / "escape").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+        config = {"workspace": {"roots": {"project": str(root)}}}
+
+        with pytest.raises(ConfigError, match="超出允许根目录"):
+            resolve_workspace_path(config, "project", "escape/file.yaml")
+
+    def test_access_token_priority_and_non_loopback_requirement(self, monkeypatch):
+        from src.config import resolve_access_token
+        from src.models.errors import ConfigError
+
+        config = {"server": {"token": "yaml-token"}}
+        monkeypatch.setenv("DATAFLUX_TOKEN", "env-token")
+        assert resolve_access_token(config, host="0.0.0.0").value == "env-token"
+        monkeypatch.delenv("DATAFLUX_TOKEN")
+        assert resolve_access_token(config, host="0.0.0.0").value == "yaml-token"
+        with pytest.raises(ConfigError):
+            resolve_access_token(
+                {"server": {"token": ""}},
+                host="0.0.0.0",
+                allow_generate_loopback=True,
+            )
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda c: c.update({"unknown_top_level": True}),
+            lambda c: c["global"]["log"].update(
+                {"level": "verbose", "format": "xml", "output": "remote"}
+            ),
+            lambda c: c["datasource"].update(
+                {
+                    "engine": "spark",
+                    "excel_reader": "bad",
+                    "excel_writer": "bad",
+                    "require_all_input_fields": "yes",
+                }
+            ),
+            lambda c: c["datasource"]["concurrency"].update(
+                {
+                    "batch_size": 0,
+                    "max_in_flight": False,
+                    "save_interval": -1,
+                    "max_connections": 0,
+                    "max_connections_per_host": -1,
+                    "api_pause_duration": 0,
+                }
+            ),
+            lambda c: c["datasource"]["concurrency"].update(
+                {"min_shard_size": 10, "max_shard_size": 1}
+            ),
+            lambda c: c["datasource"]["concurrency"].update(
+                {"retry_limits": {"api_error": -1}}
+            ),
+            lambda c: c.update(
+                {"columns_to_extract": [""], "columns_to_write": {"": ""}}
+            ),
+            lambda c: c["prompt"].update(
+                {
+                    "required_fields": "answer",
+                    "use_json_schema": "yes",
+                    "temperature_override": "yes",
+                    "temperature": 3,
+                }
+            ),
+            lambda c: c.update({"validation": {"enabled": "yes", "field_rules": []}}),
+            lambda c: c.update(
+                {"validation": {"enabled": True, "field_rules": {"x": "bad"}}}
+            ),
+            lambda c: c.update(
+                {
+                    "token_estimation": {
+                        "mode": "bad",
+                        "sample_size": 0,
+                        "encoding": "",
+                    }
+                }
+            ),
+            lambda c: c.update(
+                {"gateway": {"max_connections": 0, "max_connections_per_host": 0}}
+            ),
+            lambda c: c.update(
+                {
+                    "scheduler": {
+                        "max_active_jobs": 0,
+                        "cpu_high_watermark": 101,
+                        "memory_high_watermark": 0,
+                        "min_free_memory_mb": -1,
+                        "sample_interval_seconds": 0,
+                    }
+                }
+            ),
+            lambda c: c.update(
+                {
+                    "server": {
+                        "host": "",
+                        "control_port": 0,
+                        "gateway_port": 70000,
+                    }
+                }
+            ),
+            lambda c: c.update({"workspace": {"roots": {}, "state_dir": "/outside"}}),
+            lambda c: c.update(
+                {
+                    "workspace": {
+                        "roots": {"bad/id": "", "project": "."},
+                        "state_dir": "/outside",
+                    }
+                }
+            ),
+            lambda c: c.update(
+                {
+                    "datasource": {"type": "mysql", "concurrency": {}},
+                    "mysql": {},
+                }
+            ),
+            lambda c: c.update(
+                {
+                    "datasource": {"type": "feishu_bitable", "concurrency": {}},
+                    "feishu": {},
+                }
+            ),
+            lambda c: c.update({"channels": [], "models": {}}),
+        ],
+        ids=lambda mutate: str(id(mutate)),
+    )
+    def test_strict_schema_rejects_invalid_known_values(self, sample_config, mutate):
+        from src.config import validate_config
+
+        config = copy.deepcopy(sample_config)
+        mutate(config)
+        assert validate_config(config)["errors"]
+
+    def test_strict_channel_and_model_shape_errors(self, sample_config):
+        from src.config import validate_config
+
+        sample_config["channels"] = {
+            1: "not-a-map",
+            "openai": {
+                "base_url": "",
+                "endpoints": {
+                    "chat_completions": "",
+                    "unknown": "/v1/unknown",
+                },
+                "unknown": True,
+            },
+        }
+        sample_config["models"] = [
+            {
+                "id": "duplicate",
+                "name": "",
+                "model": "model",
+                "channel_id": "missing",
+                "capabilities": ["responses", "responses", "unknown"],
+                "legacy": True,
+            },
+            {
+                "id": "duplicate",
+                "name": "second",
+                "model": "model",
+                "channel_id": "openai",
+                "capabilities": ["previous_response_id"],
+            },
+        ]
+
+        errors = validate_config(sample_config)["errors"]
+        assert any("channel ID" in error for error in errors)
+        assert any("重复" in error for error in errors)
+        assert any("previous_response_id" in error for error in errors)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("timeout", 0),
+            ("timeout", "60"),
+            ("weight", -1),
+            ("weight", 1.5),
+            ("temperature", 3),
+            ("temperature", "0.5"),
+            ("safe_rps", 0),
+            ("safe_rps", "10"),
+        ],
+    )
+    def test_strict_model_numeric_fields(self, sample_config, field, value):
+        from src.config import validate_config
+
+        _add_valid_gateway_config(sample_config)
+        sample_config["models"][0][field] = value
+
+        errors = validate_config(sample_config)["errors"]
+        assert any(f"models[0].{field}" in error for error in errors)
+
+    @pytest.mark.parametrize("value", [0, -1, "60", 1.5])
+    def test_strict_channel_timeout(self, sample_config, value):
+        from src.config import validate_config
+
+        _add_valid_gateway_config(sample_config)
+        sample_config["channels"]["openai"]["timeout"] = value
+
+        errors = validate_config(sample_config)["errors"]
+        assert any("channels.openai.timeout" in error for error in errors)
+
+    def test_strict_model_aliases_must_be_unambiguous(self, sample_config):
+        from src.config import validate_config
+
+        _add_valid_gateway_config(sample_config)
+        duplicate = copy.deepcopy(sample_config["models"][0])
+        duplicate.update({"id": "model-2", "channel_id": "openai"})
+        sample_config["models"].append(duplicate)
+
+        errors = validate_config(sample_config)["errors"]
+        assert any("alias" in error for error in errors)
+
+    def test_file_logging_without_path_warns_and_merge_get_nested_cover_defaults(
+        self, sample_config
+    ):
+        from src.config import get_nested, merge_config, validate_config
+
+        sample_config["global"]["log"] = {"output": "file"}
+        result = validate_config(sample_config)
+        assert any("file_path" in warning for warning in result["warnings"])
+        assert get_nested({"a": {"b": 1}}, "a", "b") == 1
+        assert get_nested({"a": 1}, "a", "b", default="missing") == "missing"
+        assert merge_config({"a": {"b": 1}, "keep": True}, {"a": {"c": 2}}) == {
+            "a": {"b": 1, "c": 2},
+            "keep": True,
+        }
+
+    def test_loopback_token_generation_checker_and_redaction(self, monkeypatch):
+        from src.config import (
+            is_loopback_host,
+            make_token_checker,
+            redact_sensitive_text,
+            resolve_access_token,
+        )
+
+        monkeypatch.delenv("DATAFLUX_TOKEN", raising=False)
+        assert is_loopback_host("localhost") is True
+        assert is_loopback_host("127.0.0.1") is True
+        assert is_loopback_host("8.8.8.8") is False
+        assert is_loopback_host("not-an-ip") is False
+        generated = resolve_access_token({"server": {"token": ""}}, host="127.0.0.1")
+        assert generated.generated is True
+        checker = make_token_checker(generated)
+        assert checker(generated.value) is True
+        assert checker("wrong-token") is False
+        assert checker("") is False
+        redacted = redact_sensitive_text(
+            "Bearer bearer-secret api_key=key-secret exact-secret",
+            known_secrets=("", "exact-secret"),
+        )
+        assert "bearer-secret" not in redacted
+        assert "key-secret" not in redacted
+        assert "exact-secret" not in redacted

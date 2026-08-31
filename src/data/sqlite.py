@@ -148,14 +148,22 @@ WAL 模式优化:
     4. 数据库文件需要写权限
 """
 
+import asyncio
 import logging
 import re
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
 from .base import BaseTaskPool
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WritebackReceipt,
+)
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -429,26 +437,22 @@ class SQLiteTaskPool(BaseTaskPool):
         获取未处理任务总数
 
         Returns:
-            int: 未处理任务数量，查询失败返回 0
+            int: 未处理任务数量；查询失败时抛出异常
         """
+        conn = SQLiteConnectionManager.get_connection()
+        cursor = conn.cursor()
         try:
-            conn = SQLiteConnectionManager.get_connection()
-            cursor = conn.cursor()
-
             where_clause = self._build_unprocessed_condition()
             sql = f"SELECT COUNT(*) as count FROM [{self.table_name}] WHERE {where_clause}"
 
             cursor.execute(sql)
             result = cursor.fetchone()
             count = result["count"] if result else 0
-            cursor.close()
 
             logging.info(f"SQLite 中未处理的任务总数: {count}")
             return count
-
-        except Exception as e:
-            logging.error(f"获取总任务数时出错: {e}")
-            return 0
+        finally:
+            cursor.close()
 
     def get_processed_task_count(self) -> int:
         """
@@ -457,28 +461,24 @@ class SQLiteTaskPool(BaseTaskPool):
         统计所有输出列都非空的记录数。
 
         Returns:
-            int: 已处理任务数量，查询失败返回 0
+            int: 已处理任务数量；查询失败时抛出异常
         """
+        conn = SQLiteConnectionManager.get_connection()
+        cursor = conn.cursor()
         try:
-            conn = SQLiteConnectionManager.get_connection()
-            cursor = conn.cursor()
-
             where_clause = self._build_processed_condition()
             sql = f"SELECT COUNT(*) as count FROM [{self.table_name}] WHERE {where_clause}"
 
             cursor.execute(sql)
             result = cursor.fetchone()
             count = result["count"] if result else 0
-            cursor.close()
 
             logging.info(f"SQLite 中已处理的任务总数: {count}")
             return count
+        finally:
+            cursor.close()
 
-        except Exception as e:
-            logging.error(f"获取已处理任务数时出错: {e}")
-            return 0
-
-    def get_id_boundaries(self) -> tuple[int, int]:
+    def get_id_boundaries(self) -> tuple[Any, Any]:
         """
         获取表中 ID 的边界值
 
@@ -498,8 +498,8 @@ class SQLiteTaskPool(BaseTaskPool):
             cursor.close()
 
             if result and result["min_id"] is not None and result["max_id"] is not None:
-                min_id = int(result["min_id"])
-                max_id = int(result["max_id"])
+                min_id = result["min_id"]
+                max_id = result["max_id"]
                 logging.info(f"SQLite ID 范围: {min_id} - {max_id}")
                 return (min_id, max_id)
             else:
@@ -510,7 +510,7 @@ class SQLiteTaskPool(BaseTaskPool):
             logging.error(f"获取 ID 边界时出错: {e}")
             return (0, 0)
 
-    def initialize_shard(self, shard_id: int, min_id: int, max_id: int) -> int:
+    def initialize_shard(self, shard_id: int, min_id: Any, max_id: Any) -> int:
         """
         初始化分片，从数据库加载指定 ID 范围的未处理任务
 
@@ -585,7 +585,62 @@ class SQLiteTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=True,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
+
+    async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
+        """Read a stable SQLite keyset page with an opaque JSON cursor."""
+
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        if cursor is not None and (
+            not isinstance(cursor, dict) or set(cursor) != {"last_id"}
+        ):
+            raise ValueError("invalid SQLite cursor")
+
+        def read_page() -> TaskBatch:
+            connection = SQLiteConnectionManager.get_connection()
+            db_cursor = connection.cursor()
+            try:
+                columns = ", ".join(f"[{col}]" for col in self.select_columns)
+                where = self._build_unprocessed_condition()
+                params: list[Any] = []
+                keyset = ""
+                if cursor is not None:
+                    keyset = "id > ? AND "
+                    params.append(cursor["last_id"])
+                params.append(limit)
+                db_cursor.execute(
+                    f"SELECT {columns} FROM [{self.table_name}] "
+                    f"WHERE {keyset}{where} ORDER BY id ASC LIMIT ?",
+                    tuple(params),
+                )
+                rows = db_cursor.fetchall()
+            finally:
+                db_cursor.close()
+            records = tuple(
+                TaskRecord(
+                    record_id=row["id"],
+                    data={col: row[col] for col in self.columns_to_extract},
+                )
+                for row in rows
+            )
+            next_cursor = (
+                {"last_id": records[-1].record_id} if len(records) == limit else None
+            )
+            return TaskBatch(records=records, next_cursor=next_cursor)
+
+        return await asyncio.to_thread(read_page)
+
+    def update_task_results(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         """
         批量写回任务结果到数据库
 
@@ -601,63 +656,43 @@ class SQLiteTaskPool(BaseTaskPool):
             - ROLLBACK: 发生错误时回滚
         """
         if not results:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
 
+        conn = SQLiteConnectionManager.get_connection()
+        cursor = conn.cursor()
+        persisted_ids: list[Any] = []
         try:
-            conn = SQLiteConnectionManager.get_connection()
-            cursor = conn.cursor()
-
-            success_count = 0
-            error_count = 0
-
-            # 开始事务
             cursor.execute("BEGIN TRANSACTION")
+            for record_id, row_result in results.items():
+                if "_error" in row_result:
+                    continue
+                set_parts: list[str] = []
+                params: list[Any] = []
+                for alias, col_name in self.columns_to_write.items():
+                    if alias in row_result:
+                        set_parts.append(f"[{col_name}] = ?")
+                        params.append(row_result[alias])
+                if not set_parts:
+                    continue
+                statement = f"UPDATE [{self.table_name}] SET {', '.join(set_parts)} WHERE id = ?"
+                params.append(record_id)
+                cursor.execute(statement, tuple(params))
+                if cursor.rowcount != 1:
+                    raise sqlite3.IntegrityError(
+                        f"记录 {record_id} 更新行数异常: {cursor.rowcount}"
+                    )
+                persisted_ids.append(record_id)
+            cursor.execute("COMMIT")
+        except Exception:
+            cursor.execute("ROLLBACK")
+            logging.error("SQLite 批量更新失败，已回滚", exc_info=True)
+            raise
+        finally:
+            cursor.close()
 
-            try:
-                for record_id, row_result in results.items():
-                    if "_error" in row_result:
-                        continue
+        return WritebackReceipt.persisted(uuid.uuid4().hex, persisted_ids, atomic=True)
 
-                    # 构建 UPDATE 语句
-                    set_parts = []
-                    params = []
-
-                    for alias, col_name in self.columns_to_write.items():
-                        if alias in row_result:
-                            set_parts.append(f"[{col_name}] = ?")
-                            params.append(row_result[alias])
-
-                    if not set_parts:
-                        continue
-
-                    sql = f"UPDATE [{self.table_name}] SET {', '.join(set_parts)} WHERE id = ?"
-                    params.append(record_id)
-
-                    try:
-                        cursor.execute(sql, tuple(params))
-                        success_count += 1
-                    except sqlite3.Error as e:
-                        logging.error(f"更新记录 {record_id} 失败: {e}")
-                        error_count += 1
-
-                # 提交事务
-                cursor.execute("COMMIT")
-                logging.info(
-                    f"SQLite 更新完成，成功: {success_count}, 失败: {error_count}"
-                )
-
-            except Exception as e:
-                cursor.execute("ROLLBACK")
-                logging.error(f"SQLite 批量更新失败，已回滚: {e}")
-                raise
-
-            finally:
-                cursor.close()
-
-        except Exception as e:
-            logging.error(f"更新 SQLite 记录失败: {e}")
-
-    def reload_task_data(self, record_id: int) -> dict[str, Any] | None:
+    def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
 

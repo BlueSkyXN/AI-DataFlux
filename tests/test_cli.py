@@ -133,6 +133,9 @@ class TestCLI:
         assert "version" in result.stdout
         assert "check" in result.stdout
         assert "gui" in result.stdout
+        assert "worker" in result.stdout
+        assert "job" in result.stdout
+        assert "config" in result.stdout
 
     def test_process_help(self):
         """测试 process 子命令帮助"""
@@ -239,7 +242,7 @@ prompt:
             encoding="utf-8",
         )
 
-        assert result.returncode == 1
+        assert result.returncode == 2
         assert "Config invalid" in result.stdout
         assert "datasource.type" in result.stdout
         assert "batch_size" in result.stdout
@@ -303,3 +306,113 @@ prompt:
         assert "in" in result.stdout
         assert "out" in result.stdout
         assert "io" in result.stdout
+
+    def test_config_validate_json_has_stable_stdout(self, sample_config_file):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "config",
+                "validate",
+                "--config",
+                str(sample_config_file),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        assert payload["valid"] is True
+        assert payload["errors"] == []
+
+    def test_process_validate_json_keeps_diagnostics_off_stdout(
+        self, sample_config_file
+    ):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "process",
+                "--config",
+                str(sample_config_file),
+                "--validate",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0
+        assert json.loads(result.stdout)["valid"] is True
+        assert "Current limits" not in result.stdout
+
+    def test_local_job_json_lifecycle(self, sample_config, tmp_path):
+        input_path = tmp_path / "input.xlsx"
+        input_path.write_bytes(b"placeholder")
+        sample_config["excel"]["input_path"] = str(input_path)
+        sample_config["workspace"] = {
+            "roots": {"project": str(tmp_path)},
+            "state_dir": ".dataflux/jobs",
+        }
+        sample_config["datasource"]["concurrency"]["max_in_flight"] = 2
+        config_path = tmp_path / "job.yaml"
+        config_path.write_text(
+            yaml.safe_dump(sample_config, allow_unicode=True), encoding="utf-8"
+        )
+
+        submitted = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "job",
+                "submit",
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert submitted.returncode == 0, submitted.stderr
+        job_id = json.loads(submitted.stdout)["job_id"]
+
+        cancelled = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "job",
+                "cancel",
+                job_id,
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert cancelled.returncode == 0
+        assert json.loads(cancelled.stdout)["status"] == "cancelled"
+
+        status = subprocess.run(
+            [
+                sys.executable,
+                "cli.py",
+                "job",
+                "status",
+                job_id,
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert status.returncode == 0
+        assert json.loads(status.stdout)["status"] == "cancelled"

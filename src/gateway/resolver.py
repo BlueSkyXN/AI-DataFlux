@@ -128,7 +128,7 @@ class RoundRobinResolver(AbstractResolver):
         self._lock = Lock()
 
         # 延迟创建默认解析器（需要在事件循环中创建）
-        self._default_resolver: aiohttp.DefaultResolver | None = None
+        self._default_resolver: AbstractResolver | None = None
 
         # 记录初始化信息
         if self._ip_pools:
@@ -138,7 +138,7 @@ class RoundRobinResolver(AbstractResolver):
             for host, ips in self._ip_pools.items():
                 logging.info(f"  - {host}: {len(ips)} 个 IP")
 
-    def _get_default_resolver(self) -> aiohttp.DefaultResolver:
+    def _get_default_resolver(self) -> AbstractResolver:
         """
         获取或创建默认解析器
 

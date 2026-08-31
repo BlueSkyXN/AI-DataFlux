@@ -12,8 +12,10 @@ FastAPI 应用创建和路由定义模块
 
 API 路由:
     POST /v1/chat/completions - 聊天补全（支持流式/非流式）
+    POST /v1/responses        - Responses API（支持流式/非流式）
     GET  /v1/models          - 列出可用模型（OpenAI 兼容格式）
     GET  /admin/models       - 管理接口：模型详情和统计
+    GET  /admin/capabilities - 管理接口：有效能力与上游 endpoint
     GET  /admin/health       - 健康检查
     GET  /                   - 根路径，返回网关信息
 
@@ -72,28 +74,61 @@ API 路由:
 """
 
 import argparse
+import inspect
 import logging
+import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, AsyncIterable, Union
+from pathlib import Path
+from typing import AsyncGenerator, AsyncIterable, Awaitable, Callable, Union
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from src import __version__
+from src.config import (
+    DEFAULT_CONFIG,
+    load_config,
+    make_token_checker,
+    merge_config,
+    resolve_access_token,
+)
 
-from .service import FluxApiService
+from .service import FluxApiService, GatewayAPIError
 from .schemas import (
     ChatCompletionRequest,
-    ChatCompletionResponse,
     HealthResponse,
     ModelsResponse,
     ModelInfo,
+    ResponsesRequest,
 )
-
 
 # 全局服务实例，在应用启动时初始化
 _service: FluxApiService | None = None
+IncomingTokenChecker = Callable[[str], bool | Awaitable[bool]]
+
+
+def allow_all_incoming_tokens(_token: str) -> bool:
+    """默认兼容策略；主程序可在 create_app 时注入实际 token 检查器。"""
+    return True
+
+
+def _extract_incoming_bearer_token(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+async def _check_incoming_token(
+    checker: IncomingTokenChecker,
+    token: str,
+) -> bool:
+    result = checker(token)
+    if inspect.isawaitable(result):
+        return bool(await result)
+    return bool(result)
 
 
 def get_service() -> FluxApiService:
@@ -145,7 +180,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logging.info("FluxApiService 已关闭")
 
 
-def create_app(config_path: str) -> FastAPI:
+def create_app(
+    config_path: str,
+    incoming_token_checker: IncomingTokenChecker | None = None,
+) -> FastAPI:
     """
     创建并配置 FastAPI 应用实例
 
@@ -174,6 +212,16 @@ def create_app(config_path: str) -> FastAPI:
         version=__version__,
         lifespan=lifespan,  # 使用生命周期管理器
     )
+    if incoming_token_checker is None:
+        merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+        access_token = resolve_access_token(
+            merged_config, host="127.0.0.1", allow_generate_loopback=True
+        )
+        incoming_token_checker = make_token_checker(access_token)
+        app.state.access_token = access_token
+    else:
+        app.state.access_token = None
+    app.state.incoming_token_checker = incoming_token_checker
 
     # 注册所有 API 路由
     _register_routes(app)
@@ -210,12 +258,28 @@ def _register_routes(app: FastAPI) -> None:
                 status_code=503,
                 content={"error": "Service not initialized"},
             )
+        if request.url.path.startswith(("/v1/", "/admin/")):
+            token = _extract_incoming_bearer_token(request)
+            checker = request.app.state.incoming_token_checker
+            if not await _check_incoming_token(checker, token):
+                return JSONResponse(
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                    content={
+                        "error": {
+                            "message": "Invalid authentication credentials",
+                            "type": "authentication_error",
+                            "param": None,
+                            "code": "invalid_api_key",
+                        }
+                    },
+                )
         return await call_next(request)
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completion(
         request: ChatCompletionRequest,
-    ) -> Union[ChatCompletionResponse, StreamingResponse]:
+    ) -> Union[dict, StreamingResponse, JSONResponse]:
         """
         聊天补全端点（OpenAI 兼容，支持流式和非流式）
 
@@ -254,11 +318,62 @@ def _register_routes(app: FastAPI) -> None:
             # 非流式响应：直接返回 JSON
             return result
 
-        except HTTPException:
-            raise
+        except GatewayAPIError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": exc.error},
+            )
         except Exception:
             logging.exception("聊天补全请求失败")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": "Internal server error",
+                        "type": "server_error",
+                        "param": None,
+                        "code": "internal_error",
+                    }
+                },
+            )
+
+    @app.post("/v1/responses", response_model=None)
+    async def responses(
+        request: ResponsesRequest,
+    ) -> Union[dict, StreamingResponse, JSONResponse]:
+        """OpenAI Responses API 透明代理；不模拟 Chat Completions 语义。"""
+        try:
+            service = get_service()
+            result = await service.responses(request)
+            if isinstance(result, AsyncIterable):
+                return StreamingResponse(
+                    content=result,
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return result
+        except GatewayAPIError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": exc.error},
+            )
+        except Exception:
+            logging.exception("Responses 请求失败")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": "Internal server error",
+                        "type": "server_error",
+                        "param": None,
+                        "code": "internal_error",
+                    }
+                },
+            )
 
     @app.get("/v1/models")
     async def list_models():
@@ -361,6 +476,11 @@ def _register_routes(app: FastAPI) -> None:
             uptime=health["uptime"],
         )
 
+    @app.get("/admin/capabilities")
+    async def admin_capabilities():
+        """列出模型/通道合并后的有效 capability。"""
+        return get_service().get_capabilities()
+
     @app.get("/")
     async def root():
         """
@@ -384,6 +504,7 @@ def run_server(
     port: int = 8787,
     workers: int = 1,
     reload: bool = False,
+    incoming_token_checker: IncomingTokenChecker | None = None,
 ) -> None:
     """
     启动 uvicorn 服务器运行网关应用
@@ -402,16 +523,51 @@ def run_server(
         - workers > 1 时不能使用 reload=True
         - 生产环境建议使用 gunicorn + uvicorn workers
     """
-    # 创建 FastAPI 应用
-    app = create_app(config_path)
+    if workers > 1 and reload:
+        raise ValueError("workers > 1 与 reload 不能同时启用")
 
-    # 使用 uvicorn 运行
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        workers=workers,
-        reload=reload,
+    merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+    access_token = resolve_access_token(
+        merged_config, host=host, allow_generate_loopback=True
+    )
+    if access_token.generated:
+        # Share the generated value with factory workers without writing it to logs.
+        os.environ["DATAFLUX_TOKEN"] = access_token.value
+    checker = incoming_token_checker or make_token_checker(access_token)
+
+    if workers > 1 or reload:
+        if incoming_token_checker is not None:
+            raise ValueError("多 worker/reload 模式不支持进程内自定义 token checker")
+        os.environ["DATAFLUX_CONFIG"] = str(Path(config_path).resolve())
+        os.environ["DATAFLUX_GATEWAY_HOST"] = host
+        uvicorn.run(
+            "src.gateway.app:create_app_from_env",
+            factory=True,
+            host=host,
+            port=port,
+            workers=workers,
+            reload=reload,
+        )
+        return
+
+    app = create_app(config_path, incoming_token_checker=checker)
+    uvicorn.run(app, host=host, port=port)
+
+
+def create_app_from_env() -> FastAPI:
+    """Uvicorn factory used when reload or multiple workers are requested."""
+
+    config_path = os.environ.get("DATAFLUX_CONFIG")
+    if not config_path:
+        raise RuntimeError("DATAFLUX_CONFIG is required")
+    host = os.environ.get("DATAFLUX_GATEWAY_HOST", "127.0.0.1")
+    merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+    access_token = resolve_access_token(
+        merged_config, host=host, allow_generate_loopback=True
+    )
+    return create_app(
+        config_path,
+        incoming_token_checker=make_token_checker(access_token),
     )
 
 

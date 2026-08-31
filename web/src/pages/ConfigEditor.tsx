@@ -10,8 +10,7 @@
  * 导出：默认导出 ConfigEditor 组件
  *
  * Props：
- * - configPath — 配置文件路径
- * - onConfigPathChange — 路径变更回调
+ * - selection — 后端授权的 workspace root + relative path
  * - language — 当前界面语言
  *
  * 依赖模块：
@@ -25,16 +24,16 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import yaml from 'js-yaml';
 import { fetchConfig, saveConfig, validateConfig } from '../api';
 import { getTranslations, type Language } from '../i18n';
+import type { WorkspaceSelection } from '../types';
+import { migrateConfigShape } from './configMigration';
 import ConfigSidebar, { type ConfigSectionId } from '../components/config/ConfigSidebar';
 import SectionRenderer from '../components/config/SectionRenderer';
 import RawYamlEditor from '../components/config/RawYamlEditor';
 
 /** ConfigEditor 组件的 Props 类型 */
 interface ConfigEditorProps {
-  /** 配置文件路径 */
-  configPath: string;
-  /** 路径变更回调（通知父组件更新） */
-  onConfigPathChange: (path: string) => void;
+  selection: WorkspaceSelection;
+  onSelectionChange?: (selection: WorkspaceSelection) => void;
   /** 当前界面语言 */
   language: Language;
 }
@@ -77,7 +76,11 @@ function serializeYaml(data: Record<string, unknown>): string {
  *
  * 模式切换时自动同步数据（可视化 ↔ 原始 YAML 互转）。
  */
-export default function ConfigEditor({ configPath, onConfigPathChange, language }: ConfigEditorProps) {
+export default function ConfigEditor({
+  selection,
+  onSelectionChange,
+  language,
+}: ConfigEditorProps) {
   const t = getTranslations(language);
 
   // Editor mode: visual sections or raw YAML
@@ -100,7 +103,9 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   /** 最近一次成功加载的配置路径（防止重复加载） */
-  const lastLoadedPathRef = useRef<string>('');
+  const lastLoadedSelectionRef = useRef<WorkspaceSelection | null>(null);
+  const [etag, setEtag] = useState('');
+  const [revision, setRevision] = useState<number | null>(null);
 
   /** 是否处于原始 YAML 编辑模式 */
   const isRawMode = activeSection === 'raw';
@@ -153,19 +158,19 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
    * 加载指定路径的配置文件
    * 同时更新原始 YAML 和解析后的表单数据。YAML 解析失败时自动切换到原始模式。
    */
-  const loadConfig = useCallback(async (path: string) => {
-    if (!path) return;
+  const loadConfig = useCallback(async (nextSelection: WorkspaceSelection) => {
+    if (!nextSelection.rootId || !nextSelection.relativePath) return;
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchConfig(path);
+      const data = await fetchConfig(nextSelection);
       const content = data.content;
       setRawContent(content);
       setOriginalRawContent(content);
 
       try {
         const parsed = parseYaml(content);
-        setFormData(parsed);
+        setFormData(migrateConfigShape(parsed));
         setOriginalFormData(structuredClone(parsed));
       } catch {
         // YAML parse failed — start in raw mode
@@ -177,7 +182,9 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
         }
       }
 
-      lastLoadedPathRef.current = path;
+      setEtag(data.etag);
+      setRevision(data.revision);
+      lastLoadedSelectionRef.current = nextSelection;
     } catch (err) {
       setError(`${t.failedToLoad}: ${err}`);
     } finally {
@@ -185,27 +192,42 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
     }
   }, [t.failedToLoad, t.yamlParseError, activeSection]);
 
-  // Auto-load on path change — 配置路径变化时自动加载（带 400ms 防抖）
+  const selectionKey = `${selection.rootId}:${selection.relativePath}`;
+
+  // Auto-load when the server-authorized workspace selection changes.
   useEffect(() => {
-    if (!configPath) return;
-    if (configPath === lastLoadedPathRef.current) return;
+    if (!selection.rootId || !selection.relativePath) return;
+    const loaded = lastLoadedSelectionRef.current;
+    const loadedKey = loaded ? `${loaded.rootId}:${loaded.relativePath}` : '';
+    if (selectionKey === loadedKey) return;
 
     const timer = setTimeout(() => {
-      if (configPath === lastLoadedPathRef.current) return;
+      const currentLoaded = lastLoadedSelectionRef.current;
+      const currentLoadedKey = currentLoaded
+        ? `${currentLoaded.rootId}:${currentLoaded.relativePath}`
+        : '';
+      if (selectionKey === currentLoadedKey) return;
 
-      if (lastLoadedPathRef.current && hasChanges) {
+      if (currentLoaded && hasChanges) {
         const ok = window.confirm(t.discardAndLoadNew);
         if (!ok) {
-          onConfigPathChange(lastLoadedPathRef.current);
+          onSelectionChange?.(currentLoaded);
           return;
         }
       }
 
-      void loadConfig(configPath);
-    }, 400);
+      void loadConfig(selection);
+    }, 200);
 
     return () => clearTimeout(timer);
-  }, [configPath, hasChanges, loadConfig, onConfigPathChange, t.discardAndLoadNew]);
+  }, [
+    hasChanges,
+    loadConfig,
+    onSelectionChange,
+    selection,
+    selectionKey,
+    t.discardAndLoadNew,
+  ]);
 
   // --- Section switching: sync data between modes --- 模式切换时同步数据
   /**
@@ -240,7 +262,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
   // --- Save --- 保存配置到服务端
   /** 保存当前配置内容（根据模式选择原始 YAML 或序列化表单数据） */
   const handleSave = async () => {
-    if (!configPath) return;
+    if (!selection.relativePath || !etag) return;
 
     let contentToSave: string;
     if (isRawMode) {
@@ -253,11 +275,13 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
     setError(null);
     setSuccess(null);
     try {
-      const result = await saveConfig(configPath, contentToSave);
+      const result = await saveConfig(selection, contentToSave, etag);
 
       // Update both states to reflect saved content
       setOriginalRawContent(contentToSave);
       setRawContent(contentToSave);
+      setEtag(result.etag);
+      setRevision(result.revision);
       try {
         const parsed = parseYaml(contentToSave);
         setOriginalFormData(structuredClone(parsed));
@@ -267,7 +291,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
         setOriginalFormData(structuredClone(formData));
       }
 
-      setSuccess(result.backed_up ? t.savedWithBackup : t.saved);
+      setSuccess(`${t.saved} · rev ${result.revision}`);
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
       setError(`${t.failedToSave}: ${err}`);
@@ -279,12 +303,12 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
   // --- Reload --- 重新从磁盘加载配置
   /** 重新加载配置（有未保存更改时弹出确认对话框） */
   const handleReload = async () => {
-    if (!configPath) return;
+    if (!selection.relativePath) return;
     if (hasChanges) {
       const ok = window.confirm(t.discardAndReload);
       if (!ok) return;
     }
-    await loadConfig(configPath);
+    await loadConfig(selection);
   };
 
   // --- Validate --- 验证 YAML 语法
@@ -305,7 +329,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
     setError(null);
     setSuccess(null);
     try {
-      const result = await validateConfig(contentToValidate, configPath);
+      const result = await validateConfig(contentToValidate, selection);
       if (result.valid) {
         const warnings = result.warnings ?? [];
         setSuccess(
@@ -315,7 +339,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
         );
         setTimeout(() => setSuccess(null), 3000);
       } else {
-        const errors = result.errors?.length ? result.errors.join('\n') : result.error;
+        const errors = result.errors?.length ? result.errors.join('\n') : '';
         setError(errors ? `${t.configInvalid}:\n${errors}` : t.configInvalid);
       }
     } catch (err) {
@@ -329,6 +353,11 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
       <div className="bg-white rounded-2xl p-4 shadow-[0_2px_12px_rgba(0,0,0,0.04)] mb-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
+            {revision !== null && (
+              <span className="rounded bg-gray-100 px-2 py-1 font-mono text-xs text-gray-500">
+                rev {revision}
+              </span>
+            )}
             {hasChanges && (
               <span className="text-sm text-amber-600">{t.unsavedChanges}</span>
             )}
@@ -353,7 +382,7 @@ export default function ConfigEditor({ configPath, onConfigPathChange, language 
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || !hasChanges}
+              disabled={saving || !hasChanges || !etag}
               className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-cyan-400 to-blue-500 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t.saving : t.save}

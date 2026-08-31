@@ -16,20 +16,20 @@ Flux API 网关快速启动入口模块
 
 运行方式:
     # 使用默认配置和端口
-    python gateway.py
+    DATAFLUX_TOKEN=<token> python gateway.py
 
     # 指定配置文件
-    python gateway.py --config my_config.yaml
+    DATAFLUX_TOKEN=<token> python gateway.py --config my_config.yaml
 
     # 指定端口
-    python gateway.py --port 8000
+    DATAFLUX_TOKEN=<token> python gateway.py --port 8000
 
     # 完整参数
-    python gateway.py --config config.yaml --port 8787 --host 0.0.0.0
+    DATAFLUX_TOKEN=<token> python gateway.py --config config.yaml --port 8787 --host 0.0.0.0
 
 API 端点:
     POST /v1/chat/completions - OpenAI 兼容的聊天补全接口
-    GET  /health             - 健康检查端点
+    GET  /admin/health       - 需要 Bearer token 的健康检查端点
     GET  /v1/models          - 获取可用模型列表
 
 架构位置:
@@ -52,7 +52,6 @@ API 端点:
 import sys
 
 from src.gateway.app import main
-
 
 if __name__ == "__main__":
     # 调用网关主入口函数，返回退出码

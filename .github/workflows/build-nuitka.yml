@@ -32,13 +32,18 @@ on:
       - 'main.py'
       - 'gateway.py'
       - 'requirements.txt'
+      - 'config-example.yaml'
       - 'web/**'
+      - '.github/scripts/smoke_control.py'
       - '.github/workflows/build-nuitka.yml'
   pull_request:
     paths:
       - 'src/**'
       - '*.py'
+      - 'config-example.yaml'
       - 'web/**'
+      - '.github/scripts/smoke_control.py'
+      - '.github/workflows/build-nuitka.yml'
   workflow_dispatch:                       # 支持手动触发
     inputs:
       version:
@@ -92,10 +97,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      - name: Build frontend              # 构建 Web GUI → web/dist/
+      - name: Validate and build frontend
         run: |
           cd web
           npm ci
+          npm run lint
+          npm run test
+          npm audit --audit-level=high
           npm run build
 
       # --- Python 环境与依赖 ---
@@ -109,7 +117,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka ordered-set zstandard
+          pip install nuitka ordered-set zstandard pip-audit==2.9.0
+
+      - name: Audit Python runtime dependencies
+        run: pip-audit -r requirements.txt
 
       # --- 平台特定的 C 编译器安装 ---
       - name: Install C compiler (Ubuntu)
@@ -132,6 +143,7 @@ jobs:
       # --- Nuitka 编译（打包为单文件可执行程序）---
       - name: Build with Nuitka (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           python -m nuitka \
             --onefile \
@@ -144,19 +156,103 @@ jobs:
 
       - name: Build with Nuitka (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           python -m nuitka --onefile --standalone --assume-yes-for-downloads --include-data-dir=web/dist=web/dist --output-filename=${{ env.APP_NAME }}.exe --output-dir=dist cli.py
 
       # --- 重命名并上传构建产物 ---
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           mv dist/${{ env.APP_NAME }} dist/${{ matrix.artifact_name }}
 
       - name: Rename artifact (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           move dist\${{ env.APP_NAME }}.exe dist\${{ matrix.artifact_name }}
+
+      - name: Smoke packaged binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          DATAFLUX_TOKEN: packaged-control-smoke-token
+        run: |
+          artifact="dist/${{ matrix.artifact_name }}"
+          chmod +x "$artifact"
+          "$artifact" version
+          "$artifact" --help
+          "$artifact" check
+          "$artifact" process --config config-example.yaml --validate
+          "$artifact" config validate --config config-example.yaml --json
+          "$artifact" worker --help
+          "$artifact" job --help
+          "$artifact" job list --config config-example.yaml --json
+          "$artifact" gui --help
+          port="$(python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          "$artifact" gui --config config-example.yaml --host 127.0.0.1 --port "$port" --no-browser > control-smoke.stdout.log 2> control-smoke.stderr.log &
+          control_pid=$!
+          cleanup_control() {
+            if kill -0 "$control_pid" 2>/dev/null; then
+              kill "$control_pid" 2>/dev/null || true
+            fi
+            wait "$control_pid" 2>/dev/null || true
+          }
+          trap cleanup_control EXIT
+          if ! python .github/scripts/smoke_control.py "http://127.0.0.1:${port}/health" --timeout 60; then
+            sed -n '1,200p' control-smoke.stdout.log
+            sed -n '1,200p' control-smoke.stderr.log >&2
+            exit 1
+          fi
+          cleanup_control
+          trap - EXIT
+
+      - name: Smoke packaged binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DATAFLUX_TOKEN: packaged-control-smoke-token
+        run: |
+          $artifact = "dist\${{ matrix.artifact_name }}"
+          & $artifact version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact process --config config-example.yaml --validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact config validate --config config-example.yaml --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact worker --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact job --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact job list --config config-example.yaml --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $artifact gui --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+          $listener.Stop()
+          $stdoutLog = "control-smoke.stdout.log"
+          $stderrLog = "control-smoke.stderr.log"
+          $control = Start-Process -FilePath $artifact -ArgumentList @("gui", "--config", "config-example.yaml", "--host", "127.0.0.1", "--port", "$port", "--no-browser") -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+          try {
+            python .github/scripts/smoke_control.py "http://127.0.0.1:$port/health" --timeout 60
+            if ($LASTEXITCODE -ne 0) {
+              Get-Content $stdoutLog -ErrorAction SilentlyContinue
+              Get-Content $stderrLog -ErrorAction SilentlyContinue | Write-Error
+              exit $LASTEXITCODE
+            }
+          } finally {
+            if (-not $control.HasExited) {
+              Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue
+            }
+            Wait-Process -Id $control.Id -ErrorAction SilentlyContinue
+          }
 
       - name: Upload artifact               # 上传到 GitHub Artifacts，保留30天
         uses: actions/upload-artifact@v4

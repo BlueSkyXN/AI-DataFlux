@@ -1,6 +1,8 @@
 # Web GUI 控制面板
 
-AI-DataFlux 提供了一个本地 Web GUI 控制面板，用于管理 Gateway 和 Process 服务。
+AI-DataFlux 提供本地 Web GUI，用于选择受控 workspace、编辑配置、提交与观察 durable Job，并保留 Gateway/Process 进程管理和日志查看能力。3.2 的版本化 HTTP 契约见 [CONTROL_API.md](./CONTROL_API.md)，Job 持久化 schema 见 [JOBS.md](./JOBS.md)。
+
+> 当前版本仍是 `3.2.0-dev`。页面和 API 路由已经接线不等于打包、Release、部署或业务 UAT 已完成。
 
 ## 功能概述
 
@@ -13,24 +15,31 @@ AI-DataFlux 提供了一个本地 Web GUI 控制面板，用于管理 Gateway �
    - 支持外部进程检测（External标签）
    - 错误计数和退出码显示
 
-2. **配置编辑**
-   - 在线编辑 `config.yaml` 配置文件
-   - YAML 语法验证
-   - 自动备份（.bak文件）
+2. **Workspace 与配置编辑**
+   - 从 `workspace.roots` 中选择受控根目录和 YAML 文件
+   - 使用 `root_id + relative_path`，不向后端传任意绝对路径
+   - 在线编辑和严格语义校验配置
+   - 使用 `ETag` / `If-Match` 防止覆盖并发修改
    - 未保存更改提示
 
-3. **日志查看**
+3. **Durable Jobs**
+   - 从当前选中的 YAML 配置提交后台 Job
+   - 查看 Job 列表、状态、counts 和资源压力
+   - 对允许状态执行 cancel/resume
+   - 先分页读取历史 event，再通过带 Bearer header 的 fetch SSE 继续追踪
+
+4. **日志查看**
    - 实时查看 Gateway 和 Process 的日志输出
    - 左右分栏同时显示两个服务的日志
    - WebSocket 自动重连（指数退避策略）
    - 支持日志复制和清空
    - 自动滚动控制
 
-4. **多语言支持**
+5. **多语言支持**
    - 界面支持中文/英文切换
    - 自动保存语言偏好设置
 
-5. **工作目录显示**
+6. **工作目录显示**
    - 实时显示当前工作目录
    - 帮助定位配置文件和数据文件
 
@@ -45,8 +54,12 @@ python cli.py gui
 # 指定端口
 python cli.py gui --port 8080
 
+# 指定启动配置和监听地址；非 loopback 必须显式配置统一 token
+DATAFLUX_TOKEN=<token> python cli.py gui \
+  --config config.yaml --host 0.0.0.0 --no-browser
+
 # 不自动打开浏览器
-python cli.py gui --no-browser
+DATAFLUX_TOKEN=<token> python cli.py gui --no-browser
 ```
 
 控制面板默认运行在 `http://127.0.0.1:8790`。
@@ -56,6 +69,8 @@ python cli.py gui --no-browser
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-p, --port` | 控制服务器端口 | 8790 |
+| `-c, --config` | Control、workspace 与 JobService 使用的配置文件 | `config.yaml` |
+| `--host` | 监听地址 | `127.0.0.1` |
 | `--no-browser` | 不自动打开浏览器 | False |
 
 ## 架构设计
@@ -71,7 +86,9 @@ python cli.py gui
 │  ┌───────────┐ ┌──────────────┐ │
 │  │ ConfigAPI │ │ProcessManager│ │
 │  └───────────┘ └──────┬───────┘ │
-│                       │         │
+│  ┌───────────┐        │         │
+│  │ JobService│──▶ Job Repository│
+│  └───────────┘        │         │
 │  ┌────────────────────┤         │
 │  │ LogBroker (WS)     │         │
 │  └────────────────────┤         │
@@ -92,7 +109,10 @@ python cli.py gui
 - **端口分配**：Control Server 使用 `8790`，Gateway 保持 `8787`
 - **前端托管**：FastAPI 直接 serve `web/dist/` 静态文件
 - **退出行为**：Ctrl+C 关闭 Control Server 时，子进程跟着停止
-- **仅本地访问**：只监听 127.0.0.1，且 API/WS 默认启用 Bearer Token 鉴权
+- **默认本地访问**：默认监听 `127.0.0.1`；可显式修改 `--host`，非 loopback 启动必须配置统一 token
+- **路径边界**：3.2 页面使用 `workspace.roots` 与相对路径，服务端拒绝 traversal 和 symlink 越界
+- **并发编辑**：版本化配置写入必须提供 `If-Match`，revision 冲突不会静默覆盖
+- **Job 生命周期**：Control lifespan 启动 JobService 循环，关闭时合作式停止 Worker
 
 ## API 接口
 
@@ -101,7 +121,31 @@ python cli.py gui
 > 认证说明：所有 `/api/*` 请求都需要 `Authorization: Bearer <token>`。
 > `python cli.py gui` 自动打开浏览器时会携带 `#token=...`，前端会自动透传。
 
-### 配置文件 API
+### 3.2 版本化 API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 无需认证的 liveness 与版本读取 |
+| `GET` | `/api/v1/workspace/roots` | 列出允许访问的 workspace roots |
+| `GET` | `/api/v1/workspace/entries?root_id=&relative_path=` | 浏览受控目录 |
+| `GET` | `/api/v1/config?root_id=&relative_path=` | 读取 YAML 与 `ETag` revision |
+| `PUT` | `/api/v1/config` | 使用 `If-Match` 原子写入 YAML |
+| `POST` | `/api/v1/config/validate` | 校验候选 YAML，不写文件 |
+| `POST` | `/api/v1/jobs` | 从 workspace 配置提交 durable Job |
+| `GET` | `/api/v1/jobs` | 列出 Job 与 resource snapshot |
+| `GET` | `/api/v1/jobs/{job_id}` | 读取单个 Job state |
+| `POST` | `/api/v1/jobs/{job_id}/cancel` | 合作式取消 |
+| `POST` | `/api/v1/jobs/{job_id}/resume` | 接受当前配置 hash 并重新入队 |
+| `GET` | `/api/v1/jobs/{job_id}/events` | 按 `after_seq` / `limit` 分页读取 event |
+| `GET` | `/api/v1/jobs/{job_id}/events/stream` | 支持 `Last-Event-ID` 的 SSE |
+
+错误统一返回 `{"error":{"code","message","details","request_id"}}`。配置写入缺少 `If-Match` 返回 428，revision 变化返回 409；Job 状态不允许 cancel/resume 时返回 409。请求与响应示例、SSE 恢复规则见 [CONTROL_API.md](./CONTROL_API.md)。
+
+### 兼容 API
+
+下列非版本化接口仍由既有 Dashboard、进程管理和日志页面使用。新 workspace、配置编辑与 Job 自动化应使用 `/api/v1/*`。
+
+#### 配置文件 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -149,7 +193,7 @@ python cli.py gui
 
 语义校验覆盖数据源类型、引擎/读写器选项、并发参数、必需数据源字段、`columns_to_extract`/`columns_to_write`、主配置 `prompt.template`、routing 规则和 profile 文件。未知顶层键和已知旧配置键以 warning 返回，不会阻止保存。
 
-### 进程管理 API
+#### 进程管理 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -177,7 +221,7 @@ python cli.py gui
 }
 ```
 
-### 日志流 API
+#### 日志流 API
 
 | 协议 | 路径 | 说明 |
 |------|------|------|
@@ -245,13 +289,27 @@ STOPPED  ──start──▶  RUNNING  ──进程退出──▶  EXITED
 
 ## 配置文件编辑
 
-配置编辑器支持：
+3.2 workspace 配置编辑器支持：
 
 - **原始文本编辑**：保留 YAML 注释和格式
-- **自动备份**：写入前自动创建 `.bak` 备份文件
 - **原子写入**：通过临时文件确保写入完整性
-- **路径保护**：防止路径穿越攻击
+- **乐观并发**：读取 `ETag`，写入时传 `If-Match`，冲突返回 409
+- **路径保护**：通过 `workspace.roots`、`root_id` 和相对路径防止越界
 - **写入白名单**：仅允许写入 `.yaml/.yml` 配置文件
+
+旧 `/api/config` 写入会保留一份 `.bak`；版本化 `/api/v1/config` 使用 revision 冲突保护，不应把旧接口的备份行为当作 v1 契约。
+
+## Durable Job 监控
+
+Jobs 页面显示：
+
+- Job `status`、`revision`、配置路径与创建时间；
+- `counts.persisted` 相对 `counts.discovered` 的进度；
+- 调度器 resource snapshot，包括 CPU、内存和 pressure；
+- 当前 Job 的历史与实时 event；
+- 当前状态允许的 cancel/resume 动作。
+
+页面每 3 秒刷新 Job 列表。选择 Job 后先调用分页 events API，再从 `next_seq` 打开 fetch SSE，按 `seq` 去重。cancel 只对 `queued/running` 展示，resume 只对 `blocked/interrupted/failed` 展示。
 
 ## 日志查看
 
@@ -283,11 +341,15 @@ STOPPED  ──start──▶  RUNNING  ──进程退出──▶  EXITED
 # 进入前端目录
 cd web
 
-# 安装依赖
-npm install
+# 按 lockfile 安装依赖
+npm ci
 
 # 开发模式（自动代理 API 到后端）
 npm run dev
+
+# 质量检查
+npm run lint
+npm run test
 
 # 构建生产版本
 npm run build
@@ -315,6 +377,8 @@ $env:VITE_CONTROL_SERVER="http://127.0.0.1:9000"; npm run dev
 | `__init__.py` | 模块入口 |
 | `server.py` | FastAPI 应用主文件 |
 | `config_api.py` | 配置文件读写 API |
+| `client.py` | CLI 使用的标准库 Control API client |
+| `job_service.py` | Job 提交、调度、cancel/resume、event/SSE 协调 |
 | `process_manager.py` | 进程生命周期管理 |
 | `runtime.py` | 运行时/打包环境路径解析工具 |
 
@@ -324,7 +388,7 @@ $env:VITE_CONTROL_SERVER="http://127.0.0.1:9000"; npm run dev
 |---------|------|
 | `VITE_CONTROL_SERVER` | 前端开发时，Vite 代理的 Control Server 地址 |
 | `DATAFLUX_GUI_CORS_ORIGINS` | 逗号分隔的允许跨域来源（开发调试用） |
-| `DATAFLUX_CONTROL_TOKEN` | 控制面鉴权 Token；未设置时服务会自动生成临时 token |
+| `DATAFLUX_TOKEN` | Control 与 Gateway 统一 Bearer token；优先于 `server.token`，loopback 且两者都未设置时自动生成临时 token |
 | `DATAFLUX_PROJECT_ROOT` / `AI_DATAFLUX_PROJECT_ROOT` | 覆盖“项目根目录”（打包运行或非仓库目录启动时有用） |
 
 示例：
@@ -334,7 +398,8 @@ $env:VITE_CONTROL_SERVER="http://127.0.0.1:9000"; npm run dev
 DATAFLUX_PROJECT_ROOT=/path/to/project python cli.py gui
 
 # 仅当你不使用 Vite proxy、需要跨域直连后端时才需要 CORS
-DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
+DATAFLUX_TOKEN=<token> DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 \
+  python cli.py gui --no-browser
 ```
 
 ## 跨平台支持
@@ -349,7 +414,7 @@ DATAFLUX_GUI_CORS_ORIGINS=http://127.0.0.1:5173 python cli.py gui --no-browser
 
 ## 安全说明
 
-- 控制面板仅监听 `127.0.0.1`，不对外暴露
+- 控制面板默认监听 `127.0.0.1`；使用 `--host` 对外监听时必须设置 `DATAFLUX_TOKEN` 或 `server.token`，并自行配置网络边界
 - 控制面 API 与日志 WebSocket 默认要求 Bearer Token 鉴权
 - 配置文件路径经过校验，防止目录穿越
 - 配置写入仅允许 `.yaml/.yml` 文件，阻断脚本类文件改写
@@ -365,7 +430,9 @@ A: 需要先构建前端：
 
 ```bash
 cd web
-npm install
+npm ci
+npm run lint
+npm run test
 npm run build
 ```
 

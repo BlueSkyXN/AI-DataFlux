@@ -106,7 +106,12 @@ class FluxAIClient(BaseAIClient):
         request_timeout: aiohttp 超时配置
     """
 
-    def __init__(self, api_url: str, timeout: int = 600):
+    def __init__(
+        self,
+        api_url: str,
+        timeout: int = 600,
+        api_token: str | None = None,
+    ):
         """
         初始化客户端
 
@@ -121,6 +126,7 @@ class FluxAIClient(BaseAIClient):
 
         # 配置超时: 连接 20 秒，总计 timeout 秒
         self.request_timeout = aiohttp.ClientTimeout(connect=20, total=timeout)
+        self.api_token = api_token.strip() if api_token else ""
 
     async def call(
         self,
@@ -129,6 +135,7 @@ class FluxAIClient(BaseAIClient):
         model: str,
         temperature: float | None = 0.7,
         use_json_schema: bool = False,
+        json_schema: dict[str, Any] | None = None,
         **kwargs,
     ) -> str:
         """
@@ -154,6 +161,8 @@ class FluxAIClient(BaseAIClient):
         """
 
         headers = {"Content-Type": "application/json"}
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
 
         # 构建请求体
         payload: Dict[str, Any] = {
@@ -166,7 +175,16 @@ class FluxAIClient(BaseAIClient):
             payload["temperature"] = temperature
 
         # 启用 JSON 模式
-        if use_json_schema:
+        if json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "dataflux_response",
+                    "strict": True,
+                    "schema": json_schema,
+                },
+            }
+        elif use_json_schema:
             payload["response_format"] = {"type": "json_object"}
 
         # 合并其他参数

@@ -82,7 +82,8 @@ OpenAI 兼容性:
 """
 
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, model_validator
+
+from pydantic import BaseModel, ConfigDict
 
 
 class ChatMessage(BaseModel):
@@ -98,8 +99,10 @@ class ChatMessage(BaseModel):
     """
 
     role: str
-    content: str
+    content: Any
     name: str | None = None
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ResponseFormat(BaseModel):
@@ -142,37 +145,21 @@ class ChatCompletionRequest(BaseModel):
     """
 
     model: str
-    messages: list[ChatMessage]
-    temperature: float | None = None
-    top_p: float | None = 1.0
-    n: int | None = 1
-    max_tokens: int | None = None
+    messages: list[dict[str, Any]]
     stream: bool | None = False
-    stop: str | list[str] | None = None
-    presence_penalty: float | None = 0
-    frequency_penalty: float | None = 0
-    logit_bias: dict[str, float] | None = None
-    user: str | None = None
-    response_format: ResponseFormat | None = None
 
-    model_config = ConfigDict(extra="allow")  # 允许额外字段
+    # 网关只验证路由所需的最小字段；其余 OpenAI 字段保持原样透传。
+    model_config = ConfigDict(extra="allow")
 
-    @model_validator(mode="before")
-    @classmethod
-    def convert_stop_to_list(cls, values: dict[str, Any]) -> dict[str, Any]:
-        """
-        将字符串类型的 stop 转为列表
 
-        OpenAI API 允许 stop 参数是字符串或字符串列表，
-        为了内部处理一致性，统一转换为列表。
-        """
-        if (
-            isinstance(values, dict)
-            and "stop" in values
-            and isinstance(values["stop"], str)
-        ):
-            values["stop"] = [values["stop"]]
-        return values
+class ResponsesRequest(BaseModel):
+    """OpenAI Responses API 的最小请求包装。"""
+
+    model: str
+    input: Any
+    stream: bool | None = False
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ChatCompletionResponseChoice(BaseModel):

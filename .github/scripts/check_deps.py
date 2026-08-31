@@ -10,6 +10,7 @@ CI 脚本：在 GitHub Actions 中运行，验证可选依赖库是否正确安�
     2. 成功则打印版本号，失败则记录到 missing 列表
     3. 若关键依赖 (CRITICAL) 缺失，输出警告到 stderr
 """
+
 import sys
 
 # 需要检查的可选依赖库列表

@@ -78,13 +78,35 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
 """
 
 import argparse
+import asyncio
 import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
 import sys
+import time
 
 try:
     import resource  # Unix-only
 except Exception:
     resource = None
+
+
+EXIT_OK = 0
+EXIT_RUNTIME_ERROR = 1
+EXIT_CONFIG_ERROR = 2
+EXIT_JOB_FAILED = 3
+EXIT_CONNECTION_ERROR = 4
+EXIT_NOT_FOUND_OR_CONFLICT = 5
+
+
+def _write_json(value) -> None:
+    print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _error_payload(code: str, message: str, details=None) -> dict:
+    return {"error": {"code": code, "message": message, "details": details}}
 
 
 def _validate_port(value: str) -> int:
@@ -139,21 +161,24 @@ def _validate_config_path(value: str) -> str:
     return value
 
 
-def _check_rlimit():
+def _check_rlimit(*, stream=None):
     """检查文件描述符限制"""
+    target = stream or sys.stdout
     if resource is None or sys.platform not in ("darwin", "linux"):
         return
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        print(f"Current limits: ({soft}, {hard})")
+        print(f"Current limits: ({soft}, {hard})", file=target)
         if soft <= 256:
             from src.utils.console import console
 
             print(
-                f"{console.warn} File descriptor limit is too low ({soft}). This triggers crashes on macOS."
+                f"{console.warn} File descriptor limit is too low ({soft}). This triggers crashes on macOS.",
+                file=target,
             )
             print(
-                f"{console.tip} Run 'ulimit -n 10240' or higher before running this program."
+                f"{console.tip} Run 'ulimit -n 10240' or higher before running this program.",
+                file=target,
             )
     except Exception:
         pass
@@ -176,15 +201,33 @@ def cmd_process(args):
         1. 验证模式：加载配置并显示关键信息（数据源、引擎、列配置）
         2. 处理模式：创建处理器并执行完整的数据处理流程
     """
+    json_output = bool(getattr(args, "json", False))
     from src.utils.console import console
     from src.core import UniversalAIProcessor
 
     if args.validate:
-        _check_rlimit()
+        _check_rlimit(stream=sys.stderr if json_output else sys.stdout)
         from src.config import load_config, validate_config
 
-        config = load_config(args.config)
-        validation = validate_config(config, args.config)
+        try:
+            config = load_config(args.config)
+            validation = validate_config(config, args.config)
+        except Exception as exc:
+            if json_output:
+                _write_json(_error_payload("config_invalid", str(exc)))
+            else:
+                print(f"{console.error} Config invalid: {exc}")
+            return EXIT_CONFIG_ERROR
+
+        if json_output:
+            payload = {
+                "valid": not validation["errors"],
+                "config": str(Path(args.config).expanduser()),
+                "errors": validation["errors"],
+                "warnings": validation["warnings"],
+            }
+            _write_json(payload)
+            return EXIT_CONFIG_ERROR if validation["errors"] else EXIT_OK
 
         for warning in validation["warnings"]:
             print(f"{console.warn} {warning}")
@@ -193,7 +236,7 @@ def cmd_process(args):
             print(f"{console.error} Config invalid: {args.config}")
             for error in validation["errors"]:
                 print(f"  - {error}")
-            return 1
+            return EXIT_CONFIG_ERROR
 
         print(f"{console.ok} Config valid: {args.config}")
         print(f"  - Datasource: {config.get('datasource', {}).get('type', 'excel')}")
@@ -209,15 +252,38 @@ def cmd_process(args):
             print(
                 f"  - Routing: enabled on '{routing.get('field', 'N/A')}' ({len(subtasks)} rules)"
             )
-        return 0
+        return EXIT_OK
 
     # 获取进度文件路径 (可选)
     progress_file = getattr(args, "progress_file", None)
 
     # 创建处理器并执行（使用配置文件路径）
-    processor = UniversalAIProcessor(args.config, progress_file=progress_file)
-    processor.run()
-    return 0
+    try:
+        processor = UniversalAIProcessor(args.config, progress_file=progress_file)
+        completed = processor.run()
+    except Exception as exc:
+        if json_output:
+            _write_json(_error_payload("process_failed", str(exc)))
+        else:
+            print(f"{console.error} Processing failed: {exc}", file=sys.stderr)
+        return EXIT_JOB_FAILED
+
+    manager = processor.task_manager
+    failed = manager.max_retries_exceeded_count
+    payload = {
+        "status": (
+            "cancelled"
+            if not completed
+            else "completed_with_errors" if failed else "completed"
+        ),
+        "persisted": manager.total_processed_successfully,
+        "failed": failed,
+        "discovered": manager.total_estimated,
+        "retries": sum(manager.retried_tasks_count.values()),
+    }
+    if json_output:
+        _write_json(payload)
+    return EXIT_OK if completed and not failed else EXIT_JOB_FAILED
 
 
 def cmd_gateway(args):
@@ -431,6 +497,319 @@ def cmd_token(args):
     return 0
 
 
+def cmd_config_validate(args):
+    """Validate the canonical v3.2 schema with stable JSON output."""
+
+    from src.config import load_config, validate_config
+
+    try:
+        config = load_config(args.config)
+        result = validate_config(config, args.config)
+    except Exception as exc:
+        payload = _error_payload("config_invalid", str(exc))
+        if args.json:
+            _write_json(payload)
+        else:
+            print(f"Config invalid: {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
+    payload = {
+        "valid": not result["errors"],
+        "config": str(Path(args.config).expanduser()),
+        "errors": result["errors"],
+        "warnings": result["warnings"],
+    }
+    if args.json:
+        _write_json(payload)
+    else:
+        for warning in result["warnings"]:
+            print(f"WARNING: {warning}", file=sys.stderr)
+        if result["errors"]:
+            for error in result["errors"]:
+                print(f"ERROR: {error}", file=sys.stderr)
+        else:
+            print(f"Config valid: {args.config}")
+    return EXIT_CONFIG_ERROR if result["errors"] else EXIT_OK
+
+
+async def _run_worker(config_path: str) -> None:
+    from src.control.job_service import JobService
+
+    service = JobService(config_path)
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    loop_task = asyncio.create_task(service.run_loop())
+    try:
+        await stop_event.wait()
+    finally:
+        await service.stop()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+
+def cmd_worker(args):
+    """Run the durable background Worker without the GUI."""
+
+    try:
+        if args.json:
+            _write_json({"status": "starting", "mode": "worker"})
+        asyncio.run(_run_worker(args.config))
+        return EXIT_OK
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except Exception as exc:
+        if args.json:
+            _write_json(_error_payload("worker_failed", str(exc)))
+        else:
+            print(f"Worker failed: {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
+
+
+def _local_job_service(config_path: str):
+    from src.control.job_service import JobService
+
+    return JobService(config_path)
+
+
+def _workspace_reference(service, config_path: str) -> tuple[str, str]:
+    target = Path(config_path).expanduser().resolve()
+    for root_id, root in service.roots.items():
+        try:
+            relative = target.relative_to(root)
+        except ValueError:
+            continue
+        return root_id, str(relative)
+    raise ValueError("config path is outside workspace.roots")
+
+
+def _control_client(args):
+    from src.control.client import ControlClient
+
+    token = os.getenv("DATAFLUX_TOKEN", "").strip()
+    if not token:
+        try:
+            from src.config import load_config
+
+            token = str(
+                load_config(getattr(args, "config", "config.yaml"))
+                .get("server", {})
+                .get("token", "")
+            ).strip()
+        except Exception:
+            token = ""
+    if not token:
+        raise RuntimeError("DATAFLUX_TOKEN or server.token is required")
+    return ControlClient(args.server, token)
+
+
+def _print_job_payload(payload, *, json_output: bool) -> None:
+    if json_output:
+        _write_json(payload)
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _job_error_exit(exc, *, json_output: bool) -> int:
+    from src.control.client import ControlClientError
+    from src.jobs import JobNotFoundError
+
+    if isinstance(exc, ControlClientError):
+        payload = _error_payload(exc.code or "control_error", str(exc), exc.details)
+        if json_output:
+            _write_json(payload)
+        else:
+            print(str(exc), file=sys.stderr)
+        if exc.status_code in {404, 409}:
+            return EXIT_NOT_FOUND_OR_CONFLICT
+        return EXIT_CONNECTION_ERROR
+    if isinstance(exc, JobNotFoundError):
+        payload = _error_payload("job_not_found", "Job not found")
+        if json_output:
+            _write_json(payload)
+        else:
+            print("Job not found", file=sys.stderr)
+        return EXIT_NOT_FOUND_OR_CONFLICT
+    if isinstance(exc, ValueError):
+        if json_output:
+            _write_json(_error_payload("job_conflict", str(exc)))
+        else:
+            print(str(exc), file=sys.stderr)
+        return EXIT_NOT_FOUND_OR_CONFLICT
+    if json_output:
+        _write_json(_error_payload("job_error", str(exc)))
+    else:
+        print(str(exc), file=sys.stderr)
+    return EXIT_RUNTIME_ERROR
+
+
+def cmd_job_submit(args):
+    try:
+        if args.server:
+            relative_path = args.config
+            if Path(relative_path).is_absolute():
+                raise ValueError(
+                    "remote submit requires a workspace-relative --config path"
+                )
+            payload = _control_client(args).request_json(
+                "POST",
+                "/api/v1/jobs",
+                body={
+                    "root_id": args.root_id,
+                    "relative_path": relative_path,
+                    "options": {},
+                },
+            )
+        else:
+            service = _local_job_service(args.config)
+            root_id, relative_path = _workspace_reference(service, args.config)
+            payload = service.submit(
+                root_id=root_id,
+                relative_path=relative_path,
+            ).to_dict()
+        _print_job_payload(payload, json_output=args.json)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
+def cmd_job_list(args):
+    try:
+        if args.server:
+            payload = _control_client(args).request_json("GET", "/api/v1/jobs")
+        else:
+            service = _local_job_service(args.config)
+            payload = {
+                "jobs": [state.to_dict() for state in service.list_states()],
+                "resource": service.resource_status(),
+            }
+        _print_job_payload(payload, json_output=args.json)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
+def cmd_job_status(args):
+    try:
+        if args.server:
+            payload = _control_client(args).request_json(
+                "GET", f"/api/v1/jobs/{args.job_id}"
+            )
+        else:
+            payload = (
+                _local_job_service(args.config)
+                .repository.get_state(args.job_id)
+                .to_dict()
+            )
+        _print_job_payload(payload, json_output=args.json)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
+def _cmd_job_action(args, action: str) -> int:
+    try:
+        if args.server:
+            payload = _control_client(args).request_json(
+                "POST", f"/api/v1/jobs/{args.job_id}/{action}", body={}
+            )
+        else:
+            service = _local_job_service(args.config)
+            payload = getattr(service, action)(args.job_id).to_dict()
+        _print_job_payload(payload, json_output=args.json)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
+def cmd_job_cancel(args):
+    return _cmd_job_action(args, "cancel")
+
+
+def cmd_job_resume(args):
+    return _cmd_job_action(args, "resume")
+
+
+def _emit_event(event: dict, *, json_output: bool) -> None:
+    if json_output:
+        _write_json(event)
+    else:
+        print(json.dumps(event, ensure_ascii=False))
+
+
+def cmd_job_events(args):
+    try:
+        if args.server and args.follow:
+            for event in _control_client(args).stream_events(
+                args.job_id, after_seq=args.after_seq
+            ):
+                _emit_event(event, json_output=args.json)
+            return EXIT_OK
+        if args.server:
+            payload = _control_client(args).request_json(
+                "GET",
+                f"/api/v1/jobs/{args.job_id}/events",
+                query={"after_seq": args.after_seq, "limit": args.limit},
+            )
+            for event in payload.get("events", []):
+                _emit_event(event, json_output=args.json)
+            return EXIT_OK
+
+        service = _local_job_service(args.config)
+        cursor = args.after_seq
+        while True:
+            events, cursor = service.list_events(
+                args.job_id,
+                after_seq=cursor,
+                limit=args.limit,
+            )
+            for event in events:
+                _emit_event(event, json_output=args.json)
+            if not args.follow:
+                break
+            state = service.repository.get_state(args.job_id)
+            if (state.is_terminal or state.status.value == "blocked") and not events:
+                break
+            time.sleep(0.5)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
+def _parse_age(value: str) -> float:
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    text = value.strip().lower()
+    multiplier = units.get(text[-1:], 1)
+    number = text[:-1] if text[-1:] in units else text
+    seconds = float(number) * multiplier
+    if seconds <= 0:
+        raise ValueError("older-than must be positive")
+    return seconds
+
+
+def cmd_job_prune(args):
+    try:
+        if args.server:
+            raise ValueError("remote prune is not exposed by the Control API")
+        service = _local_job_service(args.config)
+        preview = service.repository.preview_prune(
+            older_than=time.time() - _parse_age(args.older_than)
+        )
+        result = service.repository.prune(preview, confirm=args.confirm)
+        payload = {
+            "confirmed": result.confirmed,
+            "selected_job_ids": list(result.selected_job_ids),
+            "deleted_job_ids": list(result.deleted_job_ids),
+            "reclaimed_bytes": result.reclaimed_bytes,
+        }
+        _print_job_payload(payload, json_output=args.json)
+        return EXIT_OK
+    except Exception as exc:
+        return _job_error_exit(exc, json_output=args.json)
+
+
 def cmd_gui(args):
     """
     启动 GUI 控制面板子命令
@@ -460,7 +839,13 @@ def cmd_gui(args):
     open_browser = not getattr(args, "no_browser", False)
 
     # 启动 Control Server
-    run_control_server(host="127.0.0.1", port=port, open_browser=open_browser)
+    run_control_server(
+        host=args.host,
+        port=port,
+        open_browser=open_browser,
+        config_path=args.config,
+        supervise_worker=True,
+    )
     return 0
 
 
@@ -510,6 +895,9 @@ def main():
         "--progress-file",
         help="Progress file path (used by GUI control panel)",
     )
+    p_process.add_argument(
+        "--json", action="store_true", help="Write one stable JSON result to stdout"
+    )
     p_process.set_defaults(func=cmd_process)
 
     # ===== gateway 子命令：API 网关 =====
@@ -530,6 +918,90 @@ def main():
     )
     p_gateway.add_argument("--reload", action="store_true", help="Auto reload")
     p_gateway.set_defaults(func=cmd_gateway)
+
+    # ===== worker 子命令：后台 Job Worker =====
+    p_worker = subparsers.add_parser("worker", help="Run background Job worker")
+    p_worker.add_argument(
+        "-c", "--config", default="config.yaml", help="Config file path"
+    )
+    p_worker.add_argument(
+        "--json", action="store_true", help="Write stable JSON status to stdout"
+    )
+    p_worker.set_defaults(func=cmd_worker)
+
+    # ===== job 子命令组：durable Job lifecycle =====
+    p_job = subparsers.add_parser("job", help="Manage durable background Jobs")
+    job_subparsers = p_job.add_subparsers(dest="job_command", required=True)
+
+    def add_job_common(parser, *, job_id: bool = False):
+        if job_id:
+            parser.add_argument("job_id", help="Job UUID")
+        parser.add_argument(
+            "-c", "--config", default="config.yaml", help="Local config path"
+        )
+        parser.add_argument(
+            "--server",
+            help="Remote Control API base URL (for example http://host:8790)",
+        )
+        parser.add_argument(
+            "--json", action="store_true", help="Write stable JSON/JSONL to stdout"
+        )
+
+    p_job_submit = job_subparsers.add_parser("submit", help="Submit a Job")
+    p_job_submit.add_argument("-c", "--config", required=True, help="Job config path")
+    p_job_submit.add_argument("--server", help="Remote Control API base URL")
+    p_job_submit.add_argument(
+        "--root-id", default="project", help="Remote workspace root id"
+    )
+    p_job_submit.add_argument("--json", action="store_true")
+    p_job_submit.set_defaults(func=cmd_job_submit)
+
+    p_job_list = job_subparsers.add_parser("list", help="List Jobs")
+    add_job_common(p_job_list)
+    p_job_list.set_defaults(func=cmd_job_list)
+
+    p_job_status = job_subparsers.add_parser("status", help="Show Job state")
+    add_job_common(p_job_status, job_id=True)
+    p_job_status.set_defaults(func=cmd_job_status)
+
+    p_job_cancel = job_subparsers.add_parser("cancel", help="Cancel a Job")
+    add_job_common(p_job_cancel, job_id=True)
+    p_job_cancel.set_defaults(func=cmd_job_cancel)
+
+    p_job_resume = job_subparsers.add_parser("resume", help="Resume a Job")
+    add_job_common(p_job_resume, job_id=True)
+    p_job_resume.set_defaults(func=cmd_job_resume)
+
+    p_job_events = job_subparsers.add_parser("events", help="Read Job events")
+    add_job_common(p_job_events, job_id=True)
+    p_job_events.add_argument("--after-seq", type=int, default=0)
+    p_job_events.add_argument("--limit", type=int, default=100)
+    p_job_events.add_argument("--follow", action="store_true")
+    p_job_events.set_defaults(func=cmd_job_events)
+
+    p_job_prune = job_subparsers.add_parser(
+        "prune", help="Preview or confirm deletion of old terminal Jobs"
+    )
+    add_job_common(p_job_prune)
+    p_job_prune.add_argument(
+        "--older-than", required=True, help="Age such as 7d or 12h"
+    )
+    p_job_prune.add_argument(
+        "--confirm", action="store_true", help="Actually delete previewed Jobs"
+    )
+    p_job_prune.set_defaults(func=cmd_job_prune)
+
+    # ===== config 子命令组 =====
+    p_config = subparsers.add_parser("config", help="Validate configuration")
+    config_subparsers = p_config.add_subparsers(dest="config_command", required=True)
+    p_config_validate = config_subparsers.add_parser(
+        "validate", help="Validate canonical v3.2 config"
+    )
+    p_config_validate.add_argument(
+        "-c", "--config", default="config.yaml", help="Config file path"
+    )
+    p_config_validate.add_argument("--json", action="store_true")
+    p_config_validate.set_defaults(func=cmd_config_validate)
 
     # ===== version 子命令：版本信息 =====
     p_version = subparsers.add_parser("version", help="Show version info")
@@ -567,6 +1039,12 @@ def main():
             help="Control server port (1024-65535)",
         )
         p_gui.add_argument(
+            "-c", "--config", default="config.yaml", help="Config file path"
+        )
+        p_gui.add_argument(
+            "--host", default="127.0.0.1", help="Control server listen address"
+        )
+        p_gui.add_argument(
             "--no-browser", action="store_true", help="Don't open browser automatically"
         )
         p_gui.set_defaults(func=cmd_gui)
@@ -583,18 +1061,26 @@ def main():
         # 调用对应的命令处理函数
         return args.func(args)
     except KeyboardInterrupt:
-        # 用户按 Ctrl+C 中断
-        print("\nInterrupted by user")
-        return 1
+        if not getattr(args, "json", False):
+            print("\nInterrupted by user", file=sys.stderr)
+        return EXIT_RUNTIME_ERROR
     except Exception as e:
-        # 未处理的异常
-        from src.utils.console import console
-
-        print(f"\n{console.error} {e}")
-        import traceback
-
-        traceback.print_exc()
-        return 1
+        json_output = bool(getattr(args, "json", False))
+        try:
+            from src.control.client import ControlClientError
+        except ImportError:
+            ControlClientError = ()  # type: ignore[assignment]
+        if isinstance(e, ControlClientError):
+            code = EXIT_CONNECTION_ERROR
+        elif isinstance(e, (ValueError, FileNotFoundError)):
+            code = EXIT_CONFIG_ERROR
+        else:
+            code = EXIT_RUNTIME_ERROR
+        if json_output:
+            _write_json(_error_payload("command_failed", str(e)))
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return code
 
 
 if __name__ == "__main__":

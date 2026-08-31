@@ -7,11 +7,12 @@
 #   - 手动触发（可运行集成测试）
 #
 # 任务组成:
-#   1. lint         — 代码质量检查（Ruff + Black + mypy + 语法检查）
-#   2. unit-tests   — 多平台多版本单元测试矩阵（7个OS × 5个Python版本）
-#   3. cli-test     — CLI 命令功能测试
-#   4. perf-libs    — 高性能库（Polars/fastexcel/xlsxwriter）可用性测试
-#   5. integration  — 集成测试（仅手动触发时运行）
+#   1. lint         — 固定版本的 Ruff + Black + 阻断式 mypy + 语法检查
+#   2. coverage     — 含 Gateway 的单元测试覆盖率门禁
+#   3. security     — pip-audit 依赖审计
+#   4. frontend     — lint / Vitest / Playwright E2E / build / npm audit
+#   5. unit-tests   — 多平台多版本单元测试矩阵
+#   6. cli-test / perf-libs / integration-test
 # =============================================================================
 name: Test
 
@@ -25,6 +26,11 @@ on:
       - 'main.py'
       - 'gateway.py'
       - 'requirements.txt'
+      - 'requirements-*.txt'
+      - '.coveragerc'
+      - 'web/**'
+      - '.github/scripts/**'
+      - 'config-example.yaml'
       - '.github/workflows/test.yml'
   pull_request:
     branches: [main, master, dev]
@@ -32,6 +38,12 @@ on:
       - 'src/**'
       - 'tests/**'
       - '*.py'
+      - 'requirements*.txt'
+      - '.coveragerc'
+      - 'web/**'
+      - '.github/scripts/**'
+      - 'config-example.yaml'
+      - '.github/workflows/test.yml'
   workflow_dispatch:                       # 手动触发（可运行集成测试）
 
 env:
@@ -56,7 +68,7 @@ jobs:
       - name: Install linters
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff black==25.11.0 mypy
+          python -m pip install -r requirements-dev.txt
 
       - name: Run Ruff
         run: ruff check src/ tests/ cli.py main.py gateway.py
@@ -64,13 +76,82 @@ jobs:
       - name: Run Black (check)
         run: black --check src/ tests/ cli.py main.py gateway.py
 
-      - name: Type check (allow missing types)   # mypy 类型检查（宽松模式，允许失败）
-        run: mypy src/ --ignore-missing-imports || true
+      - name: Type check (blocking)
+        run: mypy src/ --ignore-missing-imports
 
       - name: Syntax check                         # 确保所有 Python 文件语法正确
         run: |
           python -m py_compile cli.py main.py gateway.py
           find src -name "*.py" -exec python -m py_compile {} \;
+
+  coverage:
+    name: Coverage Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install runtime and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run non-integration coverage gate
+        run: >-
+          pytest tests/ -v -m "not integration" --tb=short
+          --cov=src --cov-branch --cov-report=xml --cov-report=json
+          --cov-report=term-missing
+      - name: Enforce overall and critical-module coverage thresholds
+        run: python .github/scripts/check_coverage.py coverage.json
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+
+  security:
+    name: Python Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install pinned pip-audit
+        run: python -m pip install "pip-audit==2.9.0"
+      - name: Audit Python runtime requirements
+        run: pip-audit -r requirements.txt
+
+  frontend:
+    name: Frontend Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Lint frontend
+        run: npm run lint
+      - name: Run frontend tests
+        run: npm run test
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run frontend E2E
+        run: npm run test:e2e
+      - name: Build frontend
+        run: npm run build
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
 
   # =========================================================================
   # 单元测试矩阵 — 覆盖 7 个 OS × 5 个 Python 版本（含 ARM 架构）
@@ -147,7 +228,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-core.txt
-          python -m pip install pytest pytest-asyncio pytest-cov pytest-mock
+          python -m pip install pytest==9.0.2 pytest-asyncio==1.3.0 pytest-mock==3.15.1
 
       - name: Install optional dependencies        # 安装可选性能依赖（允许失败，某些平台可能缺少预编译 wheel）
         # 部分平台可能缺少某些依赖的预编译 wheel，允许失败
@@ -158,16 +239,8 @@ jobs:
       - name: Verify dependencies availability      # 运行依赖检查脚本
         run: python .github/scripts/check_deps.py
 
-      - name: Run unit tests                       # 运行单元测试（排除集成测试，含覆盖率报告）
-        run: pytest tests/ -v -m "not integration" --tb=short --cov=src --cov-report=xml --cov-report=term
-
-      - name: Upload coverage                      # 仅在特定环境上传覆盖率报告到 Codecov
-        if: matrix.os == 'ubuntu-22.04' && matrix.python == '3.11'
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.xml
-          flags: unittests
-          fail_ci_if_error: false
+      - name: Run unit tests
+        run: pytest tests/ -v -m "not integration" --tb=short
 
   # =========================================================================
   # CLI 功能测试 — 验证所有 CLI 命令正常工作
@@ -244,12 +317,50 @@ jobs:
 
   # =========================================================================
   # 集成测试 — 在 PR/push/手动触发时运行
-  # 当前集成测试只使用本地临时文件和本地数据源，不依赖外部服务。
+  # MySQL/PostgreSQL 使用本 job 的一次性 service containers，不读取外部数据库。
   # =========================================================================
   # 集成测试
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dataflux_root
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: dataflux
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: dataflux
+          POSTGRES_PASSWORD: dataflux
+          POSTGRES_DB: dataflux
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U dataflux -d dataflux"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DATAFLUX_DB_INTEGRATION: '1'
+      DATAFLUX_MYSQL_HOST: 127.0.0.1
+      DATAFLUX_MYSQL_PORT: '3306'
+      DATAFLUX_MYSQL_DATABASE: dataflux
+      DATAFLUX_MYSQL_ROOT_PASSWORD: dataflux_root
+      DATAFLUX_POSTGRES_HOST: 127.0.0.1
+      DATAFLUX_POSTGRES_PORT: '5432'
+      DATAFLUX_POSTGRES_USER: dataflux
+      DATAFLUX_POSTGRES_PASSWORD: dataflux
+      DATAFLUX_POSTGRES_DATABASE: dataflux
     steps:
       - uses: actions/checkout@v4
 
@@ -262,7 +373,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-asyncio
+          python -m pip install pytest==9.0.2 pytest-asyncio==1.3.0
 
       - name: Run integration tests
         run: pytest tests/ -v -m "integration" --tb=short

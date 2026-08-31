@@ -97,7 +97,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .runtime import get_project_root, is_packaged
 
@@ -254,6 +254,18 @@ class ProcessManager:
         self._gateway_health_cache_ttl_ok_seconds: float = 2.0  # 探测成功时缓存 2 秒
         self._gateway_health_cache_ttl_fail_seconds: float = 5.0  # 探测失败时缓存 5 秒
         self._gateway_health_probe_timeout_seconds: float = 0.8  # 单次探测超时
+        self._access_token: str = ""
+
+    def set_access_token(self, token: str) -> None:
+        """Set the unified token inherited by children and health probes."""
+
+        self._access_token = token.strip()
+
+    def _subprocess_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self._access_token:
+            env["DATAFLUX_TOKEN"] = self._access_token
+        return env
 
     def _build_subprocess_cmd(self, subcommand: str, args: list[str]) -> list[str]:
         """
@@ -287,8 +299,9 @@ class ProcessManager:
                 pass
 
             # 取消日志读取任务
-            if self._read_tasks.get(name):
-                self._read_tasks[name].cancel()
+            read_task = self._read_tasks.get(name)
+            if read_task is not None:
+                read_task.cancel()
                 self._read_tasks[name] = None
 
     def start_gateway(
@@ -336,6 +349,7 @@ class ProcessManager:
             text=True,
             bufsize=1,
             cwd=PROJECT_ROOT,
+            env=self._subprocess_env(),
         )
 
         self._popen["gateway"] = proc
@@ -399,6 +413,7 @@ class ProcessManager:
             text=True,
             bufsize=1,
             cwd=PROJECT_ROOT,
+            env=self._subprocess_env(),
         )
 
         self._popen["process"] = proc
@@ -468,8 +483,9 @@ class ProcessManager:
         managed.exit_code = None
 
         # 取消日志读取任务
-        if self._read_tasks.get(name):
-            self._read_tasks[name].cancel()
+        read_task = self._read_tasks.get(name)
+        if read_task is not None:
+            read_task.cancel()
             self._read_tasks[name] = None
 
         logging.info(f"{name.capitalize()} stopped")
@@ -498,7 +514,7 @@ class ProcessManager:
         self._check_process_status("gateway")
         self._check_process_status("process")
 
-        result = {
+        result: dict[str, Any] = {
             "gateway": {
                 "managed": self.processes["gateway"].to_dict(),
             },
@@ -545,7 +561,7 @@ class ProcessManager:
         self._check_process_status("gateway")
         self._check_process_status("process")
 
-        result = {
+        result: dict[str, Any] = {
             "gateway": {
                 "managed": self.processes["gateway"].to_dict(),
             },
@@ -583,7 +599,12 @@ class ProcessManager:
 
         try:
             url = f"http://127.0.0.1:{port}/admin/health"
-            req = urllib.request.Request(url, method="GET")
+            headers = (
+                {"Authorization": f"Bearer {self._access_token}"}
+                if self._access_token
+                else {}
+            )
+            req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data

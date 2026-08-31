@@ -113,3 +113,17 @@ class TestFluxAIClient:
 
         c3 = FluxAIClient("http://api.com/v1/chat/completions")
         assert c3.api_url == "http://api.com/v1/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_call_uses_shared_bearer_token(self, mock_session):
+        client = FluxAIClient("http://test.api", api_token="shared-token")
+        response = AsyncMock()
+        response.status = 200
+        response.text.return_value = '{"choices": [{"message": {"content": "ok"}}]}'
+        mock_session.post.return_value.__aenter__.return_value = response
+
+        await client.call(mock_session, [], model="test")
+
+        assert mock_session.post.call_args.kwargs["headers"]["Authorization"] == (
+            "Bearer shared-token"
+        )

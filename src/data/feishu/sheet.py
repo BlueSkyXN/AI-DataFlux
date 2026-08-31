@@ -77,9 +77,11 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 
 import logging
 import threading
+import uuid
 from typing import Any
 
 from ..base import BaseTaskPool
+from ..contracts import AdapterCapabilities, WriteFailure, WritebackReceipt
 from . import run_async
 from .client import FeishuClient
 
@@ -344,7 +346,18 @@ class FeishuSheetTaskPool(BaseTaskPool):
             self.tasks = self.tasks[batch_size:]
             return batch
 
-    def update_task_results(self, results: dict[int, dict[str, Any]]) -> None:
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            atomic_batch=False,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=True,
+        )
+
+    def update_task_results(
+        self, results: dict[int, dict[str, Any]]
+    ) -> WritebackReceipt:
         """
         批量写回任务结果到飞书电子表格
 
@@ -354,7 +367,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
             results: {task_id(行索引): {alias: value, ...}, ...}
         """
         if not results:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex)
 
         # 按输出列分组写入（每列一次 API 调用更高效）
         # 构建写入数据: {col_name: {row_idx: value}}
@@ -371,11 +384,19 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     col_data[col_name][task_id] = row_result[alias]
 
         if not col_data:
-            return
+            return WritebackReceipt(batch_id=uuid.uuid4().hex)
 
-        run_async(self._write_results(col_data))
+        persisted, failures = run_async(self._write_results(col_data))
+        return WritebackReceipt(
+            batch_id=uuid.uuid4().hex,
+            persisted_ids=tuple(sorted(persisted)),
+            failures=tuple(failures),
+            atomic=False,
+        )
 
-    async def _write_results(self, col_data: dict[str, dict[int, Any]]) -> None:
+    async def _write_results(
+        self, col_data: dict[str, dict[int, Any]]
+    ) -> tuple[set[int], list[WriteFailure]]:
         """
         异步写入结果到电子表格
 
@@ -384,12 +405,25 @@ class FeishuSheetTaskPool(BaseTaskPool):
         """
         success_count = 0
         error_count = 0
+        candidate_ids = {task_id for rows in col_data.values() for task_id in rows}
+        failed_ids: set[int] = set()
+        failures: list[WriteFailure] = []
 
         for col_name, rows in col_data.items():
             col_idx = self._col_name_to_index.get(col_name)
             if col_idx is None:
                 self._logger.warning(f"列 '{col_name}' 不在表头中，跳过")
                 error_count += len(rows)
+                for task_id in rows:
+                    failed_ids.add(task_id)
+                    failures.append(
+                        WriteFailure(
+                            record_id=task_id,
+                            code="column_not_found",
+                            message=f"列 {col_name} 不在表头中",
+                            retryable=False,
+                        )
+                    )
                 continue
 
             col_letter = _col_index_to_letter(col_idx)
@@ -428,8 +462,18 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 except Exception as e:
                     self._logger.error(f"写入 {range_str} 失败: {e}")
                     error_count += len(segment)
+                    for row_idx, _ in segment:
+                        failed_ids.add(row_idx)
+                        failures.append(
+                            WriteFailure(
+                                record_id=row_idx,
+                                code="sheet_write_failed",
+                                message=str(e),
+                            )
+                        )
 
         self._logger.info(f"Sheet 写入完成，成功: {success_count}, 失败: {error_count}")
+        return candidate_ids - failed_ids, failures
 
     @staticmethod
     def _group_consecutive(
@@ -464,7 +508,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """采样未处理行"""
         self._load_snapshot_sync()
-        samples = []
+        samples: list[dict[str, Any]] = []
         for row in self._data_rows:
             if len(samples) >= sample_size:
                 break
@@ -477,7 +521,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """采样已处理行"""
         self._load_snapshot_sync()
-        samples = []
+        samples: list[dict[str, Any]] = []
         for row in self._data_rows:
             if len(samples) >= sample_size:
                 break
@@ -486,3 +530,18 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     {col: self._get_cell(row, col) for col in self.write_colnames}
                 )
         return samples
+
+    def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        self._load_snapshot_sync()
+        return [
+            {col: self._get_cell(row, col) for col in columns}
+            for row in self._data_rows
+        ]
+
+    def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
+        self._load_snapshot_sync()
+        return [
+            {col: self._get_cell(row, col) for col in columns}
+            for row in self._data_rows
+            if self._is_processed(row)
+        ]

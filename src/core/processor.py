@@ -120,16 +120,27 @@
 """
 
 import asyncio
+from collections import deque
 import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
+from collections.abc import Callable
 
 import aiohttp
 
-from ..config.settings import load_config, init_logging, merge_config, DEFAULT_CONFIG
+from ..config.settings import (
+    DEFAULT_CONFIG,
+    init_logging,
+    load_config,
+    merge_config,
+    validate_config,
+)
 from ..models.errors import ErrorType
 from ..data import create_task_pool
 from .scheduler import ShardedTaskManager
@@ -139,7 +150,7 @@ from .validator import JsonValidator
 from .content import ContentProcessor
 from .clients import FluxAIClient
 from .state import TaskStateManager
-from .retry import RetryStrategy, RetryAction
+from .retry import RetryAction, RetryDecision, RetryStrategy
 
 
 class UniversalAIProcessor:
@@ -179,7 +190,7 @@ class UniversalAIProcessor:
         task_manager: ShardedTaskManager 实例
     """
 
-    def __init__(self, config_path: str, progress_file: str = None):
+    def __init__(self, config_path: str, progress_file: str | None = None):
         """
         初始化处理器
 
@@ -198,6 +209,9 @@ class UniversalAIProcessor:
             config_path_obj = Path(config_path)
             self.config_base_dir = config_path_obj.parent
             user_config = load_config(config_path)
+            validation = validate_config(user_config, config_path_obj)
+            if validation["errors"]:
+                raise ValueError("; ".join(validation["errors"]))
             self.config = merge_config(DEFAULT_CONFIG, user_config)
         except Exception as e:
             raise ValueError(f"无法加载配置文件: {e}") from e
@@ -218,10 +232,17 @@ class UniversalAIProcessor:
         # 并发配置
         concurrency_cfg = datasource_cfg.get("concurrency", {})
         self.batch_size = concurrency_cfg.get("batch_size", 100)
+        self.max_in_flight = concurrency_cfg.get("max_in_flight", self.batch_size)
         self.max_connections = concurrency_cfg.get("max_connections", 1000)
         self.max_connections_per_host = concurrency_cfg.get(
             "max_connections_per_host", 0
         )
+        self.write_retry_limit = int(
+            concurrency_cfg.get("retry_limits", {}).get("system_error", 2)
+        )
+        self._job_cancel_event: asyncio.Event | None = None
+        self._target_concurrency_provider: Callable[[], int] | None = None
+        self._job_tracker: Any | None = None
 
         api_pause_duration = float(concurrency_cfg.get("api_pause_duration", 2.0))
         api_error_trigger_window = float(
@@ -240,7 +261,11 @@ class UniversalAIProcessor:
 
         # API 客户端
         logging.info(f"API 端点: {self.flux_api_url}")
-        self.client = FluxAIClient(self.flux_api_url)
+        gateway_token = (
+            os.getenv("DATAFLUX_TOKEN", "").strip()
+            or str(self.config.get("server", {}).get("token", "")).strip()
+        )
+        self.client = FluxAIClient(self.flux_api_url, api_token=gateway_token)
 
         # 默认验证器
         self.validator = JsonValidator()
@@ -517,7 +542,18 @@ class UniversalAIProcessor:
 
         return context
 
-    async def process_shard_async_continuous(self) -> None:
+    def configure_job_control(
+        self,
+        *,
+        cancel_event: asyncio.Event | None = None,
+        target_concurrency_provider: Callable[[], int] | None = None,
+        job_tracker: Any | None = None,
+    ) -> None:
+        self._job_cancel_event = cancel_event
+        self._target_concurrency_provider = target_concurrency_provider
+        self._job_tracker = job_tracker
+
+    async def process_shard_async_continuous(self) -> bool:
         """
         连续任务流模式的异步处理
 
@@ -539,21 +575,31 @@ class UniversalAIProcessor:
         Raises:
             Exception: 处理过程中的异常会被记录，但不会中断整体流程
         """
-        if not self.task_manager.initialize():
-            logging.info("无任务或初始化失败")
-            return
-
         try:
+            self.task_manager.start_time = time.time()
+            self.task_manager.total_estimated = await asyncio.to_thread(
+                self.task_pool.get_total_task_count
+            )
+            if self.task_manager.total_estimated <= 0:
+                logging.info("数据源中没有需要处理的任务")
+                return True
+            self.task_manager.current_shard_index = 0
+            self.task_manager.total_shards = max(
+                1,
+                (self.task_manager.total_estimated + max(1, self.batch_size) - 1)
+                // max(1, self.batch_size),
+            )
+
             # 创建连接池
             connector = aiohttp.TCPConnector(
                 limit=self.max_connections, limit_per_host=self.max_connections_per_host
             )
             async with aiohttp.ClientSession(connector=connector) as session:
-                await self._process_loop(session)
+                return await self._process_loop(session)
         finally:
             self.task_manager.finalize()
 
-    async def _process_loop(self, session: aiohttp.ClientSession) -> None:
+    async def _process_loop(self, session: aiohttp.ClientSession) -> bool:
         """
         主处理循环
 
@@ -606,58 +652,157 @@ class UniversalAIProcessor:
         current_shard_num = 0
         active_tasks: Set[asyncio.Task] = set()
         task_id_map: Dict[asyncio.Task, Tuple[Any, Dict[str, Any]]] = {}
+        source_queue: deque[Tuple[Any, Dict[str, Any]]] = deque()
+        retry_queue: deque[Tuple[Any, Dict[str, Any]]] = deque()
+        scan_cursor: Any | None = None
+        scan_exhausted = False
         results_buffer: Dict[Any, Dict[str, Any]] = {}
+        successful_result_ids: set[Any] = set()
 
         last_progress_time = time.time()
 
         while True:
-            # 1. 分片轮转检查
-            if not self.task_pool.has_tasks() and len(active_tasks) == 0:
-                if not self.task_manager.load_next_shard():
-                    logging.info("所有分片加载完毕")
-                    break
-                current_shard_num += 1
-                logging.info(
-                    f"--- 开始处理分片 {current_shard_num}/{self.task_manager.total_shards} ---"
-                )
-
-            # 2. 填充任务池 (Backpressure 控制)
-            space_available = self.batch_size - len(active_tasks)
-            if space_available > 0 and self.task_pool.has_tasks():
-                fetch_count = min(space_available, self.task_pool.get_remaining_count())
-                tasks_batch = self.task_pool.get_task_batch(fetch_count)
-
-                for record_id, data in tasks_batch:
-                    if self.state_manager.try_start_task(record_id):
-                        # 确保元数据已创建
-                        self.state_manager.get_metadata(record_id)
-
-                        task = asyncio.create_task(
-                            self._process_one_record(session, record_id, data)
+            if self._job_cancel_event is not None and self._job_cancel_event.is_set():
+                if self._job_tracker is not None:
+                    for record_id, data in task_id_map.values():
+                        self._job_tracker.mark_pending(
+                            record_id,
+                            data,
+                            error_code="cancelled",
                         )
-                        task_id_map[task] = (record_id, data)
-                        active_tasks.add(task)
-                    else:
-                        # 如果已经在处理中（理论上不应发生，除非 task pool 返回重复任务），放回队列
-                        self.task_pool.add_task_to_front(record_id, data)
+                for task in active_tasks:
+                    task.cancel()
+                if active_tasks:
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
+                logging.info("收到 Job 取消请求，停止调度新任务")
+                return False
+
+            if self._target_concurrency_provider is not None:
+                try:
+                    self.max_in_flight = max(
+                        1, int(self._target_concurrency_provider())
+                    )
+                except Exception:
+                    logging.exception("读取动态并发目标失败，保留当前值")
+
+            if (
+                scan_exhausted
+                and not source_queue
+                and not retry_queue
+                and not active_tasks
+            ):
+                logging.info("所有 datasource cursor 页面处理完毕")
+                return True
+
+            # 1. 通过 datasource-owned cursor 填充连续任务流。
+            space_available = self.max_in_flight - len(active_tasks)
+            tasks_batch: list[Tuple[Any, Dict[str, Any]]] = []
+            while space_available > len(tasks_batch):
+                if retry_queue:
+                    tasks_batch.append(retry_queue.popleft())
+                    continue
+                if source_queue:
+                    tasks_batch.append(source_queue.popleft())
+                    continue
+                if scan_exhausted:
+                    break
+
+                previous_cursor = scan_cursor
+                page = await self.task_pool.scan(scan_cursor, self.batch_size)
+                scan_cursor = page.next_cursor
+                if scan_cursor is None:
+                    scan_exhausted = True
+                elif scan_cursor == previous_cursor:
+                    raise RuntimeError("datasource scan cursor did not advance")
+
+                if page.records:
+                    records_to_process = page.records
+                    if self._job_tracker is not None:
+                        records_to_process = tuple(
+                            record
+                            for record in page.records
+                            if self._job_tracker.should_process_scanned(
+                                record.record_id
+                            )
+                        )
+                    current_shard_num += 1
+                    self.task_manager.current_shard_index = current_shard_num
+                    self.task_manager.total_shards = max(
+                        self.task_manager.total_shards,
+                        current_shard_num,
+                    )
+                    self.task_manager.total_estimated = max(
+                        self.task_manager.total_estimated,
+                        self.task_manager.total_processed_successfully
+                        + len(active_tasks)
+                        + len(source_queue)
+                        + len(retry_queue)
+                        + len(records_to_process),
+                    )
+                    logging.info(
+                        "--- 扫描 datasource 页面 %s/%s (%s 条记录) ---",
+                        current_shard_num,
+                        self.task_manager.total_shards,
+                        len(page.records),
+                    )
+                    if self._job_tracker is not None and records_to_process:
+                        self._job_tracker.register_scan_batch(
+                            self._job_tracker.new_scan_shard_id(),
+                            (
+                                (record.record_id, record.data)
+                                for record in records_to_process
+                            ),
+                            cursor=page.next_cursor,
+                        )
+                    source_queue.extend(
+                        (record.record_id, record.data) for record in records_to_process
+                    )
+
+            for record_id, data in tasks_batch:
+                if self.state_manager.try_start_task(record_id):
+                    metadata = self.state_manager.get_metadata(record_id)
+                    if self._job_tracker is not None:
+                        durable_retry_counts = self._job_tracker.retry_counts_for(
+                            record_id
+                        )
+                        for error_type in ErrorType:
+                            metadata.retry_counts[error_type] = (
+                                durable_retry_counts.get(
+                                    error_type.value,
+                                    0,
+                                )
+                            )
+                        self._job_tracker.mark_in_flight(record_id, data)
+
+                    task = asyncio.create_task(
+                        self._process_one_record(session, record_id, data)
+                    )
+                    task_id_map[task] = (record_id, data)
+                    active_tasks.add(task)
+                else:
+                    retry_queue.append((record_id, data))
 
             if not active_tasks:
+                if scan_exhausted and not source_queue and not retry_queue:
+                    logging.info("所有 datasource cursor 页面处理完毕")
+                    return True
                 await asyncio.sleep(0.1)
                 continue
 
-            # 3. 等待任一任务完成
+            # 2. 等待任一任务完成
             done, pending = await asyncio.wait(
                 active_tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
             )
             active_tasks = pending
 
-            # 4. 处理完成的任务
+            # 3. 处理完成的任务
             tasks_to_retry: List[Tuple[Any, Dict[str, Any]]] = []
             should_pause_api = False
             pause_duration = 0.0
+            retry_delay = 0.0
 
             for completed_task in done:
-                record_id, _ = task_id_map.pop(completed_task)
+                record_id, original_data = task_id_map.pop(completed_task)
                 self.state_manager.complete_task(record_id)
 
                 try:
@@ -667,28 +812,39 @@ class UniversalAIProcessor:
                     if error_type:
                         # 失败处理
                         metadata = self.state_manager.get_metadata(record_id)
-                        # 更新重试计数
-                        metadata.increment_retry(error_type)
                         metadata.add_error(error_type, result.get("_error", ""))
 
                         # 决策
-                        decision = self.retry_strategy.decide(error_type, metadata)
+                        if result.get("_retryable") is False:
+                            decision = RetryDecision(action=RetryAction.FAIL)
+                        else:
+                            decision = self.retry_strategy.decide(error_type, metadata)
 
                         if decision.action in [
                             RetryAction.RETRY,
                             RetryAction.PAUSE_THEN_RETRY,
                         ]:
+                            # retry_limits 表示首次请求之外允许的额外尝试次数。
+                            metadata.increment_retry(error_type)
                             self.task_manager.retried_tasks_count[error_type] += 1
                             logging.warning(
                                 f"记录[{record_id}] {error_type.value}: {result.get('_error')} -> 重试"
                             )
 
                             # 是否需要重新加载数据
-                            retry_data = None
+                            retry_data: dict[str, Any] | None = original_data
                             if decision.reload_data:
-                                retry_data = self.task_pool.reload_task_data(record_id)
+                                reloaded = await self.task_pool.reload([record_id])
+                                retry_data = reloaded.get(record_id)
 
                             if retry_data:
+                                if self._job_tracker is not None:
+                                    self._job_tracker.mark_pending(
+                                        record_id,
+                                        retry_data,
+                                        error_code=error_type.value,
+                                        retry_error_type=error_type.value,
+                                    )
                                 tasks_to_retry.append((record_id, retry_data))
                             else:
                                 # 重新加载失败，算作系统错误或重试失败
@@ -696,13 +852,22 @@ class UniversalAIProcessor:
                                     f"记录[{record_id}] 重新加载数据失败，放弃任务"
                                 )
                                 self.task_manager.max_retries_exceeded_count += 1
+                                if self._job_tracker is not None:
+                                    self._job_tracker.mark_failed(
+                                        record_id,
+                                        error_code="reload_failed",
+                                    )
                                 self.state_manager.remove_metadata(record_id)
 
                             # 处理 API 暂停
                             if decision.action == RetryAction.PAUSE_THEN_RETRY:
                                 should_pause_api = True
                                 pause_duration = decision.pause_duration
-                                self.retry_strategy.record_pause()
+                            retry_delay = max(
+                                retry_delay,
+                                decision.retry_delay,
+                                float(result.get("_retry_after", 0.0) or 0.0),
+                            )
 
                         else:  # FAIL
                             logging.error(
@@ -710,41 +875,67 @@ class UniversalAIProcessor:
                             )
                             self.task_manager.max_retries_exceeded_count += 1
 
-                            # 将错误信息写回数据源
-                            error_result = {}
-                            error_msg = f"ERROR: {error_type.value} - {result.get('_error', 'unknown')}"
-
-                            # 对所有输出列填充错误信息
-                            for alias in self.columns_to_write.keys():
-                                error_result[alias] = error_msg
-
-                            results_buffer[record_id] = error_result
+                            if self._job_tracker is not None:
+                                self._job_tracker.mark_failed(
+                                    record_id,
+                                    error_code=error_type.value,
+                                )
                             self.state_manager.remove_metadata(record_id)
                     else:
                         # 成功
+                        if self._job_tracker is not None:
+                            self._job_tracker.mark_ai_complete(record_id, result)
                         results_buffer[record_id] = result
-                        self.task_manager.total_processed_successfully += 1
-                        self.state_manager.remove_metadata(record_id)
+                        successful_result_ids.add(record_id)
 
                 except Exception as e:
                     logging.error(f"处理结果时发生未捕获异常: {e}")
                     self.state_manager.remove_metadata(record_id)
+                    raise
 
-            # 5. 执行 API 暂停
-            if should_pause_api:
-                logging.warning(f"触发 API 熔断，暂停 {pause_duration}s...")
-                await asyncio.sleep(pause_duration)
+            # 4. 执行 API 暂停
+            sleep_duration = max(pause_duration, retry_delay)
+            if sleep_duration > 0:
+                logging.warning("重试退避 %.2fs...", sleep_duration)
+                await asyncio.sleep(sleep_duration)
+                if should_pause_api:
+                    self.retry_strategy.record_pause()
 
-            # 6. 重新入队重试任务
-            for r_id, r_data in tasks_to_retry:
-                self.task_pool.add_task_to_front(r_id, r_data)
+            # 5. 重新入队重试任务
+            for r_id, r_data in reversed(tasks_to_retry):
+                retry_queue.appendleft((r_id, r_data))
 
-            # 7. 批量回写结果
+            # 6. 批量回写结果
             if results_buffer:
-                self.task_pool.update_task_results(results_buffer)
+                persisted_ids = await self._persist_results_with_retry(results_buffer)
+                for record_id in persisted_ids:
+                    if record_id in successful_result_ids:
+                        self.task_manager.total_processed_successfully += 1
+                        if self._job_tracker is not None:
+                            self._job_tracker.mark_persisted(record_id)
+                    self.state_manager.remove_metadata(record_id)
+                failed_write_ids = set(results_buffer) - persisted_ids
+                for record_id in failed_write_ids:
+                    logging.error(
+                        "记录[%s] AI 处理完成但结果未持久化，不能计为成功",
+                        record_id,
+                    )
+                    self.task_manager.max_retries_exceeded_count += 1
+                    if self._job_tracker is not None:
+                        self._job_tracker.mark_failed(
+                            record_id,
+                            error_code="writeback_failed",
+                            result=(
+                                results_buffer[record_id]
+                                if record_id in successful_result_ids
+                                else None
+                            ),
+                        )
+                    self.state_manager.remove_metadata(record_id)
                 results_buffer.clear()
+                successful_result_ids.clear()
 
-            # 8. 监控与日志
+            # 7. 监控与日志
             current_time = time.time()
             if current_time - last_progress_time >= 5.0:
                 self.task_manager.monitor_memory_usage()
@@ -758,6 +949,85 @@ class UniversalAIProcessor:
                 self.state_manager.cleanup_expired()
                 # 写入进度文件 (GUI 控制面板读取)
                 self._write_progress()
+
+    async def _persist_results_with_retry(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> set[Any]:
+        """Persist result batches and only acknowledge datasource receipts."""
+
+        pending = dict(results)
+        persisted: set[Any] = set()
+        attempts = self.write_retry_limit + 1
+
+        for attempt in range(attempts):
+            if not pending:
+                break
+            batch_id = uuid.uuid4().hex
+            try:
+                receipt = await self.task_pool.write_results(batch_id, pending)
+                pending_ids = set(pending)
+                acknowledged = set(receipt.persisted_ids)
+                receipt_failure_ids = {
+                    failure.record_id for failure in receipt.failures
+                }
+                unknown_ids = (acknowledged | receipt_failure_ids) - pending_ids
+                conflicting_ids = acknowledged & receipt_failure_ids
+                if unknown_ids or conflicting_ids:
+                    raise ValueError(
+                        "invalid writeback receipt: "
+                        f"unknown_ids={sorted(map(str, unknown_ids))}, "
+                        f"conflicting_ids={sorted(map(str, conflicting_ids))}"
+                    )
+                persisted.update(acknowledged)
+                retryable_failed_ids = {
+                    failure.record_id
+                    for failure in receipt.failures
+                    if failure.retryable and failure.record_id not in acknowledged
+                }
+                permanent_failed_ids = {
+                    failure.record_id
+                    for failure in receipt.failures
+                    if not failure.retryable and failure.record_id not in acknowledged
+                }
+                failed_ids = retryable_failed_ids | permanent_failed_ids
+                unacknowledged = set(pending) - acknowledged - failed_ids
+                retry_ids = retryable_failed_ids | unacknowledged
+                pending = {
+                    record_id: value
+                    for record_id, value in pending.items()
+                    if record_id in retry_ids
+                }
+            except Exception as exc:
+                logging.error(
+                    "结果写回批次 %s 失败 (%s/%s): %s",
+                    batch_id,
+                    attempt + 1,
+                    attempts,
+                    exc,
+                    exc_info=True,
+                )
+
+            if pending and attempt + 1 < attempts:
+                await asyncio.sleep(min(2**attempt, 5))
+
+        return persisted
+
+    async def persist_checkpoint_results(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> set[Any]:
+        """Replay AI-complete outputs before datasource scanning resumes."""
+
+        persisted = await self._persist_results_with_retry(results)
+        if self._job_tracker is not None:
+            for record_id in persisted:
+                self._job_tracker.mark_persisted(record_id)
+            for record_id in set(results) - persisted:
+                self._job_tracker.mark_failed(
+                    record_id,
+                    error_code="checkpoint_writeback_failed",
+                    result=results[record_id],
+                )
+        return persisted
 
     async def _process_one_record(
         self, session: aiohttp.ClientSession, record_id: Any, row_data: Dict[str, Any]
@@ -831,17 +1101,28 @@ class UniversalAIProcessor:
                 model=model,
                 temperature=temperature if temperature_override else None,
                 use_json_schema=use_schema,
+                json_schema=(content_processor.build_schema() if use_schema else None),
             )
 
             # 3. 解析结果
             result = content_processor.parse_response(response_content)
             return result
 
-        except (aiohttp.ClientResponseError, TimeoutError, aiohttp.ClientError) as e:
+        except aiohttp.ClientResponseError as e:
+            retryable = e.status in {408, 429} or 500 <= e.status <= 599
+            return {
+                "_error": f"api_call_failed: HTTP {e.status}",
+                "_error_type": ErrorType.API,
+                "_details": str(e)[:200],
+                "_retryable": retryable,
+                "_retry_after": self._parse_retry_after(e.headers),
+            }
+        except (TimeoutError, aiohttp.ClientError) as e:
             return {
                 "_error": f"api_call_failed: {type(e).__name__}",
                 "_error_type": ErrorType.API,
                 "_details": str(e)[:200],
+                "_retryable": True,
             }
         except Exception as e:
             logging.exception(f"记录[{record_id}] 处理异常: {e}")
@@ -850,7 +1131,28 @@ class UniversalAIProcessor:
                 "_error_type": ErrorType.SYSTEM,
             }
 
-    def run(self) -> None:
+    @staticmethod
+    def _parse_retry_after(headers: Any) -> float:
+        if not headers:
+            return 0.0
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+        if raw is None:
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            try:
+                target = parsedate_to_datetime(str(raw))
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=timezone.utc)
+                return max(
+                    0.0,
+                    (target - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+
+    def run(self) -> bool:
         """
         运行处理器（同步入口）
 
@@ -863,7 +1165,7 @@ class UniversalAIProcessor:
         """
         logging.info("启动 AI 数据处理引擎...")
         try:
-            asyncio.run(self.process_shard_async_continuous())
+            completed = asyncio.run(self.process_shard_async_continuous())
         except Exception:
             # 异常退出时保留进度文件，便于 GUI 侧基于 ts 判断超时/残留
             raise
@@ -871,3 +1173,4 @@ class UniversalAIProcessor:
             # 正常结束才清理进度文件
             self._cleanup_progress()
         logging.info("AI 数据处理引擎已停止")
+        return completed

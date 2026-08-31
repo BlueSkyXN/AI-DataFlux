@@ -34,6 +34,12 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
           <FormField label={t.cfgBatchSize} description={t.cfgBatchSizeDesc}>
             <NumberInput value={get('batch_size') ?? 100} onChange={(v) => set('batch_size', v)} min={1} />
           </FormField>
+          <FormField
+            label="max_in_flight"
+            description={language === 'zh' ? 'Job 资源调度器可动态下调的协同并发上限' : 'Cooperative Job concurrency ceiling that the resource scheduler may lower'}
+          >
+            <NumberInput value={get('max_in_flight') ?? get('batch_size') ?? 100} onChange={(v) => set('max_in_flight', v)} min={1} />
+          </FormField>
           <FormField label={t.cfgSaveInterval} description={t.cfgSaveIntervalDesc}>
             <NumberInput value={get('save_interval') ?? 300} onChange={(v) => set('save_interval', v)} min={1} />
           </FormField>

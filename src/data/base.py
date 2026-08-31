@@ -97,10 +97,20 @@
         # 实现其他抽象方法...
 """
 
+import asyncio
 import logging
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Any
+
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WriteFailure,
+    WritebackReceipt,
+)
 
 
 class BaseTaskPool(ABC):
@@ -216,7 +226,9 @@ class BaseTaskPool(ABC):
         pass
 
     @abstractmethod
-    def update_task_results(self, results: dict[Any, dict[str, Any]]) -> None:
+    def update_task_results(
+        self, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         """
         批量写回任务结果
 
@@ -328,6 +340,133 @@ class BaseTaskPool(ABC):
         with self.lock:
             self.tasks.clear()
 
+    # ==================== v3.2 async adapter contract ====================
+
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        """Return conservative recovery guarantees for legacy task pools."""
+
+        return AdapterCapabilities(
+            atomic_batch=False,
+            idempotent_write=True,
+            resumable=True,
+            full_scan=(
+                self.__class__.fetch_all_rows is not BaseTaskPool.fetch_all_rows
+            ),
+        )
+
+    async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
+        """Read a page through an opaque cursor without exposing shard math.
+
+        Existing task pools keep their optimized shard loaders.  This default
+        bridge is intentionally one-page and is overridden by adapters that
+        support native keyset/page cursors.
+        """
+
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        if cursor is None:
+            min_id, max_id = await asyncio.to_thread(self.get_id_boundaries)
+            if min_id is None or max_id is None:
+                return TaskBatch(records=(), next_cursor=None)
+            await asyncio.to_thread(self.initialize_shard, 0, min_id, max_id)
+        elif cursor != {"legacy_queue": True}:
+            raise ValueError("invalid legacy datasource cursor")
+        records = await asyncio.to_thread(self.get_task_batch, limit)
+        remaining = await asyncio.to_thread(self.has_tasks)
+        next_cursor = {"legacy_queue": True} if remaining else None
+        return TaskBatch(
+            records=tuple(
+                TaskRecord(record_id=rid, data=data) for rid, data in records
+            ),
+            next_cursor=next_cursor,
+        )
+
+    async def reload(self, record_ids: list[Any]) -> dict[Any, dict[str, Any]]:
+        """Reload records while preserving the caller's opaque identifiers."""
+
+        result: dict[Any, dict[str, Any]] = {}
+        for record_id in record_ids:
+            data = await asyncio.to_thread(self.reload_task_data, record_id)
+            if data is not None:
+                result[record_id] = data
+        return result
+
+    async def write_results(
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """Write results and require the adapter's durable receipt."""
+
+        receipt = await asyncio.to_thread(self.update_task_results, results)
+        if not isinstance(receipt, WritebackReceipt):
+            raise TypeError(
+                f"{type(self).__name__}.update_task_results() must return "
+                "WritebackReceipt"
+            )
+        return replace(receipt, batch_id=batch_id)
+
+    async def sample(
+        self,
+        mode: str,
+        limit: int | None,
+        columns: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Unified sampling/full-scan interface used by TokenEstimator."""
+
+        if mode not in {"unprocessed", "processed", "all", "all_processed"}:
+            raise ValueError(f"unsupported sample mode: {mode}")
+        if limit is not None and limit <= 0:
+            return []
+
+        if mode == "unprocessed":
+            return await asyncio.to_thread(self.sample_unprocessed_rows, limit or 1)
+        if mode == "processed":
+            return await asyncio.to_thread(self.sample_processed_rows, limit or 1)
+        if mode == "all":
+            rows = await asyncio.to_thread(
+                self.fetch_all_rows, columns or self.columns_to_extract
+            )
+        else:
+            rows = await asyncio.to_thread(
+                self.fetch_all_processed_rows,
+                columns or list(self.columns_to_write.values()),
+            )
+        return rows if limit is None else rows[:limit]
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self.close)
+
+    def close_readonly(self) -> None:
+        """Close resources for a read-only workflow without persisting changes."""
+
+        self.close()
+
+    @staticmethod
+    def failed_receipt(
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+        exc: Exception,
+        *,
+        retryable: bool = True,
+    ) -> WritebackReceipt:
+        """Build a uniform receipt for an adapter-level write failure."""
+
+        return WritebackReceipt(
+            batch_id=batch_id,
+            failures=tuple(
+                WriteFailure(
+                    record_id=record_id,
+                    code=type(exc).__name__,
+                    message=str(exc),
+                    retryable=retryable,
+                )
+                for record_id in results
+            ),
+            atomic=False,
+        )
+
     # ==================== Token 估算采样（子类可覆盖） ====================
 
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
@@ -345,7 +484,7 @@ class BaseTaskPool(ABC):
         """
         # 默认实现：使用分片加载
         min_id, max_id = self.get_id_boundaries()
-        if min_id > max_id:
+        if min_id is None or max_id is None or min_id > max_id:
             return []
 
         # 初始化分片加载部分数据

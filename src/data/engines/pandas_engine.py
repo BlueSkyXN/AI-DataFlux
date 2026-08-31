@@ -355,7 +355,16 @@ class PandasEngine(BaseEngine):
         self, df: pd.DataFrame, idx: int, column: str, value: Any
     ) -> pd.DataFrame:
         """设置单元格值"""
-        df.at[idx, column] = value
+        try:
+            df.at[idx, column] = value
+        except (TypeError, ValueError):
+            # Empty CSV/Excel output columns are commonly inferred as float64
+            # because they contain only NaN. AI results may be strings or
+            # structured values, so promote the destination to object before
+            # retrying instead of treating a dtype inference artifact as a
+            # writeback failure.
+            df[column] = df[column].astype("object")
+            df.at[idx, column] = value
         return df
 
     def set_values_batch(
@@ -363,7 +372,7 @@ class PandasEngine(BaseEngine):
     ) -> pd.DataFrame:
         """批量设置多个单元格值"""
         for idx, column, value in updates:
-            df.at[idx, column] = value
+            df = self.set_value(df, idx, column, value)
         return df
 
     # ==================== 列操作 ====================

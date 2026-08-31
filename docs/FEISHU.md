@@ -37,7 +37,7 @@ feishu:
   table_id: "tblXXXXXXXXXXXX"         # 数据表 ID
 ```
 
-兼容性说明：`app_token/table_id/spreadsheet_token/sheet_id` 也可放在 `datasource` 节。只有当 `feishu` 节对应键缺失（`null/undefined`）时才回退读取 `datasource`；若 `feishu` 键显式为空字符串，则视为主动清空，不再回退旧值。
+3.2 严格配置不再回退 `datasource.app_token/table_id/spreadsheet_token/sheet_id`。这些资源字段必须放在 `feishu` 节；旧路径会在配置验证时失败。
 
 ### 2. 电子表格配置
 

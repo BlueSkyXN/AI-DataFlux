@@ -472,11 +472,14 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
     """
     import copy
     from pathlib import Path
-    from ..config.settings import load_config, init_logging
+    from ..config.settings import init_logging, load_config, validate_config
     from ..data import create_task_pool
 
     # 加载配置
     config = load_config(config_path)
+    validation = validate_config(config, config_path)
+    if validation["errors"]:
+        raise ValueError("; ".join(validation["errors"]))
 
     # 初始化日志 (token 命令也输出进度日志)
     global_cfg = config.get("global", {})
@@ -553,5 +556,12 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
         result = estimator.estimate(input_pool, output_pool)
         return result
     finally:
-        # 关闭任务池 (不保存)
-        pass  # Excel 任务池的 close() 会保存，这里跳过
+        # Read-only cleanup must release DB/HTTP resources without saving files.
+        pools = [input_pool]
+        if output_pool is not input_pool:
+            pools.append(output_pool)
+        for pool in pools:
+            try:
+                pool.close_readonly()
+            except Exception:
+                logging.exception("关闭 Token 估算任务池失败")

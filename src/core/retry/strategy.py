@@ -73,6 +73,7 @@ API 熔断机制:
 """
 
 import time
+import random
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict
@@ -109,6 +110,7 @@ class RetryDecision:
     action: RetryAction
     pause_duration: float = 0.0
     reload_data: bool = False
+    retry_delay: float = 0.0
 
 
 class RetryStrategy:
@@ -139,6 +141,8 @@ class RetryStrategy:
         max_retries: Dict[ErrorType, int],
         api_pause_duration: float = 2.0,
         api_error_trigger_window: float = 2.0,
+        base_backoff_seconds: float = 0.5,
+        max_backoff_seconds: float = 30.0,
     ):
         """
         初始化重试策略
@@ -153,6 +157,8 @@ class RetryStrategy:
         self.max_retries = max_retries
         self.api_pause_duration = api_pause_duration
         self.api_error_trigger_window = api_error_trigger_window
+        self.base_backoff_seconds = base_backoff_seconds
+        self.max_backoff_seconds = max_backoff_seconds
         self.last_pause_end_time = 0.0  # 上次暂停结束的时间戳
 
     def decide(self, error_type: ErrorType, metadata: TaskMetadata) -> RetryDecision:
@@ -180,6 +186,12 @@ class RetryStrategy:
         if current_retries >= max_allowed:
             return RetryDecision(action=RetryAction.FAIL)
 
+        base_delay = min(
+            self.max_backoff_seconds,
+            self.base_backoff_seconds * (2**current_retries),
+        )
+        retry_delay = base_delay + random.uniform(0, base_delay * 0.25)
+
         # 2. API 错误特殊处理（熔断机制）
         if error_type == ErrorType.API:
             current_time = time.time()
@@ -192,16 +204,23 @@ class RetryStrategy:
                     action=RetryAction.PAUSE_THEN_RETRY,
                     pause_duration=self.api_pause_duration,
                     reload_data=True,  # API 错误需要重载数据
+                    retry_delay=retry_delay,
                 )
 
             # 如果刚暂停过（在窗口内），就普通重试避免连续暂停
-            return RetryDecision(action=RetryAction.RETRY, reload_data=True)
+            return RetryDecision(
+                action=RetryAction.RETRY,
+                reload_data=True,
+                retry_delay=retry_delay,
+            )
 
         # 3. 其他错误类型
         # 内容错误（JSON解析失败）: 不需要重新加载数据，因为数据本身没变
         # 系统错误: 可能涉及数据处理异常，需要重新加载数据
         return RetryDecision(
-            action=RetryAction.RETRY, reload_data=(error_type == ErrorType.SYSTEM)
+            action=RetryAction.RETRY,
+            reload_data=(error_type == ErrorType.SYSTEM),
+            retry_delay=retry_delay,
         )
 
     def record_pause(self):

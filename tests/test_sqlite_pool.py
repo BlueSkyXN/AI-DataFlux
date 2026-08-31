@@ -251,6 +251,22 @@ class TestSQLiteTaskPool:
 
         # 不应该抛出异常，错误记录被跳过
 
+    def test_update_task_results_rolls_back_entire_batch(self, task_pool, temp_db):
+        with pytest.raises(sqlite3.IntegrityError):
+            task_pool.update_task_results(
+                {
+                    1: {"result": "must rollback", "summary": "rollback"},
+                    999: {"result": "missing", "summary": "missing"},
+                }
+            )
+
+        conn = sqlite3.connect(str(temp_db))
+        row = conn.execute(
+            "SELECT output_result, output_summary FROM tasks WHERE id = 1"
+        ).fetchone()
+        conn.close()
+        assert row == (None, None)
+
     def test_reload_task_data(self, task_pool):
         """测试重载任务数据"""
         data = task_pool.reload_task_data(1)
@@ -350,4 +366,36 @@ class TestSQLiteTaskPoolWithRequireAny:
         count = pool.get_total_task_count()
         assert count == 2  # id=1 和 id=2 (至少有一个输入列非空)
 
+        pool.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_keyset_scan_preserves_string_ids(tmp_path):
+    db_path = tmp_path / "string_ids.db"
+    connection = sqlite3.connect(str(db_path))
+    connection.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, input_text TEXT, output_result TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO tasks VALUES (?, ?, ?)",
+        [("a-1", "one", None), ("b-2", "two", None), ("c-3", "three", None)],
+    )
+    connection.commit()
+    connection.close()
+
+    pool = SQLiteTaskPool(
+        db_path=db_path,
+        table_name="tasks",
+        columns_to_extract=["input_text"],
+        columns_to_write={"result": "output_result"},
+    )
+    try:
+        assert pool.get_id_boundaries() == ("a-1", "c-3")
+        first = await pool.scan(None, 2)
+        second = await pool.scan(first.next_cursor, 2)
+        assert [record.record_id for record in first.records] == ["a-1", "b-2"]
+        assert first.next_cursor == {"last_id": "b-2"}
+        assert [record.record_id for record in second.records] == ["c-3"]
+        assert second.next_cursor is None
+    finally:
         pool.close()

@@ -235,6 +235,12 @@ class TestPostgreSQLTaskPoolMocked:
         assert count == 42
         mock_cursor.execute.assert_called()
 
+        pool.execute_with_connection = MagicMock(
+            side_effect=RuntimeError("database unavailable")
+        )
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            pool.get_total_task_count()
+
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.extras")
     @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
@@ -296,7 +302,7 @@ class TestPostgreSQLTaskPoolMocked:
     @patch("src.data.postgresql.extras")
     @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
     def test_update_task_results_batch(self, mock_sql, mock_extras, mock_pool_manager):
-        """测试批量更新 - 验证方法被正确调用"""
+        """测试事务更新逐条确认实际命中记录。"""
         from src.data.postgresql import PostgreSQLTaskPool
 
         pool = PostgreSQLTaskPool(
@@ -315,13 +321,50 @@ class TestPostgreSQLTaskPoolMocked:
             1: {"result": "结果1"},
             2: {"result": "结果2"},
         }
+        mock_cursor = mock_pool_manager["cursor"]
+        mock_cursor.rowcount = 1
 
-        # 由于 psycopg2 不可用，这里会出错并被捕获
-        # 主要测试方法能被调用而不崩溃
-        pool.update_task_results(results)
+        receipt = pool.update_task_results(results)
 
-        # 如果 psycopg2 可用，会调用 execute_batch
-        # 由于不可用，跳过断言
+        assert receipt.persisted_ids == (1, 2)
+        assert receipt.atomic is True
+        assert mock_cursor.execute.call_count == 2
+
+        mock_cursor.reset_mock()
+        mock_cursor.rowcount = 0
+        with pytest.raises(RuntimeError, match="更新行数异常"):
+            pool.update_task_results({"missing": {"result": "结果"}})
+        mock_pool_manager["conn"].rollback.assert_called()
+
+    @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
+    @patch("src.data.postgresql.extras")
+    @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
+    def test_partial_result_preserves_unmentioned_columns(
+        self, mock_sql, mock_extras, mock_pool_manager
+    ):
+        from src.data.postgresql import PostgreSQLTaskPool
+
+        pool = PostgreSQLTaskPool(
+            connection_config={
+                "host": "localhost",
+                "user": "test",
+                "password": "test",
+                "database": "testdb",
+            },
+            columns_to_extract=["input_text"],
+            columns_to_write={
+                "result": "output_result",
+                "summary": "output_summary",
+            },
+            table_name="tasks",
+        )
+        mock_cursor = mock_pool_manager["cursor"]
+        mock_cursor.rowcount = 1
+
+        receipt = pool.update_task_results({"row-a": {"summary": "new-summary"}})
+
+        assert receipt.persisted_ids == ("row-a",)
+        assert mock_cursor.execute.call_args.args[1] == ("new-summary", "row-a")
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.extras")

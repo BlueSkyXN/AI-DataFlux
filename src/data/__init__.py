@@ -64,10 +64,24 @@
 """
 
 from .base import BaseTaskPool
+from .contracts import (
+    AdapterCapabilities,
+    TaskBatch,
+    TaskRecord,
+    WriteFailure,
+    WritebackReceipt,
+    declared_adapter_capabilities,
+)
 from .factory import create_task_pool, EXCEL_ENABLED, FEISHU_AVAILABLE, MYSQL_AVAILABLE
 
 __all__ = [
     "BaseTaskPool",
+    "AdapterCapabilities",
+    "TaskBatch",
+    "TaskRecord",
+    "WriteFailure",
+    "WritebackReceipt",
+    "declared_adapter_capabilities",
     "create_task_pool",
     "MYSQL_AVAILABLE",
     "EXCEL_ENABLED",

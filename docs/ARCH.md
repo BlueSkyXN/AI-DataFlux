@@ -1,5 +1,7 @@
 # AI-DataFlux 系统架构文档
 
+> **3.2 架构增量**：原有单次 Process + Gateway + Control 架构上新增 durable Job Repository、Job Worker、资源调度、workspace root 安全边界，以及 Chat Completions / Responses capability routing。详细持久化 schema 见 [JOBS.md](./JOBS.md)，Control REST/SSE 契约见 [CONTROL_API.md](./CONTROL_API.md)，Gateway 契约见 [GATEWAY_API.md](./GATEWAY_API.md)，旧配置迁移见 [MIGRATION_3_2.md](./MIGRATION_3_2.md)。本文其余章节中的旧 Process 进度文件和 Chat-only 示例仅作历史上下文，不覆盖上述 3.2 canonical contract。
+
 本文档全面阐述 AI-DataFlux 的系统架构、设计决策、核心机制和技术实现。
 
 ---
@@ -496,7 +498,7 @@ flowchart TB
 - 适用场景：实时 AI 请求转发、多模型负载均衡、统一 API 接口
 - 数据流向：客户端 → API 网关 → AI API → 即时响应
 - 特点：OpenAI 兼容、加权随机调度、令牌桶限流、自动故障转移
-- 启动命令：`python cli.py gateway --port 8787`
+- 启动命令：`DATAFLUX_TOKEN=<token> python cli.py gateway --port 8787`
 
 **GUI 控制面板模式** (可视化管理):
 - 适用场景：无需命令行操作，可视化管理 Gateway 和 Process 进程
@@ -818,7 +820,7 @@ graph TB
 
     subgraph "数据库类型"
         MySQL[MySQLTaskPool<br/>✅ 已实现<br/>连接池: mysql.connector.pooling<br/>批量操作: 拼接 SQL]
-        PostgreSQL[PostgreSQLTaskPool<br/>✅ 已实现<br/>连接池: ThreadedConnectionPool<br/>批量操作: execute_batch]
+        PostgreSQL[PostgreSQLTaskPool<br/>✅ 已实现<br/>连接池: ThreadedConnectionPool<br/>事务写回: rowcount 确认]
         SQLite[SQLiteTaskPool<br/>✅ 已实现<br/>连接池: threading.local<br/>WAL 模式]
     end
 
@@ -858,7 +860,7 @@ BaseTaskPool
     │
     ├─── PostgreSQLTaskPool
     │    ├─ 连接池: psycopg2.pool.ThreadedConnectionPool
-    │    ├─ 批量操作: psycopg2.extras.execute_batch
+    │    ├─ 事务写回: 逐条 UPDATE 并确认 rowcount
     │    └─ 特点: 企业级、事务安全
     │
     ├─── SQLiteTaskPool
@@ -1448,7 +1450,7 @@ GET /                          # 根路径
         │   │
         │   └─ 数据库:
         │       ├─ MySQL: 拼接 UPDATE SQL
-        │       ├─ PostgreSQL: execute_batch()
+        │       ├─ PostgreSQL: 单事务 UPDATE + rowcount 确认
         │       └─ SQLite: executemany()
         │
         ├─▶ TaskStateManager.complete_task(id)

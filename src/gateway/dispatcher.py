@@ -82,6 +82,16 @@ from typing import Any
 from .limiter import RWLock
 
 
+def _parse_capabilities(value: Any) -> set[str]:
+    """解析 canonical v3.2 capability 列表。"""
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("capabilities 必须是非空字符串列表")
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError("capabilities 中的每一项都必须是非空字符串")
+    return set(value)
+
+
 class ModelConfig:
     """
     模型配置类
@@ -134,20 +144,21 @@ class ModelConfig:
             model_dict.get("safe_rps", max(0.5, min(self.weight / 10, 10)))
         )
 
-        # 功能支持标志
-        self.supports_json_schema = bool(model_dict.get("supports_json_schema", False))
-        self.supports_advanced_params = bool(
-            model_dict.get("supports_advanced_params", False)
-        )
-
         # 从通道配置获取 API 端点信息
         channel = channels.get(self.channel_id, {})
         self.base_url = channel.get("base_url", "")
-        self.api_path = channel.get("api_path", "/v1/chat/completions")
+        endpoints = channel.get("endpoints", {})
+        if not isinstance(endpoints, dict):
+            raise ValueError(f"通道 '{self.channel_id}' 的 endpoints 必须是字典")
+        chat_endpoint = endpoints.get("chat_completions")
+        responses_endpoint = endpoints.get("responses")
         self.proxy = channel.get("proxy", "")
         self.ssl_verify = channel.get("ssl_verify", True)
         self.channel_name = channel.get("name", self.channel_id)
         self.channel_timeout = int(channel.get("timeout", 600))
+
+        # v3.2 只接受 model 级 canonical capability 列表。
+        self.capabilities = _parse_capabilities(model_dict.get("capabilities"))
 
         # 验证必填字段
         if not self.id or not self.model or not self.channel_id:
@@ -160,14 +171,47 @@ class ModelConfig:
             )
         if not self.base_url:
             raise ValueError(f"通道 '{self.channel_id}' 缺少 base_url 配置")
+        if "chat_completions" in self.capabilities and not chat_endpoint:
+            raise ValueError(
+                f"模型 '{self.id}' 支持 chat_completions，"
+                f"但通道 '{self.channel_id}' 未配置对应 endpoint"
+            )
+        if "responses" in self.capabilities and not responses_endpoint:
+            raise ValueError(
+                f"模型 '{self.id}' 支持 responses，"
+                f"但通道 '{self.channel_id}' 未配置对应 endpoint"
+            )
 
         # 计算最终超时时间（取模型和通道中的较小值）
         self.final_timeout = min(self.timeout, self.channel_timeout)
         self.connect_timeout = 30  # 固定的连接超时时间
         self.read_timeout = self.final_timeout  # 总读取/处理超时时间
 
-        # 构建完整 API URL
-        self.api_url = self.base_url.rstrip("/") + self.api_path
+        # 构建 canonical endpoint URL 映射。
+        self.endpoint_urls = {
+            "chat_completions": (
+                self.base_url.rstrip("/") + str(chat_endpoint) if chat_endpoint else ""
+            ),
+            "responses": (
+                self.base_url.rstrip("/") + str(responses_endpoint)
+                if responses_endpoint
+                else ""
+            ),
+        }
+
+    def supports(self, required_capabilities: set[str]) -> bool:
+        """判断模型是否支持请求所需的全部能力。"""
+        return required_capabilities.issubset(self.capabilities)
+
+    def api_url_for(self, endpoint: str) -> str:
+        """返回 Chat Completions 或 Responses 的上游地址。"""
+        try:
+            api_url = self.endpoint_urls[endpoint]
+        except KeyError as exc:
+            raise ValueError(f"不支持的 Gateway endpoint: {endpoint}") from exc
+        if not api_url:
+            raise ValueError(f"模型 '{self.id}' 未配置 {endpoint} endpoint")
+        return api_url
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -183,8 +227,7 @@ class ModelConfig:
             "channel_id": self.channel_id,
             "weight": self.weight,
             "safe_rps": self.safe_rps,
-            "supports_json_schema": self.supports_json_schema,
-            "supports_advanced_params": self.supports_advanced_params,
+            "capabilities": sorted(self.capabilities),
             "channel_name": self.channel_name,
         }
 

@@ -19,7 +19,7 @@ Control Server 主模块
 
 鉴权函数:
     get_control_auth_token() -> str
-        获取控制面板鉴权 Token（优先环境变量 DATAFLUX_CONTROL_TOKEN，缺省自动生成）
+        获取控制面板鉴权 Token（优先环境变量 DATAFLUX_TOKEN，缺省自动生成）
     _extract_bearer_token(auth_header) -> str
         从 Authorization 头提取 Bearer token
     _is_authorized_token(token) -> bool
@@ -105,6 +105,8 @@ import logging
 import os
 import re
 import secrets
+from pathlib import Path
+from uuid import uuid4
 import webbrowser
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, List
@@ -113,23 +115,43 @@ from urllib.parse import quote
 import uvicorn
 from fastapi import (
     FastAPI,
+    Header,
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src import __version__
+from src.config import (
+    DEFAULT_CONFIG,
+    load_config,
+    merge_config,
+    resolve_access_token,
+    resolve_workspace_path,
+    resolve_workspace_roots,
+    validate_config,
+)
+from src.jobs import JobNotFoundError
+from src.models.errors import ConfigError
 
-from .config_api import read_config, write_config
+from .config_api import (
+    ConfigRevisionConflictError,
+    read_config,
+    read_workspace_config,
+    write_config,
+    write_workspace_config,
+)
+from .job_service import MAX_JOB_MAX_IN_FLIGHT, JobService
 from .process_manager import get_process_manager
 from .runtime import find_web_dist_dir, get_project_root
-
 
 # 项目根目录
 PROJECT_ROOT = str(get_project_root())
@@ -140,11 +162,15 @@ _CONTROL_AUTH_TOKEN_SOURCE = "env"
 _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def get_control_auth_token() -> str:
+def get_control_auth_token(
+    config: dict[str, Any] | None = None,
+    *,
+    host: str = "127.0.0.1",
+) -> str:
     """
     获取控制面板鉴权 Token
 
-    优先使用环境变量 DATAFLUX_CONTROL_TOKEN，
+    优先使用环境变量 DATAFLUX_TOKEN，其次使用 server.token，
     未设置时自动生成 32 字节的 URL-safe 随机 token。
     生成后缓存到模块级变量，整个进程生命周期内保持不变。
 
@@ -154,13 +180,13 @@ def get_control_auth_token() -> str:
     global _CONTROL_AUTH_TOKEN, _CONTROL_AUTH_TOKEN_SOURCE
 
     if _CONTROL_AUTH_TOKEN is None:
-        token = os.environ.get("DATAFLUX_CONTROL_TOKEN", "").strip()
-        if token:
-            _CONTROL_AUTH_TOKEN = token
-            _CONTROL_AUTH_TOKEN_SOURCE = "env"
-        else:
-            _CONTROL_AUTH_TOKEN = secrets.token_urlsafe(32)
-            _CONTROL_AUTH_TOKEN_SOURCE = "generated"
+        access_token = resolve_access_token(
+            config or DEFAULT_CONFIG,
+            host=host,
+            allow_generate_loopback=True,
+        )
+        _CONTROL_AUTH_TOKEN = access_token.value
+        _CONTROL_AUTH_TOKEN_SOURCE = access_token.source
 
     return _CONTROL_AUTH_TOKEN
 
@@ -301,6 +327,59 @@ class ConfigValidateRequest(BaseModel):
     path: str = "config.yaml"
 
 
+class WorkspaceConfigRequest(BaseModel):
+    """ETag-protected configuration write request."""
+
+    root_id: str
+    relative_path: str
+    content: str
+
+
+class WorkspaceConfigValidateRequest(BaseModel):
+    """Validate candidate YAML without writing it."""
+
+    content: str
+    root_id: str | None = None
+    relative_path: str | None = None
+
+
+class JobSubmitOptions(BaseModel):
+    """Bounded public overrides persisted with a Job request."""
+
+    max_in_flight: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        le=MAX_JOB_MAX_IN_FLIGHT,
+    )
+    model_config = ConfigDict(extra="forbid")
+
+
+class JobSubmitRequest(BaseModel):
+    """Submit a background Job from an allowed workspace config."""
+
+    root_id: str
+    relative_path: str
+    options: JobSubmitOptions | None = None
+
+
+class ControlAPIError(Exception):
+    """Versioned Control API error with a stable envelope."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
 class GatewayStartRequest(BaseModel):
     """Gateway 启动请求"""
 
@@ -395,6 +474,14 @@ class LogConnectionManager:
 
 
 ws_manager = LogConnectionManager()
+
+
+def _get_or_create_job_service(app: FastAPI) -> JobService:
+    service = getattr(app.state, "job_service", None)
+    if service is None:
+        service = JobService(app.state.config_path)
+        app.state.job_service = service
+    return service
 
 
 async def _test_feishu_connection(app_id: str, app_secret: str) -> dict[str, Any]:
@@ -502,6 +589,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     manager.add_log_callback("gateway", log_callback)
     manager.add_log_callback("process", log_callback)
 
+    job_service: JobService | None = None
+    job_loop_task: asyncio.Task | None = None
+    if getattr(app.state, "supervise_worker", True):
+        job_service = _get_or_create_job_service(app)
+        job_loop_task = asyncio.create_task(job_service.run_loop())
+        app.state.job_loop_task = job_loop_task
+
     # 打开浏览器 (等待端口就绪，避免偶现 Connection Refused)
     app_state = app.state
     if getattr(app_state, "open_browser", False):
@@ -518,21 +612,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         app_state._browser_task = browser_task
 
-    yield
-
-    # 关闭时清理进程
-    browser_task = getattr(app_state, "_browser_task", None)
-    if browser_task and not browser_task.done():
-        browser_task.cancel()
-    manager.remove_log_callback("gateway", log_callback)
-    manager.remove_log_callback("process", log_callback)
-    manager.shutdown()
+    try:
+        yield
+    finally:
+        # 关闭时清理进程和后台 Worker。
+        active_browser_task = getattr(app_state, "_browser_task", None)
+        if active_browser_task and not active_browser_task.done():
+            active_browser_task.cancel()
+        if job_service is not None:
+            await job_service.stop()
+        if job_loop_task is not None:
+            await asyncio.gather(job_loop_task, return_exceptions=True)
+        manager.remove_log_callback("gateway", log_callback)
+        manager.remove_log_callback("process", log_callback)
+        manager.shutdown()
 
 
 # ========== FastAPI App ==========
 
 
-def create_control_app() -> FastAPI:
+def create_control_app(
+    config_path: str = "config-example.yaml",
+    *,
+    host: str = "127.0.0.1",
+    supervise_worker: bool = True,
+) -> FastAPI:
     """
     创建 FastAPI 应用实例
 
@@ -544,13 +648,88 @@ def create_control_app() -> FastAPI:
         FastAPI: 配置完成的应用实例
     """
 
+    raw_config = load_config(config_path)
+    validation = validate_config(raw_config, config_path)
+    if validation["errors"]:
+        raise ConfigError("; ".join(validation["errors"]))
+    merged_config = merge_config(DEFAULT_CONFIG, raw_config)
+    access_token = resolve_access_token(
+        merged_config,
+        host=host,
+        allow_generate_loopback=True,
+    )
+
+    global _CONTROL_AUTH_TOKEN, _CONTROL_AUTH_TOKEN_SOURCE
+    _CONTROL_AUTH_TOKEN = access_token.value
+    _CONTROL_AUTH_TOKEN_SOURCE = access_token.source
+
     app = FastAPI(
         title="AI-DataFlux Control Panel",
         description="Web GUI for managing AI-DataFlux Gateway and Process",
         version=__version__,
         lifespan=lifespan,
     )
-    control_auth_token = get_control_auth_token()
+    control_auth_token = access_token.value
+    app.state.config_path = str(Path(config_path).expanduser().resolve())
+    app.state.config = merged_config
+    app.state.workspace_roots = resolve_workspace_roots(
+        merged_config, app.state.config_path
+    )
+    app.state.supervise_worker = supervise_worker
+    app.state.control_auth_token = control_auth_token
+    get_process_manager().set_access_token(control_auth_token)
+
+    def error_content(
+        request: Request,
+        *,
+        code: str,
+        message: str,
+        details: Any = None,
+    ) -> dict[str, Any]:
+        return {
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+                "request_id": getattr(request.state, "request_id", None),
+            }
+        }
+
+    @app.exception_handler(ControlAPIError)
+    async def handle_control_error(request: Request, exc: ControlAPIError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_content(
+                request,
+                code=exc.code,
+                message=exc.message,
+                details=exc.details,
+            ),
+        )
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_error(request: Request, exc: HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_content(
+                request,
+                code="http_error",
+                message=str(exc.detail),
+            ),
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content=error_content(
+                request,
+                code="validation_error",
+                message="Request validation failed",
+                details=exc.errors(),
+            ),
+        )
 
     # CORS 配置策略:
     # 1. 环境变量 DATAFLUX_GUI_CORS_ORIGINS 可显式指定允许的 origins
@@ -582,7 +761,8 @@ def create_control_app() -> FastAPI:
     # - 写操作要求 Content-Type: application/json (防止 localhost CSRF 攻击)
     @app.middleware("http")
     async def require_json_for_api_writes(request: Request, call_next):
-        if request.url.path.startswith("/api/"):
+        request.state.request_id = request.headers.get("x-request-id") or str(uuid4())
+        if request.url.path == "/api" or request.url.path.startswith("/api/"):
             if request.method == "OPTIONS":
                 return await call_next(request)
 
@@ -593,7 +773,11 @@ def create_control_app() -> FastAPI:
                 return JSONResponse(
                     status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},
-                    content={"detail": "Unauthorized"},
+                    content=error_content(
+                        request,
+                        code="unauthorized",
+                        message="Bearer token is missing or invalid",
+                    ),
                 )
 
             if request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -601,9 +785,261 @@ def create_control_app() -> FastAPI:
                 if not content_type.startswith("application/json"):
                     return JSONResponse(
                         status_code=415,
-                        content={"detail": "Content-Type must be application/json"},
+                        content=error_content(
+                            request,
+                            code="unsupported_media_type",
+                            message="Content-Type must be application/json",
+                        ),
                     )
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
+    def resolve_allowed_path(root_id: str, relative_path: str) -> Path:
+        try:
+            return resolve_workspace_path(
+                app.state.config,
+                root_id,
+                relative_path,
+                app.state.config_path,
+            )
+        except ConfigError as exc:
+            raise ControlAPIError(403, "path_forbidden", str(exc)) from exc
+
+    def job_service() -> JobService:
+        try:
+            return _get_or_create_job_service(app)
+        except Exception as exc:
+            raise ControlAPIError(
+                503,
+                "job_service_unavailable",
+                "Job service is unavailable",
+            ) from exc
+
+    @app.get("/health")
+    async def control_health():
+        """Minimal unauthenticated liveness response."""
+
+        return {"status": "ok", "version": __version__}
+
+    @app.get("/api/v1/workspace/roots")
+    async def api_v1_workspace_roots():
+        return {
+            "roots": [
+                {"id": root_id, "path": str(path)}
+                for root_id, path in app.state.workspace_roots.items()
+            ]
+        }
+
+    @app.get("/api/v1/workspace/entries")
+    async def api_v1_workspace_entries(
+        root_id: str = Query(...),
+        relative_path: str = Query(default="."),
+    ):
+        target = resolve_allowed_path(root_id, relative_path)
+        if not target.exists():
+            raise ControlAPIError(404, "path_not_found", "Workspace path not found")
+        if not target.is_dir():
+            raise ControlAPIError(
+                400, "not_a_directory", "Workspace path is not a directory"
+            )
+        root = app.state.workspace_roots[root_id]
+        entries: list[dict[str, str]] = []
+        for child in sorted(
+            target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+        ):
+            try:
+                resolved = child.resolve(strict=False)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if not (resolved.is_dir() or resolved.is_file()):
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "relative_path": str(child.relative_to(root)),
+                    "type": "directory" if resolved.is_dir() else "file",
+                }
+            )
+        normalized_path = str(target.relative_to(root)) or "."
+        return {
+            "root_id": root_id,
+            "relative_path": normalized_path,
+            "entries": entries,
+        }
+
+    @app.get("/api/v1/config")
+    async def api_v1_get_config(
+        response: Response,
+        root_id: str = Query(...),
+        relative_path: str = Query(...),
+    ):
+        target = resolve_allowed_path(root_id, relative_path)
+        try:
+            content, revision = read_workspace_config(target)
+        except FileNotFoundError as exc:
+            raise ControlAPIError(
+                404, "config_not_found", "Config file not found"
+            ) from exc
+        except PermissionError as exc:
+            raise ControlAPIError(403, "config_forbidden", str(exc)) from exc
+        response.headers["ETag"] = f'"{revision}"'
+        return {
+            "root_id": root_id,
+            "relative_path": relative_path,
+            "content": content,
+            "revision": revision,
+        }
+
+    @app.put("/api/v1/config")
+    async def api_v1_put_config(
+        request: WorkspaceConfigRequest,
+        response: Response,
+        if_match: str | None = Header(default=None, alias="If-Match"),
+    ):
+        if if_match is None:
+            raise ControlAPIError(
+                428,
+                "precondition_required",
+                "If-Match is required",
+            )
+        target = resolve_allowed_path(request.root_id, request.relative_path)
+        try:
+            revision = write_workspace_config(
+                target,
+                request.content,
+                expected_revision=if_match,
+            )
+        except ConfigRevisionConflictError as exc:
+            raise ControlAPIError(409, "revision_conflict", str(exc)) from exc
+        except PermissionError as exc:
+            raise ControlAPIError(403, "config_forbidden", str(exc)) from exc
+        response.headers["ETag"] = f'"{revision}"'
+        return {
+            "root_id": request.root_id,
+            "relative_path": request.relative_path,
+            "content": request.content,
+            "revision": revision,
+        }
+
+    @app.post("/api/v1/config/validate")
+    async def api_v1_validate_config(request: WorkspaceConfigValidateRequest):
+        import yaml
+
+        config_validation_path: Path = Path(app.state.config_path)
+        if request.root_id is not None or request.relative_path is not None:
+            if request.root_id is None or request.relative_path is None:
+                raise ControlAPIError(
+                    422,
+                    "validation_error",
+                    "root_id and relative_path must be provided together",
+                )
+            config_validation_path = resolve_allowed_path(
+                request.root_id, request.relative_path
+            )
+        try:
+            parsed = yaml.safe_load(request.content)
+        except yaml.YAMLError as exc:
+            return {
+                "valid": False,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
+        result = validate_config(parsed, config_validation_path)
+        return {
+            "valid": not result["errors"],
+            "errors": result["errors"],
+            "warnings": result["warnings"],
+        }
+
+    @app.post("/api/v1/feishu/test-connection")
+    async def api_v1_feishu_test_connection(
+        request: FeishuTestConnectionRequest,
+    ):
+        return await _test_feishu_connection(request.app_id, request.app_secret)
+
+    @app.post("/api/v1/jobs", status_code=201)
+    async def api_v1_submit_job(request: JobSubmitRequest):
+        try:
+            state = job_service().submit(
+                root_id=request.root_id,
+                relative_path=request.relative_path,
+                options=(
+                    request.options.model_dump(exclude_none=True)
+                    if request.options is not None
+                    else None
+                ),
+            )
+        except (ConfigError, ValueError) as exc:
+            raise ControlAPIError(422, "job_invalid", str(exc)) from exc
+        return state.to_dict()
+
+    @app.get("/api/v1/jobs")
+    async def api_v1_list_jobs():
+        service = job_service()
+        return {
+            "jobs": [state.to_dict() for state in service.list_states()],
+            "resource": service.resource_status(),
+        }
+
+    @app.get("/api/v1/jobs/{job_id}")
+    async def api_v1_get_job(job_id: str):
+        try:
+            return job_service().repository.get_state(job_id).to_dict()
+        except (JobNotFoundError, ValueError) as exc:
+            raise ControlAPIError(404, "job_not_found", "Job not found") from exc
+
+    @app.post("/api/v1/jobs/{job_id}/cancel")
+    async def api_v1_cancel_job(job_id: str):
+        try:
+            return job_service().cancel(job_id).to_dict()
+        except JobNotFoundError as exc:
+            raise ControlAPIError(404, "job_not_found", "Job not found") from exc
+        except ValueError as exc:
+            raise ControlAPIError(409, "job_conflict", str(exc)) from exc
+
+    @app.post("/api/v1/jobs/{job_id}/resume")
+    async def api_v1_resume_job(job_id: str):
+        try:
+            return job_service().resume(job_id).to_dict()
+        except JobNotFoundError as exc:
+            raise ControlAPIError(404, "job_not_found", "Job not found") from exc
+        except ValueError as exc:
+            raise ControlAPIError(409, "job_conflict", str(exc)) from exc
+
+    @app.get("/api/v1/jobs/{job_id}/events")
+    async def api_v1_job_events(
+        job_id: str,
+        after_seq: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ):
+        try:
+            events, next_seq = job_service().list_events(
+                job_id, after_seq=after_seq, limit=limit
+            )
+        except (JobNotFoundError, ValueError) as exc:
+            raise ControlAPIError(404, "job_not_found", "Job not found") from exc
+        return {"events": events, "next_seq": next_seq}
+
+    @app.get("/api/v1/jobs/{job_id}/events/stream")
+    async def api_v1_job_events_stream(
+        job_id: str,
+        request: Request,
+        after_seq: int = Query(default=0, ge=0),
+    ):
+        try:
+            job_service().repository.get_state(job_id)
+        except (JobNotFoundError, ValueError) as exc:
+            raise ControlAPIError(404, "job_not_found", "Job not found") from exc
+        last_event_id = request.headers.get("last-event-id")
+        if last_event_id and last_event_id.isdigit():
+            after_seq = max(after_seq, int(last_event_id))
+        return StreamingResponse(
+            job_service().stream_events(job_id, after_seq=after_seq),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ========== Config API ==========
 
@@ -655,7 +1091,7 @@ def create_control_app() -> FastAPI:
     # ========== Gateway API ==========
 
     @app.post("/api/gateway/start")
-    async def api_gateway_start(request: GatewayStartRequest = None):
+    async def api_gateway_start(request: GatewayStartRequest | None = None):
         """启动 Gateway"""
         if request is None:
             request = GatewayStartRequest()
@@ -677,7 +1113,7 @@ def create_control_app() -> FastAPI:
     # ========== Process API ==========
 
     @app.post("/api/process/start")
-    async def api_process_start(request: ProcessStartRequest = None):
+    async def api_process_start(request: ProcessStartRequest | None = None):
         """启动 Process"""
         if request is None:
             request = ProcessStartRequest()
@@ -771,6 +1207,12 @@ def create_control_app() -> FastAPI:
         @app.get("/{path:path}")
         async def serve_static(path: str):
             """服务静态文件或 SPA fallback"""
+            if path == "api" or path.startswith("api/"):
+                raise ControlAPIError(
+                    404,
+                    "api_not_found",
+                    "API route not found",
+                )
             # 防止 path traversal：仅允许访问 WEB_DIST_DIR 内的文件
             base_dir = os.path.realpath(WEB_DIST_DIR)
             file_path = os.path.realpath(os.path.join(base_dir, path))
@@ -809,6 +1251,8 @@ def run_control_server(
     host: str = "127.0.0.1",
     port: int = 8790,
     open_browser: bool = True,
+    config_path: str = "config.yaml",
+    supervise_worker: bool = True,
 ) -> None:
     """
     启动 Control Server
@@ -825,25 +1269,33 @@ def run_control_server(
     )
 
     # 创建应用
-    app = create_control_app()
-    control_auth_token = get_control_auth_token()
+    app = create_control_app(
+        config_path,
+        host=host,
+        supervise_worker=supervise_worker,
+    )
+    control_auth_token = app.state.control_auth_token
+    if _CONTROL_AUTH_TOKEN_SOURCE == "generated":
+        os.environ["DATAFLUX_TOKEN"] = control_auth_token
 
     # 设置应用状态 (用于 lifespan 中打开浏览器)
     app.state.open_browser = open_browser
     app.state.port = port
     app.state.control_auth_token = control_auth_token
 
-    if _CONTROL_AUTH_TOKEN_SOURCE == "env":
-        logging.info("Control API 鉴权已启用 (token 来源: DATAFLUX_CONTROL_TOKEN)")
-    else:
+    if _CONTROL_AUTH_TOKEN_SOURCE == "generated":
         if not open_browser:
             raise RuntimeError(
-                "未配置 DATAFLUX_CONTROL_TOKEN 且禁用了自动打开浏览器，"
-                "请显式设置 DATAFLUX_CONTROL_TOKEN 后重试"
+                "未配置 DATAFLUX_TOKEN/server.token 且禁用了自动打开浏览器，"
+                "请显式配置统一 Bearer token 后重试"
             )
         logging.warning(
-            "未配置 DATAFLUX_CONTROL_TOKEN，已生成临时控制面 token（掩码）: %s",
+            "未配置 DATAFLUX_TOKEN/server.token，已生成临时控制面 token（掩码）: %s",
             _mask_token(control_auth_token),
+        )
+    else:
+        logging.info(
+            "Control API 鉴权已启用 (token 来源: %s)", _CONTROL_AUTH_TOKEN_SOURCE
         )
 
     logging.info(f"Starting Control Server on http://{host}:{port}")

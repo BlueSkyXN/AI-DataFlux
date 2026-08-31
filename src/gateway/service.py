@@ -92,14 +92,12 @@ FluxApiService 方法清单:
 """
 
 import asyncio
-import json
 import logging
 import time
-import uuid
 from typing import Any, AsyncIterable, Union
 
 import aiohttp
-import yaml
+from src.config import load_config, validate_config
 
 from .dispatcher import ModelDispatcher, ModelConfig
 from .limiter import ModelRateLimiter
@@ -107,12 +105,37 @@ from .resolver import RoundRobinResolver, build_ip_pools_from_channels
 from .session import SessionPool
 from .schemas import (
     ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionResponseChoice,
-    ChatCompletionResponseUsage,
-    ChatMessage,
+    ResponsesRequest,
 )
-from ..models.errors import ErrorType
+
+RETRYABLE_UPSTREAM_STATUSES = {429, 500, 502, 503, 504}
+
+
+class GatewayAPIError(Exception):
+    """可直接映射为 OpenAI error object 的网关错误。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        error_type: str = "invalid_request_error",
+        code: str | None = None,
+        param: str | None = None,
+        upstream_error: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error = upstream_error or {
+            "message": message,
+            "type": error_type,
+            "param": param,
+            "code": code,
+        }
+
+
+class RetryableUpstreamError(GatewayAPIError):
+    """仅表示响应开始前可安全切换到其他模型的错误。"""
 
 
 class FluxApiService:
@@ -181,21 +204,13 @@ class FluxApiService:
             ValueError: YAML 格式错误或配置根节点不是字典
         """
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                self.config = yaml.safe_load(f)
-
-            # 验证配置根节点类型
-            if not isinstance(self.config, dict):
-                raise ValueError(
-                    f"配置文件根节点必须是字典类型，"
-                    f"实际类型为 {type(self.config).__name__}"
-                )
-
+            self.config = load_config(self.config_path)
+            validation = validate_config(self.config, self.config_path)
+            if validation["errors"]:
+                raise ValueError("; ".join(validation["errors"]))
             logging.info(f"配置文件 '{self.config_path}' 加载成功")
-        except yaml.YAMLError as e:
-            raise ValueError(f"配置文件 YAML 格式错误: {e}") from e
-        except Exception as e:
-            raise ValueError(f"无法加载配置文件: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"无法加载配置文件: {exc}") from exc
 
         # 全局配置
         global_cfg = self.config.get("global", {})
@@ -242,12 +257,9 @@ class FluxApiService:
         self.models: list[ModelConfig] = []
 
         for model_dict in models_cfg:
-            try:
-                model = ModelConfig(model_dict, self.channels)
-                self.models.append(model)
-                logging.info(f"加载模型: {model.id} ({model.model})")
-            except Exception as e:
-                logging.warning(f"加载模型失败: {e}")
+            model = ModelConfig(model_dict, self.channels)
+            self.models.append(model)
+            logging.info(f"加载模型: {model.id} ({model.model})")
 
         if not self.models:
             raise ValueError("没有成功加载任何模型")
@@ -344,6 +356,7 @@ class FluxApiService:
         requested_model_name: str | None = None,
         exclude_models: list[str] | None = None,
         requires_json_schema: bool = False,
+        required_capabilities: set[str] | None = None,
     ) -> ModelConfig | None:
         """
         获取一个可用的模型
@@ -362,6 +375,9 @@ class FluxApiService:
         import random
 
         exclude_set = set(exclude_models or [])
+        required = set(required_capabilities or set())
+        if requires_json_schema:
+            required.add("json_schema")
         target_model_id: str | None = None
         use_random_selection = True
 
@@ -391,11 +407,9 @@ class FluxApiService:
                     # 检查调度器可用性和限流器
                     is_available = self.dispatcher.is_model_available(target_model_id)
                     can_process = self.rate_limiter.can_process(target_model_id)
-                    supports_schema = (
-                        not requires_json_schema or model.supports_json_schema
-                    )
+                    supports_request = model.supports(required)
 
-                    if is_available and can_process and supports_schema:
+                    if is_available and can_process and supports_request:
                         logging.debug(
                             f"使用请求的可用模型: {model.name or target_model_id}"
                         )
@@ -405,9 +419,11 @@ class FluxApiService:
                         logging.warning(
                             f"请求的模型 [{model.name or target_model_id}] 当前不可用/受限。尝试随机选择"
                         )
-                        if requires_json_schema and not model.supports_json_schema:
+                        if not supports_request:
                             logging.warning(
-                                f"请求需要 JSON 输出，但模型 [{model.name or target_model_id}] 未声明支持 JSON Schema"
+                                "模型 [%s] 缺少请求能力: %s",
+                                model.name or target_model_id,
+                                sorted(required - model.capabilities),
                             )
                         exclude_set.add(target_model_id)
                         use_random_selection = True
@@ -428,9 +444,7 @@ class FluxApiService:
                 and model.id not in exclude_set  # 未被排除
                 and self.dispatcher.is_model_available(model.id)  # 调度器可用
                 and self.rate_limiter.can_process(model.id)  # 限流器允许
-                and (
-                    not requires_json_schema or model.supports_json_schema
-                )  # JSON 输出能力匹配
+                and model.supports(required)
             ]
 
             if not eligible_models:
@@ -449,279 +463,309 @@ class FluxApiService:
 
     async def chat_completion(
         self, request: ChatCompletionRequest
-    ) -> Union[ChatCompletionResponse, AsyncIterable[str]]:
-        """
-        处理聊天补全请求（支持流式和非流式）
+    ) -> Union[Any, AsyncIterable[bytes]]:
+        """代理 Chat Completions，不在网关内重建响应语义。"""
+        return await self._proxy_request(request, endpoint="chat_completions")
 
-        Args:
-            request: 聊天补全请求
+    async def responses(
+        self, request: ResponsesRequest
+    ) -> Union[Any, AsyncIterable[bytes]]:
+        """代理 Responses API，不与 Chat Completions 互相模拟。"""
+        return await self._proxy_request(request, endpoint="responses")
 
-        Returns:
-            非流式: ChatCompletionResponse
-            流式: AsyncIterable[str] (SSE 格式)
-        """
-        start_time = time.time()
+    async def _proxy_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        endpoint: str,
+    ) -> Union[Any, AsyncIterable[bytes]]:
+        """统一处理能力路由和有边界的 failover。"""
+        request_started_at = time.time()
         tried_models: set[str] = set()
-        last_error: Exception | None = None
-        requires_json_schema = self._request_requires_json_schema(request)
+        last_error: RetryableUpstreamError | None = None
+        payload = self._build_upstream_payload_template(request, endpoint=endpoint)
+        required_capabilities = self._required_capabilities(payload, endpoint=endpoint)
+        requested_model = request.model.strip()
+        if requested_model.lower() not in {"auto", "any", "default", "*", ""}:
+            if self.resolve_model_id(requested_model) is None:
+                raise GatewayAPIError(
+                    f"The model '{requested_model}' does not exist",
+                    status_code=404,
+                    code="model_not_found",
+                    param="model",
+                )
 
-        # 尝试多个模型
         max_retries = min(len(self.models), 3)
-
-        for attempt in range(max_retries):
-            # 选择模型 - 使用新的 get_available_model 方法
+        for _attempt in range(max_retries):
             model = self.get_available_model(
-                requested_model_name=request.model,  # 传递用户请求的模型
+                requested_model_name=requested_model,
                 exclude_models=list(tried_models),
-                requires_json_schema=requires_json_schema,
+                required_capabilities=required_capabilities,
             )
-
             if not model:
-                logging.warning("没有可用的模型")
                 break
-
             tried_models.add(model.id)
-
-            # 检查限流
             if not self.rate_limiter.acquire(model.id):
-                logging.debug(f"模型 {model.id} 被限流，尝试下一个")
                 continue
-
             try:
-                # 调用 API (流式或非流式)
-                response = await self._call_model_api(model, request)
-
-                # 如果是流式响应，直接返回异步迭代器
+                response = await self._call_model_api(
+                    model,
+                    payload,
+                    endpoint=endpoint,
+                )
                 if isinstance(response, AsyncIterable):
-                    logging.info(f"返回流式响应 (模型: {model.id})")
                     return response
-
-                # 非流式响应，更新指标
-                elapsed = time.time() - start_time
+                elapsed = time.time() - request_started_at
                 self.dispatcher.update_model_metrics(model.id, elapsed, True)
                 self.dispatcher.mark_model_success(model.id)
-
                 return response
-
-            except Exception as e:
-                logging.warning(f"模型 {model.id} 调用失败: {e}")
-                last_error = e
-
-                elapsed = time.time() - start_time
+            except RetryableUpstreamError as exc:
+                last_error = exc
+                elapsed = time.time() - request_started_at
                 self.dispatcher.update_model_metrics(model.id, elapsed, False)
                 self.dispatcher.mark_model_failed(model.id)
+                continue
 
-        # 所有模型都失败
-        raise RuntimeError(f"所有模型调用失败: {last_error}") from last_error
+        if last_error is not None:
+            raise last_error
+        capable_models = [
+            model
+            for model in self.models
+            if model.weight > 0 and model.supports(required_capabilities)
+        ]
+        if not capable_models:
+            missing = ", ".join(sorted(required_capabilities))
+            raise GatewayAPIError(
+                f"No available model supports the required capabilities: {missing}",
+                status_code=400,
+                code="unsupported_capability",
+                param="model",
+            )
+        raise GatewayAPIError(
+            "No capable model is currently available",
+            status_code=503,
+            error_type="server_error",
+            code="model_unavailable",
+            param="model",
+        )
 
     async def _call_model_api(
-        self, model: ModelConfig, request: ChatCompletionRequest
-    ) -> Union[ChatCompletionResponse, AsyncIterable[str]]:
-        """
-        调用模型 API (支持流式和非流式)
-
-        Returns:
-            非流式: ChatCompletionResponse
-            流式: AsyncIterable[str]
-        """
+        self,
+        model: ModelConfig,
+        payload_template: dict[str, Any],
+        *,
+        endpoint: str,
+    ) -> Union[Any, AsyncIterable[bytes]]:
+        """调用一个上游；只将响应头到达前的安全错误标记为可重试。"""
         if not self.session_pool:
-            raise RuntimeError("SessionPool 未初始化")
-
-        # 获取 Session
+            raise GatewayAPIError(
+                "Gateway session pool is not initialized",
+                status_code=503,
+                error_type="server_error",
+                code="service_unavailable",
+            )
         session = await self.session_pool.get_or_create(
             ssl_verify=model.ssl_verify, proxy=model.proxy
         )
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {model.api_key}",
         }
-        payload = self._build_upstream_payload(model, request)
-
-        # 发送请求
-        # 流式请求需要更长的 sock_read 超时
+        payload = dict(payload_template)
+        payload["model"] = model.model
+        if endpoint == "chat_completions" and "temperature" not in payload:
+            payload["temperature"] = model.temperature
+        stream = bool(payload.get("stream", False))
         timeout = aiohttp.ClientTimeout(
             connect=model.connect_timeout,
             total=model.read_timeout,
-            sock_read=300 if request.stream else model.read_timeout,
+            sock_read=300 if stream else model.read_timeout,
         )
-
         start_time = time.time()
 
-        # 流式响应：手动管理响应生命周期，避免 async with 提前关闭连接
-        if request.stream:
+        # session.post 返回前尚未向客户端开始响应，连接失败可安全 failover。
+        try:
             resp = await session.post(
-                model.api_url,
+                model.api_url_for(endpoint),
                 headers=headers,
                 json=payload,
                 timeout=timeout,
                 proxy=model.proxy or None,
             )
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            raise RetryableUpstreamError(
+                "Unable to connect to upstream model",
+                status_code=502,
+                error_type="server_error",
+                code="upstream_connection_error",
+            ) from exc
 
-            # 记录日志
-            peer_ip = self._extract_peer_ip(resp, model)
-            self._log_upstream_response(model, resp.status, peer_ip)
-
-            if resp.status != 200:
-                text = await resp.text()
-                resp.close()
-                raise aiohttp.ClientResponseError(
-                    resp.request_info,
-                    resp.history,
-                    status=resp.status,
-                    message=text[:500],
-                    headers=resp.headers,
+        peer_ip = self._extract_peer_ip(resp, model)
+        self._log_upstream_response(model, endpoint, resp.status, peer_ip)
+        if not 200 <= resp.status < 300:
+            error = await self._upstream_error(resp)
+            resp.close()
+            if resp.status in RETRYABLE_UPSTREAM_STATUSES:
+                raise RetryableUpstreamError(
+                    error.get("message", "Retryable upstream error"),
+                    status_code=resp.status,
+                    upstream_error=error,
                 )
+            raise GatewayAPIError(
+                error.get("message", "Upstream request failed"),
+                status_code=resp.status,
+                upstream_error=error,
+            )
 
-            # 返回流式响应生成器，响应将在生成器 finally 中关闭
-            return self._handle_streaming_response(resp, model, start_time)
+        if stream:
+            return self._proxy_sse_response(resp, model, start_time)
 
-        # 非流式响应：使用 async with 自动管理
-        async with session.post(
-            model.api_url,
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-            proxy=model.proxy or None,
-        ) as resp:
-            peer_ip = self._extract_peer_ip(resp, model)
-            self._log_upstream_response(model, resp.status, peer_ip)
-
-            if resp.status != 200:
-                text = await resp.text()
-                raise aiohttp.ClientResponseError(
-                    resp.request_info,
-                    resp.history,
-                    status=resp.status,
-                    message=text[:500],
-                    headers=resp.headers,
-                )
-
-            # 处理非流式响应
-            data = await resp.json()
-
-        # 解析响应
-        choices = data.get("choices", [])
-        if not choices:
-            raise ValueError("响应中没有 choices")
-
-        choice = choices[0]
-        message = choice.get("message", {})
-
-        # 构建响应
-        return ChatCompletionResponse(
-            id=data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-            created=data.get("created", int(time.time())),
-            model=request.model,  # 返回用户请求的模型名
-            choices=[
-                ChatCompletionResponseChoice(
-                    index=0,
-                    message=ChatMessage(
-                        role=message.get("role", "assistant"),
-                        content=message.get("content", ""),
-                    ),
-                    finish_reason=choice.get("finish_reason", "stop"),
-                )
-            ],
-            usage=(
-                ChatCompletionResponseUsage(
-                    prompt_tokens=data.get("usage", {}).get("prompt_tokens"),
-                    completion_tokens=data.get("usage", {}).get("completion_tokens"),
-                    total_tokens=data.get("usage", {}).get("total_tokens"),
-                )
-                if data.get("usage")
-                else None
-            ),
-        )
+        try:
+            # 上游 JSON 是公共响应；不重建 choices，不丢弃 tool_calls/
+            # logprobs/usage 扩展或 Responses 字段。
+            return await resp.json()
+        except Exception as exc:
+            raise GatewayAPIError(
+                "Upstream returned an invalid JSON response",
+                status_code=502,
+                error_type="server_error",
+                code="upstream_response_error",
+            ) from exc
+        finally:
+            resp.close()
 
     @staticmethod
     def _request_requires_json_schema(request: ChatCompletionRequest) -> bool:
-        """
-        判断请求是否要求 JSON 输出能力。
-
-        只有严格的 json_schema response_format 需要模型显式声明支持。
-        json_object 是较宽松的 JSON 模式，保持原有透传行为以避免误排除模型。
-        """
+        """仅严格 json_schema 需要显式能力；json_object 继续普通透传。"""
+        payload = request.model_dump(mode="python", exclude_unset=True)
+        response_format = payload.get("response_format")
         return (
-            request.response_format is not None
-            and request.response_format.type.lower() == "json_schema"
+            isinstance(response_format, dict)
+            and str(response_format.get("type", "")).lower() == "json_schema"
         )
+
+    @staticmethod
+    def _build_upstream_payload_template(
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        endpoint: str,
+    ) -> dict[str, Any]:
+        """保留客户端提交的全部已知/未知字段，只在调用时替换 model。"""
+        payload = request.model_dump(mode="python", exclude_unset=True)
+        if endpoint == "chat_completions":
+            payload.setdefault("stream", False)
+        return payload
 
     def _build_upstream_payload(
         self, model: ModelConfig, request: ChatCompletionRequest
     ) -> dict[str, Any]:
-        """
-        构建发送给上游模型 API 的请求体。
-
-        ChatCompletionRequest 允许额外字段；这些字段应透传给上游以保持
-        OpenAI 兼容性，但显式构建的标准字段拥有更高优先级。
-        """
-        payload: dict[str, Any] = {
-            "model": model.model,
-            "messages": [m.model_dump() for m in request.messages],
-            "temperature": (
-                request.temperature
-                if request.temperature is not None
-                else model.temperature
-            ),
-            "stream": request.stream or False,
-        }
-
-        # 添加可选参数 (使用 is not None 以支持 0 和 False)
-        if request.max_tokens is not None:
-            payload["max_tokens"] = request.max_tokens
-        if request.response_format is not None:
-            if (
-                request.response_format.type.lower() != "json_schema"
-                or model.supports_json_schema
-            ):
-                payload["response_format"] = request.response_format.model_dump(
-                    exclude_none=True
-                )
-            else:
-                logging.debug(
-                    f"模型 {model.id} 未声明支持 JSON Schema，跳过 response_format"
-                )
-        if request.stop is not None:
-            payload["stop"] = request.stop
-        if request.top_p is not None:
-            payload["top_p"] = request.top_p
-        if request.user is not None:
-            payload["user"] = request.user
-        if request.n is not None:
-            payload["n"] = request.n
-
-        # 高级参数 (如果模型支持)
-        if model.supports_advanced_params:
-            if request.presence_penalty is not None:
-                payload["presence_penalty"] = request.presence_penalty
-            if request.frequency_penalty is not None:
-                payload["frequency_penalty"] = request.frequency_penalty
-            if request.logit_bias is not None:
-                payload["logit_bias"] = request.logit_bias
-
-        # 透传 Pydantic 额外字段，避免 OpenAI 兼容参数被静默丢弃。
-        for key, value in (request.model_extra or {}).items():
-            if key in payload or value is None:
-                continue
-            payload[key] = self._serialize_payload_value(value)
-
+        """保留旧的单元测试/内部调用入口。"""
+        payload = self._build_upstream_payload_template(
+            request,
+            endpoint="chat_completions",
+        )
+        payload["model"] = model.model
+        payload.setdefault("temperature", model.temperature)
         return payload
 
     @classmethod
-    def _serialize_payload_value(cls, value: Any) -> Any:
-        """将额外参数转换为 JSON 可序列化的基础结构。"""
-        if hasattr(value, "model_dump"):
-            return value.model_dump(exclude_none=True)
+    def _required_capabilities(
+        cls,
+        payload: dict[str, Any],
+        *,
+        endpoint: str,
+    ) -> set[str]:
+        """从请求中提取路由所需能力，不转换 Chat/Responses 语义。"""
+        required = {endpoint}
+        if payload.get("stream") is True:
+            required.add("stream")
+        if payload.get("tools") or payload.get("tool_choice") is not None:
+            required.add("tools")
+        if endpoint == "responses" and payload.get("previous_response_id"):
+            required.add("previous_response_id")
+        if payload.get("n", 1) not in (None, 1):
+            required.add("n")
+        if payload.get("logprobs") or payload.get("top_logprobs") is not None:
+            required.add("logprobs")
+        if cls._payload_requires_json_schema(payload, endpoint=endpoint):
+            required.add("json_schema")
+        content = (
+            payload.get("messages")
+            if endpoint == "chat_completions"
+            else payload.get("input")
+        )
+        if cls._contains_multimodal_content(content):
+            required.add("multimodal")
+        return required
+
+    @staticmethod
+    def _payload_requires_json_schema(
+        payload: dict[str, Any],
+        *,
+        endpoint: str,
+    ) -> bool:
+        response_format = payload.get("response_format")
+        if (
+            isinstance(response_format, dict)
+            and str(response_format.get("type", "")).lower() == "json_schema"
+        ):
+            return True
+        if endpoint == "responses":
+            text = payload.get("text")
+            if isinstance(text, dict):
+                text_format = text.get("format")
+                return (
+                    isinstance(text_format, dict)
+                    and str(text_format.get("type", "")).lower() == "json_schema"
+                )
+        return False
+
+    @classmethod
+    def _contains_multimodal_content(cls, value: Any) -> bool:
         if isinstance(value, dict):
-            return {
-                key: cls._serialize_payload_value(item)
-                for key, item in value.items()
-                if item is not None
-            }
+            item_type = str(value.get("type", "")).lower()
+            if item_type in {
+                "image",
+                "image_url",
+                "input_image",
+                "input_audio",
+                "audio",
+                "video",
+            }:
+                return True
+            if "image_url" in value or "input_audio" in value:
+                return True
+            return any(
+                cls._contains_multimodal_content(item) for item in value.values()
+            )
         if isinstance(value, list):
-            return [cls._serialize_payload_value(item) for item in value]
-        return value
+            return any(cls._contains_multimodal_content(item) for item in value)
+        return False
+
+    @staticmethod
+    async def _upstream_error(response: aiohttp.ClientResponse) -> dict[str, Any]:
+        """保留上游 OpenAI error object；非标准错误包装成标准形式。"""
+        try:
+            data = await response.json()
+        except Exception:
+            try:
+                message = (await response.text())[:1000]
+            except Exception:
+                message = "Upstream request failed"
+            return {
+                "message": message or "Upstream request failed",
+                "type": "server_error",
+                "param": None,
+                "code": "upstream_error",
+            }
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            return data["error"]
+        return {
+            "message": str(data)[:1000],
+            "type": "server_error",
+            "param": None,
+            "code": "upstream_error",
+        }
 
     def _extract_peer_ip(
         self, resp: aiohttp.ClientResponse, model: ModelConfig
@@ -751,22 +795,28 @@ class FluxApiService:
         return None
 
     def _log_upstream_response(
-        self, model: ModelConfig, status: int, peer_ip: str | None
+        self,
+        model: ModelConfig,
+        endpoint: str,
+        status: int,
+        peer_ip: str | None,
     ) -> None:
         """
         记录上游 API 响应日志
 
         Args:
             model: 模型配置
+            endpoint: canonical Gateway endpoint
             status: HTTP 状态码
             peer_ip: 对端 IP 地址（可选，代理模式下为 None）
         """
+        upstream_url = model.api_url_for(endpoint)
         if peer_ip:
             logging.info(
                 "上游响应 model=%s status=%s url=%s ip=%s",
                 model.id,
                 status,
-                model.api_url,
+                upstream_url,
                 peer_ip,
             )
         else:
@@ -774,275 +824,36 @@ class FluxApiService:
                 "上游响应 model=%s status=%s url=%s",
                 model.id,
                 status,
-                model.api_url,
+                upstream_url,
             )
 
-    async def _handle_streaming_response(
-        self, response: aiohttp.ClientResponse, model: ModelConfig, start_time: float
-    ) -> AsyncIterable[str]:
-        """
-        处理流式响应，返回异步生成器产生 SSE 格式字符串
-
-        Args:
-            response: aiohttp 响应对象
-            model: 模型配置
-            start_time: 请求开始时间
-
-        Yields:
-            SSE 格式的字符串 (data: {...}\n\n)
-        """
-        buffer = ""
-        has_business_output = False
-        chunk_count = 0
-        last_activity_time = time.time()
-        returned_successfully = False
-
-        logging.debug(f"[{model.id}] 开始流式响应处理")
-
-        # 发送初始保活消息
+    async def _proxy_sse_response(
+        self,
+        response: aiohttp.ClientResponse,
+        model: ModelConfig,
+        start_time: float,
+    ) -> AsyncIterable[bytes]:
+        """逐字节块转发上游 SSE；响应开始后不再 failover 或注入事件。"""
+        completed = False
+        yielded = False
         try:
-            yield ": keeping connection alive\n\n"
-            logging.debug(f"[{model.id}] 已发送初始连接保持消息")
-        except Exception as e:
-            logging.warning(f"[{model.id}] 发送初始消息失败: {e}")
-
-        try:
-            # 异步迭代响应内容块
             async for chunk in response.content.iter_any():
-                chunk_count += 1
-                now = time.time()
-                time_since_last = now - last_activity_time
-                last_activity_time = now
-
-                logging.debug(
-                    f"[{model.id}] 收到流块 {chunk_count} "
-                    f"(大小:{len(chunk)}字节, 距离上次:{time_since_last:.2f}秒)"
-                )
-
                 if not chunk:
-                    logging.debug(f"[{model.id}] 收到空块 {chunk_count}")
                     continue
-
-                # 解码并添加到缓冲区
-                try:
-                    decoded_chunk = chunk.decode("utf-8")
-                    buffer += decoded_chunk
-                except UnicodeDecodeError:
-                    buffer += chunk.decode("utf-8", errors="ignore")
-                    logging.warning(f"[{model.id}] 流包含无效UTF-8数据，已忽略")
-
-                # 按行分割处理缓冲区内容
-                lines = buffer.split("\n")
-                buffer = lines.pop()  # 最后一部分可能不完整
-
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # 检查是否是 SSE 数据行
-                    if line.startswith("data:"):
-                        data_content = line[len("data:") :].strip()
-
-                        # 检查是否是结束标记
-                        if data_content == "[DONE]":
-                            logging.info(f"[{model.id}] 收到 [DONE] 标记")
-                            # 转发 [DONE] 事件给客户端
-                            yield "data: [DONE]\n\n"
-                            returned_successfully = True
-                            break
-
-                        elif data_content:
-                            # 检查是否是 JSON 格式
-                            if data_content.startswith("{") and data_content.endswith(
-                                "}"
-                            ):
-                                yield f"data: {data_content}\n\n"
-                                has_business_output = True
-                            else:
-                                logging.warning(
-                                    f"[{model.id}] 流包含非JSON数据块: {data_content[:100]}..."
-                                )
-                    else:
-                        logging.debug(
-                            f"[{model.id}] 流包含非'data:'行: {line[:100]}..."
-                        )
-
-                # 如果收到了 [DONE]，则跳出循环
-                if returned_successfully:
-                    break
-
-            logging.info(
-                f"[{model.id}] 流式响应处理结束。总块数: {chunk_count}。"
-                f"是否收到[DONE]: {returned_successfully}"
-            )
-
-            # 处理循环结束后缓冲区剩余数据
-            if not returned_successfully and buffer.strip():
-                line = buffer.strip()
-                if line.startswith("data:"):
-                    data_content = line[len("data:") :].strip()
-                    if data_content == "[DONE]":
-                        # 转发 [DONE] 事件给客户端
-                        yield "data: [DONE]\n\n"
-                        returned_successfully = True
-                        logging.info(f"[{model.id}] 在最终缓冲区中收到 [DONE]")
-                    elif (
-                        data_content
-                        and data_content.startswith("{")
-                        and data_content.endswith("}")
-                    ):
-                        yield f"data: {data_content}\n\n"
-                        has_business_output = True
-                        returned_successfully = True
-                        logging.info(f"[{model.id}] 成功处理最终缓冲区内容")
-
-            # 如果流正常结束但没有收到 [DONE]，也发送 [DONE] 保证客户端能正常结束
-            if has_business_output and not returned_successfully:
-                logging.warning(f"[{model.id}] 未收到 [DONE] 但流已结束，补发 [DONE]")
-                yield "data: [DONE]\n\n"
-                returned_successfully = True
-
-        except aiohttp.ClientPayloadError as e:
-            logging.error(f"[{model.id}] 流处理 ClientPayloadError: {e}")
-            error_payload = {
-                "error": {"message": "上游流响应体错误", "type": "stream_error"}
-            }
-            try:
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except Exception:
-                pass
-            returned_successfully = False
-
-        except aiohttp.ClientConnectionError as e:
-            logging.error(f"[{model.id}] 流处理 ClientConnectionError: {e}")
-            error_payload = {
-                "error": {"message": "上游流连接错误", "type": "stream_error"}
-            }
-            try:
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except Exception:
-                pass
-            returned_successfully = False
-
-        except asyncio.TimeoutError as e:
-            logging.error(f"[{model.id}] 流处理 TimeoutError: {e}")
-            error_payload = {
-                "error": {"message": "上游流读取超时", "type": "stream_error"}
-            }
-            try:
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except Exception:
-                pass
-            returned_successfully = False
-
-        except aiohttp.ClientError as e:
-            logging.error(f"[{model.id}] 流处理 ClientError: {e}")
-            error_payload = {
-                "error": {"message": "上游流客户端错误", "type": "stream_error"}
-            }
-            try:
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except Exception:
-                pass
-            returned_successfully = False
-
-        except Exception as e:
-            logging.exception(f"[{model.id}] 处理流时发生未知错误", exc_info=e)
-            error_payload = {
-                "error": {
-                    "message": "内部流处理错误",
-                    "type": "internal_stream_error",
-                }
-            }
-            try:
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except Exception:
-                pass
-            returned_successfully = False
-
+                yielded = True
+                yield chunk
+            completed = True
         finally:
-            # 根据处理结果更新模型状态和指标
-            response_time = time.time() - start_time
-            stream_fully_successful = returned_successfully and has_business_output
-            stream_partially_successful = (
-                has_business_output and not returned_successfully
-            )
-            stream_no_business_output = (
-                returned_successfully and not has_business_output
-            )
-
-            if stream_fully_successful:
+            elapsed = time.time() - start_time
+            success = completed and yielded
+            self.dispatcher.update_model_metrics(model.id, elapsed, success)
+            if success:
                 self.dispatcher.mark_model_success(model.id)
-                logging.info(f"[{model.id}] 流处理完全成功。耗时:{response_time:.2f}s")
-            elif stream_partially_successful or stream_no_business_output:
-                self.dispatcher.mark_model_failed(model.id, ErrorType.CONTENT)
-                if stream_no_business_output:
-                    logging.warning(
-                        f"[{model.id}] 流仅收到保活/结束信号，未产生业务输出。耗时:{response_time:.2f}s"
-                    )
-                else:
-                    logging.warning(
-                        f"[{model.id}] 流处理部分成功 (在[DONE]前出错)。耗时:{response_time:.2f}s"
-                    )
-            else:  # no data yielded
-                self.dispatcher.mark_model_failed(model.id, ErrorType.API)
-                logging.error(
-                    f"[{model.id}] 流处理失败 (未产生数据)。耗时:{response_time:.2f}s"
-                )
-
-            # 更新指标
-            self.dispatcher.update_model_metrics(
-                model.id,
-                response_time,
-                stream_fully_successful,
-            )
-
-            # 确保关闭响应连接
-            if response and not response.closed:
+            else:
+                # 客户端已经收到响应头，失败只能结束当前流，不能切换模型。
+                self.dispatcher.mark_model_failed(model.id)
+            if not response.closed:
                 response.close()
-
-    def _extract_content_from_event_stream(self, event_stream_text: str) -> str:
-        """
-        从 (意外收到的) 事件流文本中提取内容
-
-        Args:
-            event_stream_text: SSE 格式的事件流文本
-
-        Returns:
-            提取的完整内容
-        """
-        full_content = []
-        lines = event_stream_text.splitlines()
-
-        for line in lines:
-            line = line.strip()
-            # 查找 data: 开头且非 [DONE] 的行
-            if line.startswith("data:") and not line.endswith("[DONE]"):
-                try:
-                    data_str = line[len("data:") :].strip()
-                    if data_str:
-                        data = json.loads(data_str)
-                        # 尝试按 OpenAI 流格式提取 delta content
-                        if (
-                            isinstance(data, dict)
-                            and "choices" in data
-                            and isinstance(data["choices"], list)
-                            and data["choices"]
-                            and isinstance(data["choices"][0], dict)
-                            and "delta" in data["choices"][0]
-                            and isinstance(data["choices"][0]["delta"], dict)
-                            and "content" in data["choices"][0]["delta"]
-                        ):
-                            content_part = data["choices"][0]["delta"]["content"]
-                            if isinstance(content_part, str):
-                                full_content.append(content_part)
-                except Exception:
-                    # 忽略解析错误或结构不匹配的行
-                    logging.debug(f"从意外事件流提取内容时忽略行: {line}")
-                    continue
-
-        return "".join(full_content)
 
     def get_uptime(self) -> float:
         """
@@ -1052,6 +863,40 @@ class FluxApiService:
             float: 自服务启动以来经过的秒数
         """
         return time.time() - self.start_time
+
+    def get_capabilities(self) -> dict[str, Any]:
+        """返回每个配置模型的有效 capability 和 endpoint 信息。"""
+        data = []
+        all_capabilities: set[str] = set()
+        for model in self.models:
+            capabilities = sorted(model.capabilities)
+            all_capabilities.update(capabilities)
+            data.append(
+                {
+                    "id": model.id,
+                    "name": model.name,
+                    "model": model.model,
+                    "channel_id": model.channel_id,
+                    "capabilities": capabilities,
+                    "endpoints": {
+                        "chat_completions": (
+                            model.api_url_for("chat_completions")
+                            if "chat_completions" in model.capabilities
+                            else None
+                        ),
+                        "responses": (
+                            model.api_url_for("responses")
+                            if "responses" in model.capabilities
+                            else None
+                        ),
+                    },
+                }
+            )
+        return {
+            "object": "list",
+            "capabilities": sorted(all_capabilities),
+            "data": data,
+        }
 
     def get_health_status(self) -> dict[str, Any]:
         """

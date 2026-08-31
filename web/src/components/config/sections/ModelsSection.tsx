@@ -20,7 +20,7 @@ import ArrayItemCard from '../shared/ArrayItemCard';
 
 /** 单个模型的配置数据结构 */
 interface ModelConfig {
-  id: number;
+  id: string;
   name: string;
   model: string;
   channel_id: string;
@@ -29,13 +29,12 @@ interface ModelConfig {
   weight: number;
   temperature: number;
   safe_rps: number;
-  supports_json_schema: boolean;
-  supports_advanced_params: boolean;
+  capabilities: string[];
 }
 
 /** 新模型的默认配置值 */
 const defaultModel: ModelConfig = {
-  id: 1,
+  id: 'model-1',
   name: '',
   model: '',
   channel_id: '1',
@@ -44,9 +43,20 @@ const defaultModel: ModelConfig = {
   weight: 10,
   temperature: 0.3,
   safe_rps: 5,
-  supports_json_schema: true,
-  supports_advanced_params: false,
+  capabilities: ['chat_completions', 'stream', 'json_schema'],
 };
+
+const CAPABILITIES = [
+  'chat_completions',
+  'responses',
+  'stream',
+  'multimodal',
+  'tools',
+  'n',
+  'json_schema',
+  'logprobs',
+  'previous_response_id',
+] as const;
 
 /**
  * 模型配置组件
@@ -77,8 +87,9 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
 
   /** 新增模型，自动分配递增 ID */
   const handleAdd = () => {
-    const maxId = models.reduce((max, m) => Math.max(max, m.id ?? 0), 0);
-    updateConfig(['models'], [...models, { ...defaultModel, id: maxId + 1 }]);
+    let suffix = models.length + 1;
+    while (models.some((model) => model.id === `model-${suffix}`)) suffix += 1;
+    updateConfig(['models'], [...models, { ...defaultModel, id: `model-${suffix}` }]);
   };
 
   /** 删除指定索引的模型 */
@@ -88,8 +99,14 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
 
   /** 复制指定模型，插入到原模型下方 */
   const handleDuplicate = (index: number) => {
-    const maxId = models.reduce((max, m) => Math.max(max, m.id ?? 0), 0);
-    const copy = { ...models[index], id: maxId + 1, name: `${models[index].name}-copy` };
+    let suffix = models.length + 1;
+    while (models.some((model) => model.id === `model-${suffix}`)) suffix += 1;
+    const copy = {
+      ...models[index],
+      id: `model-${suffix}`,
+      name: `${models[index].name}-copy`,
+      capabilities: [...(models[index].capabilities ?? [])],
+    };
     const next = [...models];
     next.splice(index + 1, 0, copy);
     updateConfig(['models'], next);
@@ -108,8 +125,8 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
               onDuplicate={() => handleDuplicate(i)}
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <FormField label="ID">
-                  <NumberInput value={m.id} onChange={(v) => handleUpdate(i, 'id', v)} min={1} />
+                <FormField label="ID" required>
+                  <TextInput value={m.id ?? ''} onChange={(v) => handleUpdate(i, 'id', v)} placeholder="model-1" monospace />
                 </FormField>
                 <FormField label={t.cfgModelName}>
                   <TextInput value={m.name ?? ''} onChange={(v) => handleUpdate(i, 'name', v)} placeholder="model-1" />
@@ -140,20 +157,30 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
                   <NumberInput value={m.safe_rps ?? 5} onChange={(v) => handleUpdate(i, 'safe_rps', v)} min={1} />
                 </FormField>
               </div>
-              <div className="flex gap-6 mt-2">
-                <FormField label="JSON Schema" horizontal>
-                  <ToggleSwitch
-                    checked={m.supports_json_schema ?? false}
-                    onChange={(v) => handleUpdate(i, 'supports_json_schema', v)}
-                  />
-                </FormField>
-                <FormField label={t.cfgAdvancedParams} horizontal>
-                  <ToggleSwitch
-                    checked={m.supports_advanced_params ?? false}
-                    onChange={(v) => handleUpdate(i, 'supports_advanced_params', v)}
-                  />
-                </FormField>
-              </div>
+              <FormField label="Capabilities" description="Explicit protocol and payload features exposed by this model.">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {CAPABILITIES.map((capability) => {
+                    const checked = (m.capabilities ?? []).includes(capability);
+                    return (
+                      <label key={capability} className="flex items-center gap-2 rounded-lg border border-gray-100 px-2 py-2 text-xs text-gray-700">
+                        <ToggleSwitch
+                          checked={checked}
+                          onChange={(enabled) =>
+                            handleUpdate(
+                              i,
+                              'capabilities',
+                              enabled
+                                ? [...(m.capabilities ?? []), capability]
+                                : (m.capabilities ?? []).filter((item) => item !== capability),
+                            )
+                          }
+                        />
+                        <span className="break-all font-mono">{capability}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </FormField>
             </ArrayItemCard>
           ))}
         </div>

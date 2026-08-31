@@ -151,7 +151,7 @@ class ShardedTaskManager:
         optimal_shard_size: int = 10000,
         min_shard_size: int = 1000,
         max_shard_size: int = 50000,
-        max_retry_counts: dict[str, int] | None = None,
+        max_retry_counts: dict[ErrorType, int] | None = None,
     ):
         """
         初始化分片任务管理器
@@ -326,8 +326,11 @@ class ShardedTaskManager:
                 numeric_max = int(max_id)
                 total_range = numeric_max - numeric_min + 1
             except (ValueError, TypeError):
-                logging.error("ID 边界无法转换为整数，无法分片")
-                return False
+                logging.info("ID 为非数值类型，将使用数据源原生边界作为单个分片")
+                self.total_shards = 1
+                self.shard_boundaries = [(min_id, max_id)]
+                self.current_shard_index = 0
+                return True
 
             # 处理边界情况
             if total_range <= 0 and self.total_estimated > 0:

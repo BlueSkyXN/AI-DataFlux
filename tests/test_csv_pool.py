@@ -34,6 +34,7 @@ CSV 数据源复用 ExcelTaskPool，通过文件扩展名自动检测。
 """
 
 import pytest
+from unittest import mock
 
 pd = pytest.importorskip("pandas")
 
@@ -172,6 +173,100 @@ class TestCSVTaskPool:
         # 读取并验证
         content = temp_csv.read_text(encoding="utf-8")
         assert "测试结果" in content
+
+    def test_persisted_receipt_requires_successful_atomic_replace(self, temp_csv):
+        from src.data.excel import ExcelTaskPool
+
+        pool = ExcelTaskPool(
+            input_path=temp_csv,
+            output_path=temp_csv,
+            columns_to_extract=["input_text", "context"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        original = temp_csv.read_bytes()
+        try:
+            with mock.patch(
+                "src.data.excel.os.replace", side_effect=OSError("replace failed")
+            ):
+                with pytest.raises(IOError, match="replace failed"):
+                    pool.update_task_results({0: {"result": "not durable"}})
+
+            assert temp_csv.read_bytes() == original
+            assert list(temp_csv.parent.glob(f".{temp_csv.stem}.*.tmp.csv")) == []
+        finally:
+            pool.close()
+
+    def test_partial_result_preserves_existing_output_columns(self, tmp_path):
+        from src.data.excel import ExcelTaskPool
+
+        csv_path = tmp_path / "partial.csv"
+        pd.DataFrame(
+            [
+                {
+                    "input_text": "question",
+                    "output_result": "keep-me",
+                    "output_summary": None,
+                }
+            ]
+        ).to_csv(csv_path, index=False)
+        pool = ExcelTaskPool(
+            input_path=csv_path,
+            output_path=csv_path,
+            columns_to_extract=["input_text"],
+            columns_to_write={
+                "result": "output_result",
+                "summary": "output_summary",
+            },
+            engine_type="pandas",
+        )
+        try:
+            receipt = pool.update_task_results({0: {"summary": "new-summary"}})
+            row = pd.read_csv(csv_path).iloc[0]
+            assert receipt.persisted_ids == (0,)
+            assert row["output_result"] == "keep-me"
+            assert row["output_summary"] == "new-summary"
+        finally:
+            pool.close()
+
+    def test_excel_unicode_failure_does_not_fallback_or_acknowledge(self, tmp_path):
+        from src.data.excel import ExcelTaskPool
+
+        excel_path = tmp_path / "target.xlsx"
+        pd.DataFrame([{"input_text": "question", "output_result": None}]).to_excel(
+            excel_path,
+            index=False,
+        )
+        pool = ExcelTaskPool(
+            input_path=excel_path,
+            output_path=excel_path,
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            engine_type="pandas",
+        )
+        encoding_error = UnicodeEncodeError("utf-8", "x", 0, 1, "invalid")
+        writes = []
+
+        def fail_only_configured_excel(_df, destination, *, csv):
+            writes.append((destination, csv))
+            if not csv:
+                raise encoding_error
+
+        try:
+            with mock.patch.object(
+                pool,
+                "_atomic_write",
+                side_effect=fail_only_configured_excel,
+            ):
+                with pytest.raises(IOError, match="保存文件失败"):
+                    pool.update_task_results({0: {"result": "not-durable"}})
+            assert writes == [(excel_path, False)]
+            assert not excel_path.with_suffix(".csv").exists()
+            assert pool.engine.is_empty(
+                pool.engine.get_row(pool.df, 0)["output_result"]
+            )
+        finally:
+            pool.close()
 
 
 class TestCSVFactoryIntegration:
