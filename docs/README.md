@@ -2,6 +2,13 @@
 
 欢迎阅读 AI-DataFlux 的技术文档。
 
+## 4.0 开发治理
+
+- [V4_EXECUTION_CONTRACT.md](./V4_EXECUTION_CONTRACT.md) - 4.0 clean break 的版本边界、运行语义、锁与恢复合同、Hardening 切片和 Promotion 门禁
+- [BOOTSTRAP_ACCEPTANCE.md](./BOOTSTRAP_ACCEPTANCE.md) - Bootstrap 模块的接受、修订、替换或删除状态，以及对应 commit 和验证证据
+
+> 冻结的 Bootstrap 源码元数据仍为 `3.2.0-dev`；`4.0.0-dev` 是已批准的目标开发线。以上文档描述 4.0 的目标合同和验收治理，不表示 Bootstrap 当前代码已经实现或通过这些合同。
+
 ## 📚 核心文档
 
 ### 3.2 开发版契约
