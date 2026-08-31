@@ -68,7 +68,7 @@ async function json(route: Route, body: unknown, status = 200, headers?: Record<
 
 async function mockShell(page: Page) {
   await page.route('**/health', (route) =>
-    json(route, { status: 'ok', version: '3.2.0-e2e' }),
+    json(route, { status: 'ok', version: '4.0.0-e2e' }),
   );
   await page.route('**/api/v1/workspace/roots', (route) =>
     json(route, { roots: [{ id: 'project', path: '/srv/project' }] }),
@@ -123,7 +123,7 @@ async function mockEventRoutes(page: Page) {
 
 async function openApp(page: Page) {
   await page.goto('/#token=e2e-token');
-  await expect(page.getByRole('banner').getByText('3.2.0-e2e')).toBeVisible();
+  await expect(page.getByRole('banner').getByText('4.0.0-e2e')).toBeVisible();
 }
 
 test.beforeEach(async ({ page }) => {

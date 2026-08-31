@@ -216,14 +216,18 @@ class TestCLI:
         invalid_config = tmp_path / "semantic_invalid.yaml"
         invalid_config.write_text(
             """
-datasource:
-  type: mongodb
+schema_version: 4
+runtime: {}
+job:
+  datasource:
+    type: mongodb
+  columns:
+    extract: []
+    write: {}
+  prompt:
+    template: "{record_json}"
   concurrency:
     batch_size: 0
-columns_to_extract: []
-columns_to_write: {}
-prompt:
-  template: "{record_json}"
 """.strip(),
             encoding="utf-8",
         )
@@ -244,7 +248,7 @@ prompt:
 
         assert result.returncode == 2
         assert "Config invalid" in result.stdout
-        assert "datasource.type" in result.stdout
+        assert "job.datasource" in result.stdout
         assert "batch_size" in result.stdout
 
     def test_main_validate_rejects_semantic_errors(self, tmp_path):
@@ -252,12 +256,16 @@ prompt:
         invalid_config = tmp_path / "main_semantic_invalid.yaml"
         invalid_config.write_text(
             """
-datasource:
-  type: mongodb
-columns_to_extract: []
-columns_to_write: {}
-prompt:
-  template: "{record_json}"
+schema_version: 4
+runtime: {}
+job:
+  datasource:
+    type: mongodb
+  columns:
+    extract: []
+    write: {}
+  prompt:
+    template: "{record_json}"
 """.strip(),
             encoding="utf-8",
         )
@@ -277,7 +285,7 @@ prompt:
 
         assert result.returncode == 1
         assert "配置文件无效" in result.stdout
-        assert "datasource.type" in result.stdout
+        assert "job.datasource" in result.stdout
 
     def test_no_command(self):
         """测试无命令时显示帮助"""
@@ -353,12 +361,13 @@ prompt:
     def test_local_job_json_lifecycle(self, sample_config, tmp_path):
         input_path = tmp_path / "input.xlsx"
         input_path.write_bytes(b"placeholder")
-        sample_config["excel"]["input_path"] = str(input_path)
-        sample_config["workspace"] = {
+        sample_config["job"]["datasource"]["input_path"] = str(input_path)
+        sample_config["job"]["datasource"]["output_path"] = str(input_path)
+        sample_config["runtime"]["workspace"] = {
             "roots": {"project": str(tmp_path)},
             "state_dir": ".dataflux/jobs",
         }
-        sample_config["datasource"]["concurrency"]["max_in_flight"] = 2
+        sample_config["job"]["concurrency"]["max_in_flight"] = 2
         config_path = tmp_path / "job.yaml"
         config_path.write_text(
             yaml.safe_dump(sample_config, allow_unicode=True), encoding="utf-8"

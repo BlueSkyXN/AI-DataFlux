@@ -22,13 +22,12 @@ import StringListEditor from '../shared/StringListEditor';
 
 /** 单个渠道的配置数据结构 */
 interface ChannelConfig {
-  name: string;
   base_url: string;
   endpoints: {
     chat_completions?: string;
     responses?: string;
   };
-  timeout: number;
+  timeout_seconds: number;
   proxy: string;
   ssl_verify: boolean;
   ip_pool?: string[];
@@ -36,13 +35,12 @@ interface ChannelConfig {
 
 /** 新建渠道时的默认值 */
 const defaultChannel: ChannelConfig = {
-  name: '',
   base_url: '',
   endpoints: {
     chat_completions: '/v1/chat/completions',
     responses: '/v1/responses',
   },
-  timeout: 300,
+  timeout_seconds: 300,
   proxy: '',
   ssl_verify: true,
 };
@@ -55,15 +53,15 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
   const t = getTranslations(language);
   const [newChannelId, setNewChannelId] = useState('');
 
-  const channels = (getConfig(['channels']) as Record<string, ChannelConfig>) ?? {};
-  const models = (getConfig(['models']) as Array<{ channel_id?: string }>) ?? [];
+  const channels = (getConfig(['gateway', 'channels']) as Record<string, ChannelConfig>) ?? {};
+  const models = (getConfig(['gateway', 'routes']) as Array<{ channel_id?: string }>) ?? [];
 
   const channelEntries = Object.entries(channels);
 
   /** 更新指定渠道的某个字段 */
   const handleUpdate = (id: string, field: keyof ChannelConfig, value: unknown) => {
     const next = { ...channels, [id]: { ...channels[id], [field]: value } };
-    updateConfig(['channels'], next);
+    updateConfig(['gateway', 'channels'], next);
   };
 
   const handleEndpointUpdate = (
@@ -79,14 +77,14 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
         endpoints: { ...channel.endpoints, [endpoint]: value },
       },
     };
-    updateConfig(['channels'], next);
+    updateConfig(['gateway', 'channels'], next);
   };
 
   /** 添加新渠道，ID 不能为空且不能重复 */
   const handleAdd = () => {
     const id = newChannelId.trim();
     if (!id || id in channels) return;
-    updateConfig(['channels'], { ...channels, [id]: { ...defaultChannel } });
+    updateConfig(['gateway', 'channels'], { ...channels, [id]: { ...defaultChannel } });
     setNewChannelId('');
   };
 
@@ -103,7 +101,7 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
     }
     const next = { ...channels };
     delete next[id];
-    updateConfig(['channels'], next);
+    updateConfig(['gateway', 'channels'], next);
   };
 
   return (
@@ -114,13 +112,9 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
             <ArrayItemCard
               key={id}
               title={`Channel "${id}"`}
-              subtitle={ch.name || undefined}
               onRemove={() => handleRemove(id)}
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <FormField label={t.cfgChannelName}>
-                  <TextInput value={ch.name ?? ''} onChange={(v) => handleUpdate(id, 'name', v)} placeholder="openai-api" />
-                </FormField>
                 <FormField label="Base URL" required>
                   <TextInput
                     value={ch.base_url ?? ''}
@@ -146,7 +140,7 @@ export default function ChannelsSection({ updateConfig, getConfig, language }: S
                   />
                 </FormField>
                 <FormField label={t.cfgTimeout}>
-                  <NumberInput value={ch.timeout ?? 300} onChange={(v) => handleUpdate(id, 'timeout', v)} min={1} />
+                  <NumberInput value={ch.timeout_seconds ?? 300} onChange={(v) => handleUpdate(id, 'timeout_seconds', v)} min={1} />
                 </FormField>
                 <FormField label="Proxy">
                   <TextInput

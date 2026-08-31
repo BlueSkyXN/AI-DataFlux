@@ -17,38 +17,35 @@ from src.gateway.service import FluxApiService
 
 def _write_gateway_config(tmp_path: Path, models: list[dict]) -> Path:
     config = {
-        "global": {"log": {"level": "error"}},
-        "datasource": {
-            "type": "csv",
-            "engine": "pandas",
-            "concurrency": {"batch_size": 1, "max_in_flight": 1},
-        },
-        "csv": {"input_path": "input.csv"},
-        "columns_to_extract": ["input"],
-        "columns_to_write": {"result": "result"},
-        "prompt": {"template": "{input}"},
-        "workspace": {
-            "roots": {"project": "."},
-            "state_dir": ".dataflux/jobs",
+        "schema_version": 4,
+        "runtime": {
+            "log": {"level": "error"},
+            "auth": {"token": "test-token"},
+            "workspace": {
+                "roots": {"project": "."},
+                "state_dir": ".dataflux/jobs",
+            },
         },
         "gateway": {
-            "max_connections": 10,
-            "max_connections_per_host": 10,
-        },
-        "channels": {
-            "openai": {
-                "name": "openai",
-                "base_url": "https://api.example.test",
-                "endpoints": {
-                    "chat_completions": "/v1/chat/completions",
-                    "responses": "/v1/responses",
+            "listen": {"host": "127.0.0.1", "port": 8787, "workers": 1},
+            "connection_pool": {
+                "max_connections": 10,
+                "max_connections_per_host": 10,
+            },
+            "channels": {
+                "openai": {
+                    "base_url": "https://api.example.test",
+                    "endpoints": {
+                        "chat_completions": "/v1/chat/completions",
+                        "responses": "/v1/responses",
+                    },
+                    "timeout_seconds": 60,
+                    "proxy": "",
+                    "ssl_verify": True,
                 },
-                "timeout": 60,
-                "proxy": "",
-                "ssl_verify": True,
-            }
+            },
+            "routes": models,
         },
-        "models": models,
     }
     path = tmp_path / "gateway.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -77,11 +74,12 @@ def _model_config(
         effective_capabilities = [*effective_capabilities, "json_schema"]
     config = {
         "id": model_id,
-        "name": model_id,
-        "model": model or model_id,
+        "display_name": model_id,
+        "aliases": [],
+        "upstream_model": model or model_id,
         "channel_id": "openai",
         "api_key": "test-key",
-        "timeout": 60,
+        "timeout_seconds": 60,
         "weight": weight,
         "temperature": 0.3,
         "safe_rps": 100,

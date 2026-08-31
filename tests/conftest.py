@@ -57,44 +57,50 @@ requires_psutil = pytest.mark.skipif(
 
 @pytest.fixture
 def sample_config() -> dict:
-    """提供示例配置字典"""
+    """提供 canonical v4 job-only 示例配置字典。"""
     return {
-        "global": {
+        "schema_version": 4,
+        "runtime": {
             "log": {
                 "level": "info",
                 "format": "text",
                 "output": "console",
             },
-            "flux_api_url": "http://127.0.0.1:8787",
+            "auth": {"token": ""},
+            "workspace": {
+                "roots": {"project": "."},
+                "state_dir": "./.dataflux/jobs",
+            },
         },
-        "datasource": {
-            "type": "excel",
-            "engine": "auto",
-            "excel_reader": "auto",
-            "excel_writer": "auto",
-            "require_all_input_fields": True,
+        "job": {
+            "gateway_url": "http://127.0.0.1:8787",
+            "datasource": {
+                "type": "excel",
+                "input_path": "./test_input.xlsx",
+                "output_path": "./test_output.xlsx",
+                "engine": "auto",
+                "reader": "auto",
+                "writer": "auto",
+                "require_all_input_fields": True,
+            },
+            "columns": {
+                "extract": ["question", "context"],
+                "write": {"answer": "ai_answer"},
+            },
             "concurrency": {
                 "batch_size": 10,
                 "save_interval": 60,
             },
+            "prompt": {
+                "required_fields": ["answer"],
+                "use_json_schema": True,
+                "template": "Test: {record_json}",
+            },
+            "validation": {
+                "enabled": False,
+                "field_rules": {},
+            },
         },
-        "excel": {
-            "input_path": "./test_input.xlsx",
-            "output_path": "./test_output.xlsx",
-        },
-        "columns_to_extract": ["question", "context"],
-        "columns_to_write": {"answer": "ai_answer"},
-        "prompt": {
-            "required_fields": ["answer"],
-            "use_json_schema": True,
-            "template": "Test: {record_json}",
-        },
-        "validation": {
-            "enabled": False,
-            "field_rules": {},
-        },
-        "models": [],
-        "channels": {},
     }
 
 

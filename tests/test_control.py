@@ -52,26 +52,29 @@ def control_v1_app(tmp_path, monkeypatch):
     root.mkdir()
     (root / "input.csv").write_text("input,result\nhello,\n", encoding="utf-8")
     config = {
-        "global": {
+        "schema_version": 4,
+        "runtime": {
             "log": {"level": "error", "format": "text", "output": "console"},
-            "flux_api_url": "http://127.0.0.1:8787",
+            "auth": {"token": "config-token"},
+            "workspace": {
+                "roots": {"project": str(root)},
+                "state_dir": ".dataflux/jobs",
+            },
         },
-        "datasource": {
-            "type": "csv",
-            "engine": "pandas",
+        "job": {
+            "gateway_url": "http://127.0.0.1:8787",
+            "datasource": {
+                "type": "csv",
+                "input_path": str(root / "input.csv"),
+                "output_path": str(root / "input.csv"),
+                "engine": "pandas",
+                "require_all_input_fields": True,
+            },
+            "columns": {"extract": ["input"], "write": {"result": "result"}},
+            "prompt": {"template": "{input}"},
             "concurrency": {"batch_size": 1, "max_in_flight": 1},
         },
-        "csv": {"input_path": str(root / "input.csv")},
-        "columns_to_extract": ["input"],
-        "columns_to_write": {"result": "result"},
-        "prompt": {"template": "{input}"},
-        "workspace": {
-            "roots": {"project": str(root)},
-            "state_dir": ".dataflux/jobs",
-        },
-        "server": {"token": "config-token"},
-        "models": [],
-        "channels": {},
+        "control": {"listen": {"host": "127.0.0.1", "port": 8790}},
     }
     config_path = root / "config.yaml"
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -132,8 +135,9 @@ class TestConfigAPI:
         from src.control.config_api import read_config
 
         content = read_config("config-example.yaml")
-        assert "global" in content
-        assert "datasource" in content
+        assert "schema_version: 4" in content
+        assert "runtime:" in content
+        assert "job:" in content
 
     def test_read_config_missing_file(self):
         """测试读取不存在的配置文件"""
@@ -265,7 +269,7 @@ prompt:
         )
 
         assert data["valid"] is False
-        assert "datasource.type" in "\n".join(data["errors"])
+        assert "datasource" in "\n".join(data["errors"])
 
     def test_decode_base64url_token(self, auth_app):
         """测试 base64url token 解码"""
@@ -486,7 +490,7 @@ class TestControlV1API:
     def test_non_loopback_requires_configured_token(self, control_v1_app, monkeypatch):
         _app, _root, config_path = control_v1_app
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        config["server"]["token"] = ""
+        config["runtime"]["auth"]["token"] = ""
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
         monkeypatch.delenv("DATAFLUX_TOKEN", raising=False)
         from src.control.server import create_control_app

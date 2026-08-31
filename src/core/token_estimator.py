@@ -472,14 +472,12 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
     """
     import copy
     from pathlib import Path
-    from ..config.settings import init_logging, load_config, validate_config
+    from ..config.settings import compile_job_config, init_logging, load_config
     from ..data import create_task_pool
 
     # 加载配置
-    config = load_config(config_path)
-    validation = validate_config(config, config_path)
-    if validation["errors"]:
-        raise ValueError("; ".join(validation["errors"]))
+    root_config = load_config(config_path)
+    config = compile_job_config(root_config, config_path)
 
     # 初始化日志 (token 命令也输出进度日志)
     global_cfg = config.get("global", {})
@@ -487,8 +485,6 @@ def run_token_estimation(config_path: str, mode: str | None = None) -> dict[str,
 
     # 覆盖模式
     if mode:
-        if "token_estimation" not in config:
-            config["token_estimation"] = {}
         config["token_estimation"]["mode"] = mode
         logging.info(f"使用命令行模式覆盖: {mode}")
 

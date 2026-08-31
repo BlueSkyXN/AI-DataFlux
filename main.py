@@ -102,10 +102,16 @@ def main() -> int:
     try:
         if args.validate:
             # 验证模式：加载配置并检查本地可验证的运行前置条件
-            from src.config import load_config, validate_config
+            from src.config import compile_job_config, load_config, validate_config
 
-            config = load_config(args.config)
-            validation = validate_config(config, args.config)
+            try:
+                config = load_config(args.config)
+                validation = validate_config(config, args.config)
+                compile_job_config(config, args.config)
+            except Exception as exc:
+                print(f"✗ 配置文件无效: {args.config}")
+                print(f"  - {exc}")
+                return 1
 
             for warning in validation["warnings"]:
                 print(f"⚠ {warning}")
@@ -117,11 +123,9 @@ def main() -> int:
                 return 1
 
             print(f"✓ 配置文件有效: {args.config}")
-            print(
-                f"  - 数据源类型: {config.get('datasource', {}).get('type', 'excel')}"
-            )
-            print(f"  - 输入列: {config.get('columns_to_extract', [])}")
-            print(f"  - 输出列: {list(config.get('columns_to_write', {}).values())}")
+            print(f"  - 数据源类型: {config.job.datasource.type}")
+            print(f"  - 输入列: {config.job.columns.extract}")
+            print(f"  - 输出列: {list(config.job.columns.write.values())}")
             return 0
 
         # 生产模式：创建处理器并执行完整处理流程

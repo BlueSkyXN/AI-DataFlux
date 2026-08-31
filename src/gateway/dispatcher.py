@@ -83,7 +83,7 @@ from .limiter import RWLock
 
 
 def _parse_capabilities(value: Any) -> set[str]:
-    """解析 canonical v3.2 capability 列表。"""
+    """解析 canonical v4 capability 列表。"""
 
     if not isinstance(value, list) or not value:
         raise ValueError("capabilities 必须是非空字符串列表")
@@ -132,6 +132,7 @@ class ModelConfig:
         # 基本配置
         self.id = str(model_dict.get("id", ""))
         self.name = model_dict.get("name", self.id)
+        self.aliases = tuple(model_dict.get("aliases", ()))
         self.model = model_dict.get("model", "")
         self.channel_id = str(model_dict.get("channel_id", ""))
         self.api_key = model_dict.get("api_key", "")
@@ -223,6 +224,7 @@ class ModelConfig:
         return {
             "id": self.id,
             "name": self.name,
+            "aliases": list(self.aliases),
             "model": self.model,
             "channel_id": self.channel_id,
             "weight": self.weight,

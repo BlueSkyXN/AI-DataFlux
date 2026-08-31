@@ -135,11 +135,10 @@ from collections.abc import Callable
 import aiohttp
 
 from ..config.settings import (
-    DEFAULT_CONFIG,
+    compile_job_config,
     init_logging,
     load_config,
-    merge_config,
-    validate_config,
+    load_routing_profile,
 )
 from ..models.errors import ErrorType
 from ..data import create_task_pool
@@ -208,11 +207,8 @@ class UniversalAIProcessor:
         try:
             config_path_obj = Path(config_path)
             self.config_base_dir = config_path_obj.parent
-            user_config = load_config(config_path)
-            validation = validate_config(user_config, config_path_obj)
-            if validation["errors"]:
-                raise ValueError("; ".join(validation["errors"]))
-            self.config = merge_config(DEFAULT_CONFIG, user_config)
+            self.root_config = load_config(config_path)
+            self.config = compile_job_config(self.root_config, config_path_obj)
         except Exception as e:
             raise ValueError(f"无法加载配置文件: {e}") from e
 
@@ -454,7 +450,13 @@ class UniversalAIProcessor:
                     f"routing 子配置仅允许 prompt/validation，发现非法键: {sorted(unknown_keys)}"
                 )
 
-            merged_config = merge_config(self.config, profile_config)
+            merged_config = dict(self.config)
+            for section in ("prompt", "validation"):
+                if section in profile_config:
+                    merged_config[section] = {
+                        **self.config.get(section, {}),
+                        **profile_config[section],
+                    }
             prompt_cfg = merged_config.get("prompt", {})
             validator = JsonValidator()
             validator.configure(merged_config.get("validation"))
@@ -502,7 +504,7 @@ class UniversalAIProcessor:
         if not profile_path_obj.is_absolute():
             profile_path_obj = self.config_base_dir / profile_path_obj
 
-        return load_config(profile_path_obj)
+        return load_routing_profile(profile_path_obj)
 
     def _get_routing_context(self, row_data: Dict[str, Any]) -> dict[str, Any] | None:
         """

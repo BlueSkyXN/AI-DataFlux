@@ -23,12 +23,12 @@ import StringListEditor from '../shared/StringListEditor';
 export default function PromptSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
-  const requiredFields = (getConfig(['prompt', 'required_fields']) as string[]) ?? [];
-  const useJsonSchema = (getConfig(['prompt', 'use_json_schema']) as boolean) ?? false;
-  const temperature = (getConfig(['prompt', 'temperature']) as number) ?? 0.7;
-  const temperatureOverride = (getConfig(['prompt', 'temperature_override']) as boolean) ?? true;
-  const systemPrompt = (getConfig(['prompt', 'system_prompt']) as string) ?? '';
-  const template = (getConfig(['prompt', 'template']) as string) ?? '';
+  const requiredFields = (getConfig(['job', 'prompt', 'required_fields']) as string[]) ?? [];
+  const useJsonSchema = (getConfig(['job', 'prompt', 'use_json_schema']) as boolean) ?? false;
+  const temperature = (getConfig(['job', 'prompt', 'temperature']) as number) ?? 0.7;
+  const temperatureOverride = (getConfig(['job', 'prompt', 'temperature_override']) as boolean) ?? true;
+  const systemPrompt = (getConfig(['job', 'prompt', 'system_prompt']) as string) ?? '';
+  const template = (getConfig(['job', 'prompt', 'template']) as string) ?? '';
 
   return (
     <div className="space-y-4">
@@ -38,7 +38,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
         <FormField label={t.cfgRequiredFields} description={t.cfgRequiredFieldsDesc}>
           <StringListEditor
             value={requiredFields}
-            onChange={(v) => updateConfig(['prompt', 'required_fields'], v)}
+            onChange={(v) => updateConfig(['job', 'prompt', 'required_fields'], v)}
             placeholder={t.cfgAddField}
             addLabel={t.cfgAdd}
           />
@@ -47,7 +47,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
           <FormField label={t.cfgTemperature}>
             <NumberInput
               value={temperature}
-              onChange={(v) => updateConfig(['prompt', 'temperature'], v)}
+              onChange={(v) => updateConfig(['job', 'prompt', 'temperature'], v)}
               min={0} max={2} step={0.1}
             />
           </FormField>
@@ -56,13 +56,13 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
           <FormField label="JSON Schema" horizontal>
             <ToggleSwitch
               checked={useJsonSchema}
-              onChange={(v) => updateConfig(['prompt', 'use_json_schema'], v)}
+              onChange={(v) => updateConfig(['job', 'prompt', 'use_json_schema'], v)}
             />
           </FormField>
           <FormField label={t.cfgTempOverride} horizontal>
             <ToggleSwitch
               checked={temperatureOverride}
-              onChange={(v) => updateConfig(['prompt', 'temperature_override'], v)}
+              onChange={(v) => updateConfig(['job', 'prompt', 'temperature_override'], v)}
             />
           </FormField>
         </div>
@@ -73,7 +73,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
       <SectionCard title={t.cfgSystemPrompt}>
         <TextareaField
           value={systemPrompt}
-          onChange={(v) => updateConfig(['prompt', 'system_prompt'], v)}
+          onChange={(v) => updateConfig(['job', 'prompt', 'system_prompt'], v)}
           rows={6}
           monospace={false}
           placeholder={t.cfgSystemPromptPlaceholder}
@@ -85,7 +85,7 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
       <SectionCard title={t.cfgTemplate} description={t.cfgTemplateDesc}>
         <TextareaField
           value={template}
-          onChange={(v) => updateConfig(['prompt', 'template'], v)}
+          onChange={(v) => updateConfig(['job', 'prompt', 'template'], v)}
           rows={12}
           monospace={false}
           placeholder={t.cfgTemplatePlaceholder}

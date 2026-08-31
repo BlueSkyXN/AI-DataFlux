@@ -13,7 +13,7 @@ Gateway 对外提供 OpenAI-compatible Chat Completions 和 Responses 代理。�
 | `GET` | `/admin/health` | 健康状态 |
 | `GET` | `/admin/capabilities` | 每个模型的有效 capability 与 endpoint |
 
-`/v1/*` 和 `/admin/*` 使用统一 incoming Bearer token 检查。token 来源和非 loopback 约束见 [MIGRATION_3_2.md](./MIGRATION_3_2.md#服务器与统一-token)。
+`/v1/*` 和 `/admin/*` 使用统一 incoming Bearer token 检查。token 来源和非 loopback 约束见 [CONFIG.md](./CONFIG.md#2-runtime)。
 
 ## 最小请求校验与透传
 
@@ -25,7 +25,7 @@ Gateway 对外提供 OpenAI-compatible Chat Completions 和 Responses 代理。�
 
 ## Canonical capability
 
-model 的 `capabilities` 必须是非空列表，且只能使用：
+route 的 `capabilities` 必须是非空列表，且只能使用：
 
 | Capability | 触发条件 |
 |---|---|
@@ -44,19 +44,34 @@ model 的 `capabilities` 必须是非空列表，且只能使用：
 ## Channel 配置
 
 ```yaml
-channels:
-  "openai":
-    name: "openai"
-    base_url: "https://api.example.com"
-    endpoints:
-      chat_completions: "/v1/chat/completions"
-      responses: "/v1/responses"
-    timeout: 300
-    proxy: ""
-    ssl_verify: true
+schema_version: 4
+runtime: {}
+gateway:
+  channels:
+    openai:
+      base_url: https://api.example.com
+      endpoints:
+        chat_completions: /v1/chat/completions
+        responses: /v1/responses
+      timeout_seconds: 300
+      proxy: ""
+      ssl_verify: true
+      ip_pool: []
+  routes:
+    - id: route-a
+      display_name: Route A
+      aliases: [model-a]
+      upstream_model: upstream-a
+      channel_id: openai
+      api_key: "..."
+      capabilities: [chat_completions, responses]
+      weight: 1
+      safe_rps: 10
+      timeout_seconds: 300
+      temperature: 0.7
 ```
 
-`endpoints` 是 channel 的唯一 API path 来源。不支持 `api_path`、`responses_api_path` 或 channel capability。model capability 必须与 channel 实际配置的 endpoint 相容。
+`endpoints` 是 channel 的唯一 API path 来源。不支持 `api_path`、`responses_api_path` 或 channel capability。route capability 必须与 channel 实际配置的 endpoint 相容。
 
 ## Failover 边界
 

@@ -1,294 +1,165 @@
-# =============================================================================
-# AI-DataFlux 示例配置文件
+# AI-DataFlux 4.0 canonical configuration example.
 #
-# 使用方式: cp config-example.yaml config.yaml  然后根据实际需求修改
-#
-# 配置结构:
-#   global          — 全局设置（日志、API 端点）
-#   gateway         — API 网关连接限制
-#   datasource      — 数据源类型及并发/引擎/重试配置
-#   mysql/excel/postgresql/sqlite/csv/feishu — 各数据源的连接参数
-#   columns_to_extract — 从数据源提取的输入字段列表
-#   columns_to_write   — AI 输出字段到数据源列名的映射
-#   validation      — 字段值枚举验证规则
-#   models          — AI 模型列表（含 API Key、权重、限流等）
-#   channels        — 模型通道（上游 API 地址、代理、SSL、IP 池）
-#   prompt          — 提示词模板及 JSON Schema 配置
-#   token_estimation — Token 估算模式（可选）
-#   routing         — 规则路由（可选，按字段值动态选择子配置）
-# =============================================================================
+# This file is intentionally incompatible with every 3.x configuration.  A
+# deployment may keep only the component sections it needs, but runtime and
+# schema_version are always required.
 
-# 全局配置
-global:
+schema_version: 4
+
+runtime:
   log:
-    level: "info"         # 日志级别: debug, info, warning, error
-    format: "text"        # 日志格式: text 或 json
-    output: "console"     # 日志输出: console 或 file
-    file_path: "./logs/ai_dataflux.log"  # 当output=file时有效
-  flux_api_url: http://127.0.0.1:8787    # Flux API端点URL（自动补全 /v1/chat/completions）
+    level: info
+    format: text
+    output: console
+    file_path: ./logs/ai_dataflux.log
+  auth:
+    token: "" # DATAFLUX_TOKEN takes precedence
+  workspace:
+    roots:
+      project: .
+    state_dir: ./.dataflux/jobs
+  scheduler:
+    max_active_jobs: auto
+    cpu_high_watermark: 85
+    memory_high_watermark: 80
+    min_free_memory_mb: 512
+    sample_interval_seconds: 2
+  token_estimation:
+    mode: io
+    sample_size: -1
+    encoding: o200k_base
 
-# 网关配置
-gateway:
-  max_connections: 1000          # 网关到上游的总并发连接上限
-  max_connections_per_host: 1000 # 单个上游主机的并发连接上限
+job:
+  gateway_url: http://127.0.0.1:8787
+  datasource:
+    type: excel
+    input_path: ./data/input.xlsx
+    output_path: ./data/output.xlsx
+    engine: auto
+    reader: auto
+    writer: auto
+    require_all_input_fields: true
+  columns:
+    extract:
+      - question
+      - context
+    write:
+      answer: ai_answer
+      category: ai_category
+      confidence: ai_confidence
+      sentiment: ai_sentiment
+  model_selection:
+    mode: auto
+  prompt:
+    required_fields:
+      - answer
+      - category
+      - confidence
+      - sentiment
+    use_json_schema: true
+    temperature: 0.3
+    temperature_override: true
+    system_prompt: |
+      你是一个专业的数据分析师。请只根据输入记录生成结构化结果。
+    template: |
+      请分析以下记录并返回 JSON：
 
-workspace:
-  roots:
-    project: "."
-    data: "./data"
-  state_dir: "./.dataflux/jobs"
-
-scheduler:
-  max_active_jobs: auto
-  cpu_high_watermark: 85
-  memory_high_watermark: 80
-  min_free_memory_mb: 512
-  sample_interval_seconds: 2
-
-server:
-  host: "127.0.0.1"
-  control_port: 8790
-  gateway_port: 8787
-  token: ""  # DATAFLUX_TOKEN 环境变量优先
-
-# 数据源类型配置
-datasource:
-  type: excel   # 数据源类型: excel, csv, mysql, postgresql, sqlite, feishu_bitable, feishu_sheet
-  
-  # === 高性能引擎配置 ===
-  # 引擎类型: auto (自动选择) | pandas (默认) | polars (高性能)
-  # auto: 优先使用 polars (如已安装)，否则回退到 pandas
-  engine: auto
-  
-  # Excel 读取器: auto | openpyxl (默认) | calamine (高性能，需安装 fastexcel)
-  # calamine: 基于 Rust 的读取器，速度提升 10-50x
-  excel_reader: auto
-  
-  # Excel 写入器: auto | openpyxl (默认) | xlsxwriter (高性能)
-  # xlsxwriter: 写入速度提升 2-5x
-  excel_writer: auto
-  
-  require_all_input_fields: true  # 输入字段检查: true=全部非空才处理, false=至少一个非空即可
+      {record_json}
+  validation:
+    enabled: true
+    field_rules:
+      category:
+        - technical
+        - business
+        - general
+      sentiment:
+        - positive
+        - neutral
+        - negative
+  routing:
+    enabled: false
   concurrency:
-    batch_size: 100        # 读写批次大小
-    max_in_flight: 100     # 最大 AI 并发，可由资源调度器动态下调
-    save_interval: 300     # Excel文件保存间隔（秒）
-    shard_size: 10000      # 默认分片大小
-    min_shard_size: 1000   # 最小分片大小
-    max_shard_size: 50000  # 最大分片大小
-    api_pause_duration: 2.0        # API错误时全局暂停秒数
-    api_error_trigger_window: 2.0  # 多少秒内的API错误才会触发暂停
-    max_connections: 1000          # aiohttp的最大并发连接数
-    max_connections_per_host: 0    # 对每个主机的最大并发连接数（0表示无限制）
-    retry_limits:                  # 按错误类型配置重试次数
-      api_error: 3                 # API错误（超时、HTTP错误）最多重试次数
-      content_error: 1             # 内容错误（JSON解析失败）最多重试次数
-      system_error: 2              # 系统错误（内部异常）最多重试次数
+    batch_size: 100
+    max_in_flight: 100
+    save_interval: 300
+    shard_size: 10000
+    min_shard_size: 1000
+    max_shard_size: 50000
+    max_connections: 1000
+    max_connections_per_host: 0
+  retry:
+    task_max_attempts:
+      api_error: 4
+      content_error: 2
+      system_error: 3
+      source_error: 3
+    model_max_attempts: 3
+    api_pause_duration_seconds: 2
+    api_error_trigger_window_seconds: 2
+  writeback:
+    commit_max_attempts: 3
+    reconciliation_max_attempts: 3
+    backoff_initial_seconds: 1
+    backoff_max_seconds: 30
 
-# MySQL数据源配置（仅当type=mysql时有效）
-mysql:
-  host: "localhost"
-  port: 3306
-  user: "root"
-  password: "your_password"
-  database: "ai_tasks"
-  table_name: "tasks"
-  pool_size: 10                   # 数据库连接池大小（默认为batch_size的1/10）
+gateway:
+  listen:
+    host: 127.0.0.1
+    port: 8787
+    workers: 1
+  connection_pool:
+    max_connections: 1000
+    max_connections_per_host: 1000
+  channels:
+    openai:
+      base_url: https://api.openai.com
+      endpoints:
+        chat_completions: /v1/chat/completions
+        responses: /v1/responses
+      timeout_seconds: 300
+      proxy: ""
+      ssl_verify: true
+      ip_pool: []
+  routes:
+    - id: model-1
+      display_name: model-1
+      aliases: []
+      upstream_model: gpt-4-turbo
+      channel_id: openai
+      api_key: your_api_key
+      capabilities:
+        - chat_completions
+        - responses
+        - stream
+        - multimodal
+        - tools
+        - n
+        - json_schema
+        - logprobs
+        - previous_response_id
+      weight: 10
+      safe_rps: 5
+      timeout_seconds: 300
+      temperature: 0.3
+  fallback_groups: {}
+  retry:
+    max_attempts_per_request: 3
+  affinity:
+    ttl_seconds: 3600
+    max_entries: 10000
 
-# Excel数据源配置（仅当type=excel时有效）
-excel:
-  input_path: "./data/input.xlsx"
-  output_path: "./data/output.xlsx"
+control:
+  listen:
+    host: 127.0.0.1
+    port: 8790
 
-# PostgreSQL数据源配置（仅当type=postgresql时有效）
-postgresql:
-  host: "localhost"
-  port: 5432
-  user: "postgres"
-  password: "your_password"
-  database: "ai_tasks"
-  table_name: "tasks"
-  schema_name: "public"           # 可选，默认为 public
-  pool_size: 10                   # 连接池大小（默认为batch_size的1/10）
-
-# SQLite数据源配置（仅当type=sqlite时有效）
-sqlite:
-  db_path: "./data/tasks.db"      # 数据库文件路径
-  table_name: "tasks"
-
-# CSV数据源配置（仅当type=csv时有效）
-csv:
-  input_path: "./data/input.csv"
-  output_path: "./data/output.csv"  # 可选，默认为 input_path
-
-# 飞书数据源配置（当type=feishu_bitable或feishu_sheet时有效）
-# 需要在飞书开放平台创建自建应用并获取 app_id 和 app_secret
-# 应用需要开通以下权限：
-#   - 多维表格: bitable:app:readonly, bitable:app
-#   - 电子表格: sheets:spreadsheet:readonly, sheets:spreadsheet
-feishu:
-  app_id: "cli_xxxxxxxxxxxxx"           # 飞书自建应用 App ID
-  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxx" # 飞书自建应用 App Secret
-  # === 多维表格专用（type=feishu_bitable）===
-  app_token: "bascxxxxxxxxxxxxx"         # 多维表格 App Token（URL 中获取）
-  table_id: "tblxxxxxxxxxxxxx"           # 数据表 ID
-  # === 电子表格专用（type=feishu_sheet）===
-  spreadsheet_token: "shtcnxxxxxxxxxxxxx"  # 电子表格 Token（URL 中获取）
-  sheet_id: "0"                          # 工作表 ID 或名称
-  # === 通用配置 ===
-  max_retries: 3                         # API 最大重试次数
-  qps_limit: 5                           # 每秒最大请求数（0=不限制）
-
-# 需要从表中提取的字段
-columns_to_extract:
-  - "question"
-  - "context"
-
-# 需要写回表的字段(别名->真实字段名)
-columns_to_write:
-  answer: "ai_answer"
-  category: "ai_category" 
-  confidence: "ai_confidence"
-  sentiment: "ai_sentiment"
-
-# 字段值验证配置
-validation:
-  enabled: true
-  field_rules:
-    category:
-      - "technical"
-      - "business"
-      - "general"
-    sentiment:
-      - "positive"
-      - "neutral"
-      - "negative"
-
-# 模型配置
-models:
-  - id: "model-1"
-    name: "model-1"               # 模型显示名称
-    model: "gpt-4-turbo"          # 实际模型标识符
-    channel_id: "1"               # 所属通道ID
-    api_key: "your_api_key_1"     # API密钥
-    timeout: 300                  # 超时时间（秒）
-    weight: 10                    # 调度权重（使用加权随机算法）
-    temperature: 0.3              # 模型温度
-    safe_rps: 5                   # 每秒安全请求数（令牌桶限流）
-    capabilities:
-      - chat_completions
-      - responses
-      - stream
-      - multimodal
-      - tools
-      - n
-      - json_schema
-      - logprobs
-      - previous_response_id
-
-# 通道配置
-channels:
-  "1":
-    name: "openai-api"
-    base_url: "https://api.openai.com"
-    endpoints:
-      chat_completions: "/v1/chat/completions"
-      responses: "/v1/responses"
-    timeout: 300
-    proxy: ""         # 可选代理设置，例如 "http://127.0.0.1:7890"
-    ssl_verify: true  # SSL证书验证开关，Mac上遇到证书问题可设为false
-
-    # IP 池配置 (可选) - 用于多 IP 均匀负载和故障回退
-    # 当域名有多个可用 IP 时，使用轮询策略均匀分配请求到不同 IP
-    # 注意: 配置了 proxy 时 ip_pool 将被忽略
-    # ip_pool:
-    #   - "1.2.3.4"    # 第一个 IP
-    #   - "1.2.3.5"    # 第二个 IP
-    #   - "1.2.3.6"    # 第三个 IP (可以配置更多)
-
-
-# 提示词配置
-prompt:
-  required_fields:
-    - "answer"
-    - "category"
-    - "confidence"
-    - "sentiment"
-  use_json_schema: true
-  temperature: 0.3  # 较低温度确保分类准确性
-  temperature_override: true  # 是否覆盖模型默认温度
-  system_prompt: |
-    你是一个专业的数据分析师，擅长从复杂数据中提取有价值的信息。请根据提供的数据和上下文，给出准确、深入的分析和建议。
-  template: |
-    请分析以下数据并提供专业的回答:
-
-    {record_json}
-    
-    系统要求:
-    1. 请详细分析问题和上下文，提供准确、有深度的回答
-    2. 回答应专业、清晰、有条理，避免冗余内容
-    3. 必须返回JSON格式的结果，包含以下字段:
-       - answer: 详细的回答内容
-       - category: 问题类别，可选值为 "technical"、"business"、"general"
-       - confidence: 置信度评分，范围0-100的整数
-       - sentiment: 情感倾向，可选值为 "positive"、"neutral"、"negative"
-    
-    格式示例:
-    {
-      "answer": "这里是详细的回答内容...",
-      "category": "technical",
-      "confidence": 95,
-      "sentiment": "neutral"
-    }
-    
-    请确保回答是JSON格式，且仅包含JSON内容，不需要额外的解释文字。
-
-# Token 估算配置 (可选)
-token_estimation:
-  mode: io               # 估算模式:
-                         #   in  - 输入 token
-                         #   out - 输出 token
-                         #   io  - 输入+输出
-  sample_size: -1         # -1=全量计算(忽略处理状态), >0=采样数量
-  encoding: o200k_base    # 固定使用最新编码器
-
-# ============================================================
-# 规则路由配置 (可选)
-# ============================================================
-# 
-# 规则路由允许在处理单个数据文件时，根据记录中某个字段的值
-# 动态选择不同的 prompt 和 validation 配置。
+# Routing profiles are separate local YAML files. They do not contain
+# schema_version and may only contain partial prompt and validation sections.
 #
-# 使用场景：
-#   - 单个数据文件包含多种类型的数据（如不同部门、产品线）
-#   - 不同类型需要不同的分类标签和提示词
-#   - 希望一次处理完成，无需拆分文件
-#
-# 配置说明：
-#   - routing.enabled: 是否启用路由功能
-#   - routing.field: 用于路由判断的字段名（必须包含在 columns_to_extract 中）
-#   - routing.subtasks: 路由规则列表
-#     - match: 字段值（精确匹配）
-#     - profile: 子配置文件路径（相对于主配置文件目录）
-#
-# 子配置文件限制：
-#   - 仅允许包含 prompt 和 validation 两个顶层键
-#   - 只需写差异字段，未写字段保留主配置的值
-#
-# 行为规则：
-#   - 路由字段不存在于记录中 → 使用主配置（默认配置）
-#   - 路由字段值无匹配规则 → 使用主配置（默认配置）
-#   - 匹配成功 → 子配置深度合并到主配置
-#
-# 详细文档：docs/ROUTING.md
-#
-# routing:
-#   enabled: true
-#   field: "category"                # 用于路由的字段名（示例：按 category 字段路由）
-#   subtasks:
-#     - match: "type_a"              # 当 category="type_a" 时
-#       profile: ".config/rules/type_a.yaml"
-#     - match: "type_b"              # 当 category="type_b" 时
-#       profile: ".config/rules/type_b.yaml"
-#     - match: "type_c"              # 当 category="type_c" 时
-#       profile: ".config/rules/type_c.yaml"
+# job:
+#   routing:
+#     enabled: true
+#     field: category
+#     subtasks:
+#       - match: type_a
+#         profile: .config/rules/type_a.yaml

@@ -1,6 +1,6 @@
 # Control API 与 CLI 自动化契约
 
-3.2 为本地 Control Server 增加版本化 API，用于 workspace 浏览、带版本保护的配置读写、durable Job 管理和可恢复的 event stream。本页只描述 `3.2.0-dev` 当前源码中的契约；旧版 `/api/config`、`/api/status`、进程控制和日志 WebSocket 仍用于既有页面，不能与 `/api/v1/*` 混为同一稳定接口。
+4.0 本地 Control Server 提供 workspace 浏览、带版本保护的配置读写、durable Job 管理和可恢复的 event stream。本页描述 `4.0.0-dev` 当前源码契约；兼容页面仍使用的旧版 `/api/config`、`/api/status`、进程控制和日志 WebSocket 不能与 `/api/v1/*` 混为同一稳定接口。
 
 ## 启动与认证
 
@@ -10,8 +10,8 @@ DATAFLUX_TOKEN=<token> python cli.py gui --no-browser
 
 - `GET /health` 不需要认证，返回 `{"status":"ok","version":"..."}`。
 - 所有 `/api/*` 请求都需要 `Authorization: Bearer <token>`。
-- token 解析顺序为 `DATAFLUX_TOKEN` → `server.token` → loopback 启动时生成临时 token。
-- 绑定非 loopback 地址时必须显式设置 `DATAFLUX_TOKEN` 或 `server.token`。
+- token 解析顺序为 `DATAFLUX_TOKEN` → `runtime.auth.token` → loopback 启动时生成临时 token。
+- 绑定非 loopback 地址时必须显式设置 `DATAFLUX_TOKEN` 或 `runtime.auth.token`。
 - `POST`、`PUT`、`PATCH`、`DELETE` 请求必须使用 `Content-Type: application/json`，否则返回 HTTP 415。
 
 Control Server 会为请求采用调用方提供的 `X-Request-ID`，未提供时生成 UUID。正常下游响应包含 `X-Request-ID`；版本化错误正文同时包含 `request_id`：
@@ -42,7 +42,7 @@ Control Server 会为请求采用调用方提供的 `X-Request-ID`，未提供�
 
 ## Workspace
 
-客户端不向 API 传任意绝对路径，而是使用 `root_id + relative_path`。服务端按 `workspace.roots` 解析，并拒绝绝对路径、`..` 和 symlink 越界。
+客户端不向 API 传任意绝对路径，而是使用 `root_id + relative_path`。服务端按 `runtime.workspace.roots` 解析，并拒绝绝对路径、`..` 和 symlink 越界。
 
 ### `GET /api/v1/workspace/roots`
 
@@ -87,7 +87,7 @@ Control Server 会为请求采用调用方提供的 `X-Request-ID`，未提供�
 {
   "root_id": "primary",
   "relative_path": "configs/batch.yaml",
-  "content": "version: 3.2\n...",
+  "content": "schema_version: 4\n...",
   "revision": "<sha256>"
 }
 ```
@@ -107,7 +107,7 @@ If-Match: "<sha256>"
 {
   "root_id": "primary",
   "relative_path": "configs/batch.yaml",
-  "content": "version: 3.2\n..."
+  "content": "schema_version: 4\n..."
 }
 ```
 
@@ -123,7 +123,7 @@ If-Match: "<sha256>"
 
 ```json
 {
-  "content": "version: 3.2\n...",
+  "content": "schema_version: 4\n...",
   "root_id": "primary",
   "relative_path": "configs/batch.yaml"
 }
@@ -222,7 +222,7 @@ data: {"seq":12,"type":"status_changed",...}
 
 ## CLI 自动化边界
 
-3.2 CLI 已暴露 `worker`、`config validate` 和 `job` 命令。Job 命令不带 `--server` 时直接操作本地 Repository；带 `--server` 时通过 Control API 执行，token 读取顺序为 `DATAFLUX_TOKEN` → 本地 `server.token`。
+4.0 CLI 暴露 `worker`、`config validate` 和 `job` 命令。Job 命令不带 `--server` 时直接操作本地 Repository；带 `--server` 时通过 Control API 执行，token 读取顺序为 `DATAFLUX_TOKEN` → 本地 `runtime.auth.token`。
 
 ```bash
 # 严格配置校验

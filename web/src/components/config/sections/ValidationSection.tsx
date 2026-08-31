@@ -23,14 +23,14 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
   const t = getTranslations(language);
   const [newFieldName, setNewFieldName] = useState('');
 
-  const enabled = (getConfig(['validation', 'enabled']) as boolean) ?? false;
-  const fieldRules = (getConfig(['validation', 'field_rules']) as Record<string, string[]>) ?? {};
+  const enabled = (getConfig(['job', 'validation', 'enabled']) as boolean) ?? false;
+  const fieldRules = (getConfig(['job', 'validation', 'field_rules']) as Record<string, string[]>) ?? {};
 
   /** 添加新的校验字段 */
   const handleAddField = () => {
     const name = newFieldName.trim();
     if (!name || name in fieldRules) return;
-    updateConfig(['validation', 'field_rules'], { ...fieldRules, [name]: [] });
+    updateConfig(['job', 'validation', 'field_rules'], { ...fieldRules, [name]: [] });
     setNewFieldName('');
   };
 
@@ -38,12 +38,12 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
   const handleRemoveField = (fieldName: string) => {
     const next = { ...fieldRules };
     delete next[fieldName];
-    updateConfig(['validation', 'field_rules'], next);
+    updateConfig(['job', 'validation', 'field_rules'], next);
   };
 
   /** 更新指定字段的允许值列表 */
   const handleUpdateValues = (fieldName: string, values: string[]) => {
-    updateConfig(['validation', 'field_rules'], { ...fieldRules, [fieldName]: values });
+    updateConfig(['job', 'validation', 'field_rules'], { ...fieldRules, [fieldName]: values });
   };
 
   return (
@@ -52,7 +52,7 @@ export default function ValidationSection({ updateConfig, getConfig, language }:
         <FormField label={t.cfgEnableValidation} horizontal>
           <ToggleSwitch
             checked={enabled}
-            onChange={(v) => updateConfig(['validation', 'enabled'], v)}
+            onChange={(v) => updateConfig(['job', 'validation', 'enabled'], v)}
           />
         </FormField>
       </SectionCard>

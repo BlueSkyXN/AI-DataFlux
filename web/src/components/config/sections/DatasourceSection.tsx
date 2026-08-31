@@ -32,11 +32,25 @@ import { testFeishuConnection } from '../../../api';
 export default function DatasourceSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
-  const dsType = (getConfig(['datasource', 'type']) as string) ?? 'excel';
-  const engine = (getConfig(['datasource', 'engine']) as string) ?? 'auto';
-  const excelReader = (getConfig(['datasource', 'excel_reader']) as string) ?? 'auto';
-  const excelWriter = (getConfig(['datasource', 'excel_writer']) as string) ?? 'auto';
-  const requireAll = (getConfig(['datasource', 'require_all_input_fields']) as boolean) ?? true;
+  const dsType = (getConfig(['job', 'datasource', 'type']) as string) ?? 'excel';
+  const engine = (getConfig(['job', 'datasource', 'engine']) as string) ?? 'auto';
+  const excelReader = (getConfig(['job', 'datasource', 'reader']) as string) ?? 'auto';
+  const excelWriter = (getConfig(['job', 'datasource', 'writer']) as string) ?? 'auto';
+  const requireAll = (getConfig(['job', 'datasource', 'require_all_input_fields']) as boolean) ?? true;
+
+  const replaceDatasource = (type: string) => {
+    const common = { type, require_all_input_fields: true };
+    const defaults: Record<string, Record<string, unknown>> = {
+      excel: { ...common, input_path: '', output_path: '', engine: 'auto', reader: 'auto', writer: 'auto' },
+      csv: { ...common, input_path: '', output_path: '', engine: 'auto' },
+      sqlite: { ...common, db_path: '', table_name: '' },
+      mysql: { ...common, host: 'localhost', port: 3306, user: '', password: '', database: '', table_name: '', pool_size: 10 },
+      postgresql: { ...common, host: 'localhost', port: 5432, user: '', password: '', database: '', table_name: '', schema_name: 'public', pool_size: 10 },
+      feishu_bitable: { ...common, app_id: '', app_secret: '', app_token: '', table_id: '', max_retries: 3, qps_limit: 5 },
+      feishu_sheet: { ...common, app_id: '', app_secret: '', spreadsheet_token: '', sheet_id: '', max_retries: 3, qps_limit: 5 },
+    };
+    updateConfig(['job', 'datasource'], defaults[type]);
+  };
 
   return (
     <div className="space-y-4">
@@ -46,7 +60,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
         <FormField label={t.cfgType} required>
           <SelectDropdown
             value={dsType}
-            onChange={(v) => updateConfig(['datasource', 'type'], v)}
+            onChange={replaceDatasource}
             options={[
               { value: 'excel', label: 'Excel' },
               { value: 'csv', label: 'CSV' },
@@ -68,7 +82,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
             <FormField label={t.cfgEngine}>
               <SelectDropdown
                 value={engine}
-                onChange={(v) => updateConfig(['datasource', 'engine'], v)}
+                onChange={(v) => updateConfig(['job', 'datasource', 'engine'], v)}
                 options={[
                   { value: 'auto', label: 'Auto' },
                   { value: 'pandas', label: 'Pandas' },
@@ -81,7 +95,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
                 <FormField label={t.cfgExcelReader}>
                   <SelectDropdown
                     value={excelReader}
-                    onChange={(v) => updateConfig(['datasource', 'excel_reader'], v)}
+                    onChange={(v) => updateConfig(['job', 'datasource', 'reader'], v)}
                     options={[
                       { value: 'auto', label: 'Auto' },
                       { value: 'openpyxl', label: 'openpyxl' },
@@ -92,7 +106,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
                 <FormField label={t.cfgExcelWriter}>
                   <SelectDropdown
                     value={excelWriter}
-                    onChange={(v) => updateConfig(['datasource', 'excel_writer'], v)}
+                    onChange={(v) => updateConfig(['job', 'datasource', 'writer'], v)}
                     options={[
                       { value: 'auto', label: 'Auto' },
                       { value: 'openpyxl', label: 'openpyxl' },
@@ -112,7 +126,7 @@ export default function DatasourceSection({ updateConfig, getConfig, language }:
         <FormField label={t.cfgRequireAllFields} description={t.cfgRequireAllFieldsDesc} horizontal>
           <ToggleSwitch
             checked={requireAll}
-            onChange={(v) => updateConfig(['datasource', 'require_all_input_fields'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'require_all_input_fields'], v)}
           />
         </FormField>
       </SectionCard>
@@ -138,12 +152,6 @@ interface ConnProps {
   getConfig: (path: string[]) => unknown;
   updateConfig: (path: string[], value: unknown) => void;
   t: ReturnType<typeof getTranslations>;
-}
-
-function getStringWithDefinedFallback(primary: unknown, fallback: unknown): string {
-  if (primary !== null && primary !== undefined) return String(primary);
-  if (fallback !== null && fallback !== undefined) return String(fallback);
-  return '';
 }
 
 /** 飞书连接测试按钮组件，调用后端 API 验证 App 凭证 */
@@ -202,16 +210,16 @@ function ExcelConnection({ getConfig, updateConfig, t }: ConnProps) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label={t.cfgInputPath} required>
           <TextInput
-            value={(getConfig(['excel', 'input_path']) as string) ?? ''}
-            onChange={(v) => updateConfig(['excel', 'input_path'], v)}
+            value={(getConfig(['job', 'datasource', 'input_path']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'input_path'], v)}
             placeholder="./data/input.xlsx"
             monospace
           />
         </FormField>
         <FormField label={t.cfgOutputPath}>
           <TextInput
-            value={(getConfig(['excel', 'output_path']) as string) ?? ''}
-            onChange={(v) => updateConfig(['excel', 'output_path'], v)}
+            value={(getConfig(['job', 'datasource', 'output_path']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'output_path'], v)}
             placeholder={t.cfgOutputPathDefault}
             monospace
           />
@@ -228,16 +236,16 @@ function CsvConnection({ getConfig, updateConfig, t }: ConnProps) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label={t.cfgInputPath} required>
           <TextInput
-            value={(getConfig(['csv', 'input_path']) as string) ?? ''}
-            onChange={(v) => updateConfig(['csv', 'input_path'], v)}
+            value={(getConfig(['job', 'datasource', 'input_path']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'input_path'], v)}
             placeholder="./data/input.csv"
             monospace
           />
         </FormField>
         <FormField label={t.cfgOutputPath}>
           <TextInput
-            value={(getConfig(['csv', 'output_path']) as string) ?? ''}
-            onChange={(v) => updateConfig(['csv', 'output_path'], v)}
+            value={(getConfig(['job', 'datasource', 'output_path']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'output_path'], v)}
             placeholder={t.cfgOutputPathDefault}
             monospace
           />
@@ -254,48 +262,48 @@ function MysqlConnection({ getConfig, updateConfig, t }: ConnProps) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label="Host" required>
           <TextInput
-            value={(getConfig(['mysql', 'host']) as string) ?? 'localhost'}
-            onChange={(v) => updateConfig(['mysql', 'host'], v)}
+            value={(getConfig(['job', 'datasource', 'host']) as string) ?? 'localhost'}
+            onChange={(v) => updateConfig(['job', 'datasource', 'host'], v)}
             placeholder="localhost"
           />
         </FormField>
         <FormField label="Port" required>
           <NumberInput
-            value={(getConfig(['mysql', 'port']) as number) ?? 3306}
-            onChange={(v) => updateConfig(['mysql', 'port'], v)}
+            value={(getConfig(['job', 'datasource', 'port']) as number) ?? 3306}
+            onChange={(v) => updateConfig(['job', 'datasource', 'port'], v)}
             min={1} max={65535}
           />
         </FormField>
         <FormField label={t.cfgUser} required>
           <TextInput
-            value={(getConfig(['mysql', 'user']) as string) ?? ''}
-            onChange={(v) => updateConfig(['mysql', 'user'], v)}
+            value={(getConfig(['job', 'datasource', 'user']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'user'], v)}
             placeholder="root"
           />
         </FormField>
         <FormField label={t.cfgPassword} required>
           <TextInput
-            value={(getConfig(['mysql', 'password']) as string) ?? ''}
-            onChange={(v) => updateConfig(['mysql', 'password'], v)}
+            value={(getConfig(['job', 'datasource', 'password']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'password'], v)}
             type="password"
           />
         </FormField>
         <FormField label={t.cfgDatabase} required>
           <TextInput
-            value={(getConfig(['mysql', 'database']) as string) ?? ''}
-            onChange={(v) => updateConfig(['mysql', 'database'], v)}
+            value={(getConfig(['job', 'datasource', 'database']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'database'], v)}
           />
         </FormField>
         <FormField label={t.cfgTableName} required>
           <TextInput
-            value={(getConfig(['mysql', 'table_name']) as string) ?? ''}
-            onChange={(v) => updateConfig(['mysql', 'table_name'], v)}
+            value={(getConfig(['job', 'datasource', 'table_name']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'table_name'], v)}
           />
         </FormField>
         <FormField label={t.cfgPoolSize}>
           <NumberInput
-            value={(getConfig(['mysql', 'pool_size']) as number) ?? undefined}
-            onChange={(v) => updateConfig(['mysql', 'pool_size'], v)}
+            value={(getConfig(['job', 'datasource', 'pool_size']) as number) ?? undefined}
+            onChange={(v) => updateConfig(['job', 'datasource', 'pool_size'], v)}
             min={1}
             placeholder="auto (batch_size / 10)"
           />
@@ -312,55 +320,55 @@ function PostgresqlConnection({ getConfig, updateConfig, t }: ConnProps) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FormField label="Host" required>
           <TextInput
-            value={(getConfig(['postgresql', 'host']) as string) ?? 'localhost'}
-            onChange={(v) => updateConfig(['postgresql', 'host'], v)}
+            value={(getConfig(['job', 'datasource', 'host']) as string) ?? 'localhost'}
+            onChange={(v) => updateConfig(['job', 'datasource', 'host'], v)}
             placeholder="localhost"
           />
         </FormField>
         <FormField label="Port" required>
           <NumberInput
-            value={(getConfig(['postgresql', 'port']) as number) ?? 5432}
-            onChange={(v) => updateConfig(['postgresql', 'port'], v)}
+            value={(getConfig(['job', 'datasource', 'port']) as number) ?? 5432}
+            onChange={(v) => updateConfig(['job', 'datasource', 'port'], v)}
             min={1} max={65535}
           />
         </FormField>
         <FormField label={t.cfgUser} required>
           <TextInput
-            value={(getConfig(['postgresql', 'user']) as string) ?? ''}
-            onChange={(v) => updateConfig(['postgresql', 'user'], v)}
+            value={(getConfig(['job', 'datasource', 'user']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'user'], v)}
             placeholder="postgres"
           />
         </FormField>
         <FormField label={t.cfgPassword} required>
           <TextInput
-            value={(getConfig(['postgresql', 'password']) as string) ?? ''}
-            onChange={(v) => updateConfig(['postgresql', 'password'], v)}
+            value={(getConfig(['job', 'datasource', 'password']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'password'], v)}
             type="password"
           />
         </FormField>
         <FormField label={t.cfgDatabase} required>
           <TextInput
-            value={(getConfig(['postgresql', 'database']) as string) ?? ''}
-            onChange={(v) => updateConfig(['postgresql', 'database'], v)}
+            value={(getConfig(['job', 'datasource', 'database']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'database'], v)}
           />
         </FormField>
         <FormField label={t.cfgTableName} required>
           <TextInput
-            value={(getConfig(['postgresql', 'table_name']) as string) ?? ''}
-            onChange={(v) => updateConfig(['postgresql', 'table_name'], v)}
+            value={(getConfig(['job', 'datasource', 'table_name']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'table_name'], v)}
           />
         </FormField>
         <FormField label="Schema">
           <TextInput
-            value={(getConfig(['postgresql', 'schema_name']) as string) ?? 'public'}
-            onChange={(v) => updateConfig(['postgresql', 'schema_name'], v)}
+            value={(getConfig(['job', 'datasource', 'schema_name']) as string) ?? 'public'}
+            onChange={(v) => updateConfig(['job', 'datasource', 'schema_name'], v)}
             placeholder="public"
           />
         </FormField>
         <FormField label={t.cfgPoolSize}>
           <NumberInput
-            value={(getConfig(['postgresql', 'pool_size']) as number) ?? undefined}
-            onChange={(v) => updateConfig(['postgresql', 'pool_size'], v)}
+            value={(getConfig(['job', 'datasource', 'pool_size']) as number) ?? undefined}
+            onChange={(v) => updateConfig(['job', 'datasource', 'pool_size'], v)}
             min={1}
             placeholder="auto (batch_size / 10)"
           />
@@ -377,16 +385,16 @@ function SqliteConnection({ getConfig, updateConfig, t }: ConnProps) {
       <div className="grid grid-cols-1 gap-4">
         <FormField label={t.cfgDbPath} required>
           <TextInput
-            value={(getConfig(['sqlite', 'db_path']) as string) ?? ''}
-            onChange={(v) => updateConfig(['sqlite', 'db_path'], v)}
+            value={(getConfig(['job', 'datasource', 'db_path']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'db_path'], v)}
             placeholder="./data/tasks.db"
             monospace
           />
         </FormField>
         <FormField label={t.cfgTableName} required>
           <TextInput
-            value={(getConfig(['sqlite', 'table_name']) as string) ?? ''}
-            onChange={(v) => updateConfig(['sqlite', 'table_name'], v)}
+            value={(getConfig(['job', 'datasource', 'table_name']) as string) ?? ''}
+            onChange={(v) => updateConfig(['job', 'datasource', 'table_name'], v)}
           />
         </FormField>
       </div>
@@ -396,16 +404,10 @@ function SqliteConnection({ getConfig, updateConfig, t }: ConnProps) {
 
 /** 飞书多维表格数据源连接配置（App 凭证、应用令牌、表 ID、重试与限流） */
 function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
-  const appId = (getConfig(['feishu', 'app_id']) as string) ?? '';
-  const appSecret = (getConfig(['feishu', 'app_secret']) as string) ?? '';
-  const appToken = getStringWithDefinedFallback(
-    getConfig(['feishu', 'app_token']),
-    getConfig(['datasource', 'app_token'])
-  );
-  const tableId = getStringWithDefinedFallback(
-    getConfig(['feishu', 'table_id']),
-    getConfig(['datasource', 'table_id'])
-  );
+  const appId = (getConfig(['job', 'datasource', 'app_id']) as string) ?? '';
+  const appSecret = (getConfig(['job', 'datasource', 'app_secret']) as string) ?? '';
+  const appToken = (getConfig(['job', 'datasource', 'app_token']) as string) ?? '';
+  const tableId = (getConfig(['job', 'datasource', 'table_id']) as string) ?? '';
 
   return (
     <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
@@ -413,7 +415,7 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuAppId} required>
           <TextInput
             value={appId}
-            onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'app_id'], v)}
             placeholder="cli_xxxxxxxxxxxxx"
             monospace
           />
@@ -421,7 +423,7 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuAppSecret} required>
           <TextInput
             value={appSecret}
-            onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'app_secret'], v)}
             type="password"
           />
         </FormField>
@@ -431,7 +433,7 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuAppToken} required>
           <TextInput
             value={appToken}
-            onChange={(v) => updateConfig(['feishu', 'app_token'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'app_token'], v)}
             placeholder="bascxxxxxxxxxxxxx"
             monospace
           />
@@ -439,22 +441,22 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuTableId} required>
           <TextInput
             value={tableId}
-            onChange={(v) => updateConfig(['feishu', 'table_id'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'table_id'], v)}
             placeholder="tblxxxxxxxxxxxxx"
             monospace
           />
         </FormField>
         <FormField label={t.cfgFeishuMaxRetries}>
           <NumberInput
-            value={(getConfig(['feishu', 'max_retries']) as number) ?? 3}
-            onChange={(v) => updateConfig(['feishu', 'max_retries'], v)}
+            value={(getConfig(['job', 'datasource', 'max_retries']) as number) ?? 3}
+            onChange={(v) => updateConfig(['job', 'datasource', 'max_retries'], v)}
             min={0} max={10}
           />
         </FormField>
         <FormField label={t.cfgFeishuQpsLimit} description={t.cfgFeishuQpsLimitDesc}>
           <NumberInput
-            value={(getConfig(['feishu', 'qps_limit']) as number) ?? 5}
-            onChange={(v) => updateConfig(['feishu', 'qps_limit'], v)}
+            value={(getConfig(['job', 'datasource', 'qps_limit']) as number) ?? 5}
+            onChange={(v) => updateConfig(['job', 'datasource', 'qps_limit'], v)}
             min={0}
           />
         </FormField>
@@ -465,16 +467,10 @@ function FeishuBitableConnection({ getConfig, updateConfig, t }: ConnProps) {
 
 /** 飞书电子表格数据源连接配置（App 凭证、电子表格令牌、工作表 ID、重试与限流） */
 function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
-  const appId = (getConfig(['feishu', 'app_id']) as string) ?? '';
-  const appSecret = (getConfig(['feishu', 'app_secret']) as string) ?? '';
-  const spreadsheetToken = getStringWithDefinedFallback(
-    getConfig(['feishu', 'spreadsheet_token']),
-    getConfig(['datasource', 'spreadsheet_token'])
-  );
-  const sheetId = getStringWithDefinedFallback(
-    getConfig(['feishu', 'sheet_id']),
-    getConfig(['datasource', 'sheet_id'])
-  );
+  const appId = (getConfig(['job', 'datasource', 'app_id']) as string) ?? '';
+  const appSecret = (getConfig(['job', 'datasource', 'app_secret']) as string) ?? '';
+  const spreadsheetToken = (getConfig(['job', 'datasource', 'spreadsheet_token']) as string) ?? '';
+  const sheetId = (getConfig(['job', 'datasource', 'sheet_id']) as string) ?? '';
 
   return (
     <SectionCard title={t.cfgConnectionSettings} description={t.cfgFeishuDesc}>
@@ -482,7 +478,7 @@ function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuAppId} required>
           <TextInput
             value={appId}
-            onChange={(v) => updateConfig(['feishu', 'app_id'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'app_id'], v)}
             placeholder="cli_xxxxxxxxxxxxx"
             monospace
           />
@@ -490,7 +486,7 @@ function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuAppSecret} required>
           <TextInput
             value={appSecret}
-            onChange={(v) => updateConfig(['feishu', 'app_secret'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'app_secret'], v)}
             type="password"
           />
         </FormField>
@@ -500,7 +496,7 @@ function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuSpreadsheetToken} required>
           <TextInput
             value={spreadsheetToken}
-            onChange={(v) => updateConfig(['feishu', 'spreadsheet_token'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'spreadsheet_token'], v)}
             placeholder="shtcnxxxxxxxxxxxxx"
             monospace
           />
@@ -508,22 +504,22 @@ function FeishuSheetConnection({ getConfig, updateConfig, t }: ConnProps) {
         <FormField label={t.cfgFeishuSheetId} required>
           <TextInput
             value={sheetId}
-            onChange={(v) => updateConfig(['feishu', 'sheet_id'], v)}
+            onChange={(v) => updateConfig(['job', 'datasource', 'sheet_id'], v)}
             placeholder="0"
             monospace
           />
         </FormField>
         <FormField label={t.cfgFeishuMaxRetries}>
           <NumberInput
-            value={(getConfig(['feishu', 'max_retries']) as number) ?? 3}
-            onChange={(v) => updateConfig(['feishu', 'max_retries'], v)}
+            value={(getConfig(['job', 'datasource', 'max_retries']) as number) ?? 3}
+            onChange={(v) => updateConfig(['job', 'datasource', 'max_retries'], v)}
             min={0} max={10}
           />
         </FormField>
         <FormField label={t.cfgFeishuQpsLimit} description={t.cfgFeishuQpsLimitDesc}>
           <NumberInput
-            value={(getConfig(['feishu', 'qps_limit']) as number) ?? 5}
-            onChange={(v) => updateConfig(['feishu', 'qps_limit'], v)}
+            value={(getConfig(['job', 'datasource', 'qps_limit']) as number) ?? 5}
+            onChange={(v) => updateConfig(['job', 'datasource', 'qps_limit'], v)}
             min={0}
           />
         </FormField>

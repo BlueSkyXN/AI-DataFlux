@@ -17,15 +17,17 @@ import NumberInput from '../shared/NumberInput';
 import SelectDropdown from '../shared/SelectDropdown';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import ArrayItemCard from '../shared/ArrayItemCard';
+import StringListEditor from '../shared/StringListEditor';
 
 /** 单个模型的配置数据结构 */
 interface ModelConfig {
   id: string;
-  name: string;
-  model: string;
+  display_name: string;
+  aliases: string[];
+  upstream_model: string;
   channel_id: string;
   api_key: string;
-  timeout: number;
+  timeout_seconds: number;
   weight: number;
   temperature: number;
   safe_rps: number;
@@ -35,11 +37,12 @@ interface ModelConfig {
 /** 新模型的默认配置值 */
 const defaultModel: ModelConfig = {
   id: 'model-1',
-  name: '',
-  model: '',
+  display_name: '',
+  aliases: [],
+  upstream_model: '',
   channel_id: '1',
   api_key: '',
-  timeout: 300,
+  timeout_seconds: 300,
   weight: 10,
   temperature: 0.3,
   safe_rps: 5,
@@ -65,14 +68,14 @@ const CAPABILITIES = [
 export default function ModelsSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
-  const models = (getConfig(['models']) as ModelConfig[]) ?? [];
-  const channels = (getConfig(['channels']) as Record<string, { name?: string }>) ?? {};
+  const models = (getConfig(['gateway', 'routes']) as ModelConfig[]) ?? [];
+  const channels = (getConfig(['gateway', 'channels']) as Record<string, unknown>) ?? {};
 
   // Build channel options for dropdown
   // 构建渠道下拉选项列表
-  const channelOptions = Object.entries(channels).map(([id, ch]) => ({
+  const channelOptions = Object.keys(channels).map((id) => ({
     value: id,
-    label: ch.name ? `${id} - ${ch.name}` : id,
+    label: id,
   }));
   if (channelOptions.length === 0) {
     channelOptions.push({ value: '1', label: '1' });
@@ -82,19 +85,19 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
   const handleUpdate = (index: number, field: keyof ModelConfig, value: unknown) => {
     const next = [...models];
     next[index] = { ...next[index], [field]: value };
-    updateConfig(['models'], next);
+    updateConfig(['gateway', 'routes'], next);
   };
 
   /** 新增模型，自动分配递增 ID */
   const handleAdd = () => {
     let suffix = models.length + 1;
     while (models.some((model) => model.id === `model-${suffix}`)) suffix += 1;
-    updateConfig(['models'], [...models, { ...defaultModel, id: `model-${suffix}` }]);
+    updateConfig(['gateway', 'routes'], [...models, { ...defaultModel, id: `model-${suffix}` }]);
   };
 
   /** 删除指定索引的模型 */
   const handleRemove = (index: number) => {
-    updateConfig(['models'], models.filter((_, i) => i !== index));
+    updateConfig(['gateway', 'routes'], models.filter((_, i) => i !== index));
   };
 
   /** 复制指定模型，插入到原模型下方 */
@@ -104,12 +107,13 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
     const copy = {
       ...models[index],
       id: `model-${suffix}`,
-      name: `${models[index].name}-copy`,
+      display_name: `${models[index].display_name}-copy`,
+      aliases: [...(models[index].aliases ?? [])],
       capabilities: [...(models[index].capabilities ?? [])],
     };
     const next = [...models];
     next.splice(index + 1, 0, copy);
-    updateConfig(['models'], next);
+    updateConfig(['gateway', 'routes'], next);
   };
 
   return (
@@ -119,7 +123,7 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
           {models.map((m, i) => (
             <ArrayItemCard
               key={`${m.id}-${i}`}
-              title={`#${m.id} ${m.name || m.model || '(unnamed)'}`}
+              title={`#${m.id} ${m.display_name || m.upstream_model || '(unnamed)'}`}
               subtitle={`weight: ${m.weight ?? 0}`}
               onRemove={() => handleRemove(i)}
               onDuplicate={() => handleDuplicate(i)}
@@ -129,10 +133,10 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
                   <TextInput value={m.id ?? ''} onChange={(v) => handleUpdate(i, 'id', v)} placeholder="model-1" monospace />
                 </FormField>
                 <FormField label={t.cfgModelName}>
-                  <TextInput value={m.name ?? ''} onChange={(v) => handleUpdate(i, 'name', v)} placeholder="model-1" />
+                  <TextInput value={m.display_name ?? ''} onChange={(v) => handleUpdate(i, 'display_name', v)} placeholder="model-1" />
                 </FormField>
                 <FormField label={t.cfgModelId}>
-                  <TextInput value={m.model ?? ''} onChange={(v) => handleUpdate(i, 'model', v)} placeholder="gpt-4-turbo" monospace />
+                  <TextInput value={m.upstream_model ?? ''} onChange={(v) => handleUpdate(i, 'upstream_model', v)} placeholder="gpt-4-turbo" monospace />
                 </FormField>
                 <FormField label={t.cfgChannelId}>
                   <SelectDropdown
@@ -145,7 +149,7 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
                   <TextInput value={m.api_key ?? ''} onChange={(v) => handleUpdate(i, 'api_key', v)} type="password" monospace />
                 </FormField>
                 <FormField label={t.cfgTimeout}>
-                  <NumberInput value={m.timeout ?? 300} onChange={(v) => handleUpdate(i, 'timeout', v)} min={1} />
+                  <NumberInput value={m.timeout_seconds ?? 300} onChange={(v) => handleUpdate(i, 'timeout_seconds', v)} min={1} />
                 </FormField>
                 <FormField label={t.cfgWeight} description={t.cfgWeightDesc}>
                   <NumberInput value={m.weight ?? 10} onChange={(v) => handleUpdate(i, 'weight', v)} min={0} />
@@ -157,6 +161,14 @@ export default function ModelsSection({ updateConfig, getConfig, language }: Sec
                   <NumberInput value={m.safe_rps ?? 5} onChange={(v) => handleUpdate(i, 'safe_rps', v)} min={1} />
                 </FormField>
               </div>
+              <FormField label="Aliases">
+                <StringListEditor
+                  value={m.aliases ?? []}
+                  onChange={(v) => handleUpdate(i, 'aliases', v)}
+                  placeholder="gpt-4"
+                  addLabel={t.cfgAdd}
+                />
+              </FormField>
               <FormField label="Capabilities" description="Explicit protocol and payload features exposed by this model.">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                   {CAPABILITIES.map((capability) => {

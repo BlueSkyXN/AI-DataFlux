@@ -7,19 +7,19 @@
 - [V4_EXECUTION_CONTRACT.md](./V4_EXECUTION_CONTRACT.md) - 4.0 clean break 的版本边界、运行语义、锁与恢复合同、Hardening 切片和 Promotion 门禁
 - [BOOTSTRAP_ACCEPTANCE.md](./BOOTSTRAP_ACCEPTANCE.md) - Bootstrap 模块的接受、修订、替换或删除状态，以及对应 commit 和验证证据
 
-> 冻结的 Bootstrap 源码元数据仍为 `3.2.0-dev`；`4.0.0-dev` 是已批准的目标开发线。以上文档描述 4.0 的目标合同和验收治理，不表示 Bootstrap 当前代码已经实现或通过这些合同。
+> 冻结的 Bootstrap commit 仍保留 `3.2.0-dev` 历史身份；当前 Integration 源码为 `4.0.0-dev`。治理文档中的接受状态以对应 commit 和验证证据为准，不等同于 Release、部署或业务 UAT。
 
 ## 📚 核心文档
 
-### 3.2 开发版契约
+### 4.0 开发版契约
 
-- [MIGRATION_3_2.md](./MIGRATION_3_2.md) - 3.2 严格配置迁移，包括 workspace、scheduler、server token、channel endpoints 和 model capabilities
+- [CONFIG.md](./CONFIG.md) - canonical v4 RootConfig、组件配置、datasource discriminator、hash/ETag 边界
 - [JOBS.md](./JOBS.md) - durable Job Repository、Worker、state/event/lease/command schema 与对外交付边界
 - [CONTROL_API.md](./CONTROL_API.md) - workspace、ETag 配置读写、Job REST/SSE、认证、错误和 CLI 自动化边界
 - [GATEWAY_API.md](./GATEWAY_API.md) - Chat Completions / Responses 透传、capability 矩阵、错误和 failover 边界
 - [RELEASE_GATES.md](./RELEASE_GATES.md) - CI、coverage、dependency audit、打包 smoke、Release/部署/UAT 证据层
 
-> 这些文档描述 `3.2.0-dev` 的当前契约。页面、类或测试存在不等于已发布、已部署或已通过业务 UAT。
+> 这些文档描述 `4.0.0-dev` 当前本地源码合同。页面、类或测试存在不等于已发布、已部署或已通过业务 UAT。
 
 ### [ARCH.md](./ARCH.md) - 系统架构文档 ⭐️
 
@@ -70,17 +70,10 @@ python cli.py gui --port 8080  # 指定端口
 
 **配置文件完全指南**，涵盖所有配置节：
 
-- **Global** - 日志、API 端点
-- **Gateway** - 连接池上限
-- **Datasource** - 数据源类型、引擎、并发控制、重试限制
-- **MySQL/PostgreSQL/SQLite/Excel/CSV** - 各数据源的专属配置
-- **Columns** - 输入/输出字段映射
-- **Validation** - 字段枚举验证规则
-- **Models** - 模型配置（权重、限流、超时）
-- **Channels** - API 通道（IP 池、代理、SSL）
-- **Prompt** - 提示词模板和 JSON Schema
-- **Routing** - 规则路由配置
-- **Token Estimation** - Token 估算配置
+- **Runtime** - 日志、认证、workspace、scheduler、token estimation
+- **Job** - datasource、columns、model selection、prompt、validation、routing、retry/writeback
+- **Gateway** - listen、connection pool、channels、routes、fallback groups、retry、affinity
+- **Control** - 本地监听参数
 
 每个参数都包含：
 - 📍 代码位置（文件:行号）
@@ -160,7 +153,7 @@ python cli.py gui --port 8080  # 指定端口
 
 1. **了解系统** → 阅读 [ARCH.md](./ARCH.md) 第1章「系统概览」
 2. **配置项目** → 参考 [CONFIG.md](./CONFIG.md) 和 `config-example.yaml`
-3. **从 3.1/旧配置迁移** → 先阅读 [MIGRATION_3_2.md](./MIGRATION_3_2.md)
+3. **切换 4.0 配置** → 直接按 [CONFIG.md](./CONFIG.md) 重写；4.0 不加载或迁移旧 YAML
 4. **使用 GUI / Control API** → 运行 `python cli.py gui`，参考 [GUI.md](./GUI.md) 和 [CONTROL_API.md](./CONTROL_API.md)
 5. **规则路由** → 查看 [ROUTING.md](./ROUTING.md) 和 `config-example.yaml`
 6. **验证发布边界** → 阅读 [RELEASE_GATES.md](./RELEASE_GATES.md)

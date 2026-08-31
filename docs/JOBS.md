@@ -1,10 +1,10 @@
 # Job / Worker 持久化与状态契约
 
-3.2 引入文件型 durable Job Repository、资源调度器和 Worker。本页描述持久化真相和对外 schema，不把内部类的存在等同于 Control API、CLI 或 GUI 已经完成。
+4.0 延续文件型 durable Job Repository、资源调度器和 Worker。本页描述持久化真相和对外 schema，不把内部类的存在等同于 Release、部署或业务 UAT。
 
 ## 目录布局
 
-Job Repository 默认位于 `workspace.state_dir`，每个 Job 的 `job_id` 必须是 canonical UUID4：
+Job Repository 默认位于 `runtime.workspace.state_dir`，每个 Job 的 `job_id` 必须是 canonical UUID4：
 
 ```text
 .dataflux/jobs/<job_id>/
@@ -34,7 +34,7 @@ Job Repository 默认位于 `workspace.state_dir`，每个 Job 的 `job_id` 必�
 }
 ```
 
-`options` 禁止 `password`、`secret`、`token`、`api_key` 及相同后缀的秘密型键。请求不复制原始 YAML；自动恢复会重新校验文件存在且 SHA-256 未变。
+`options` 禁止 `password`、`secret`、`token`、`api_key` 及相同后缀的秘密型键。请求不复制原始 YAML；`config_sha256` 是包含默认值和已解析 routing profile 的 canonical execution hash，不是原始 YAML bytes hash。注释或排版变化不阻断恢复，运行语义变化会阻断。
 
 ## Shard checkpoint
 

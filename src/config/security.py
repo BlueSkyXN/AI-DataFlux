@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ..models.errors import ConfigError
 
@@ -36,7 +36,7 @@ def is_loopback_host(host: str) -> bool:
 
 
 def resolve_access_token(
-    config: dict[str, Any],
+    config: Any,
     *,
     host: str,
     allow_generate_loopback: bool = True,
@@ -45,12 +45,18 @@ def resolve_access_token(
     if env_value:
         return AccessToken(value=env_value, source="DATAFLUX_TOKEN")
 
-    server = config.get("server", {})
-    yaml_value = (
-        str(server.get("token", "")).strip() if isinstance(server, dict) else ""
-    )
+    if hasattr(config, "runtime") and hasattr(config.runtime, "auth"):
+        yaml_value = str(config.runtime.auth.token).strip()
+    elif isinstance(config, Mapping):
+        runtime = config.get("runtime", {})
+        auth = runtime.get("auth", {}) if isinstance(runtime, Mapping) else {}
+        yaml_value = (
+            str(auth.get("token", "")).strip() if isinstance(auth, Mapping) else ""
+        )
+    else:
+        yaml_value = ""
     if yaml_value:
-        return AccessToken(value=yaml_value, source="server.token")
+        return AccessToken(value=yaml_value, source="runtime.auth.token")
 
     if allow_generate_loopback and is_loopback_host(host):
         return AccessToken(
@@ -58,7 +64,9 @@ def resolve_access_token(
             source="generated",
             generated=True,
         )
-    raise ConfigError("绑定非 loopback 地址时必须设置 DATAFLUX_TOKEN 或 server.token")
+    raise ConfigError(
+        "绑定非 loopback 地址时必须设置 DATAFLUX_TOKEN 或 runtime.auth.token"
+    )
 
 
 def make_token_checker(access_token: AccessToken) -> Callable[[str], bool]:

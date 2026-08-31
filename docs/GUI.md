@@ -1,8 +1,8 @@
 # Web GUI 控制面板
 
-AI-DataFlux 提供本地 Web GUI，用于选择受控 workspace、编辑配置、提交与观察 durable Job，并保留 Gateway/Process 进程管理和日志查看能力。3.2 的版本化 HTTP 契约见 [CONTROL_API.md](./CONTROL_API.md)，Job 持久化 schema 见 [JOBS.md](./JOBS.md)。
+AI-DataFlux 提供本地 Web GUI，用于选择受控 workspace、编辑 canonical v4 配置、提交与观察 durable Job，并保留 Gateway/Process 进程管理和日志查看能力。版本化 HTTP 契约见 [CONTROL_API.md](./CONTROL_API.md)，Job 持久化 schema 见 [JOBS.md](./JOBS.md)。
 
-> 当前版本仍是 `3.2.0-dev`。页面和 API 路由已经接线不等于打包、Release、部署或业务 UAT 已完成。
+> 当前活动源码版本是 `4.0.0-dev`。页面和 API 路由已接线不等于打包、Release、部署或业务 UAT 已完成。
 
 ## 功能概述
 
@@ -16,7 +16,7 @@ AI-DataFlux 提供本地 Web GUI，用于选择受控 workspace、编辑配置�
    - 错误计数和退出码显示
 
 2. **Workspace 与配置编辑**
-   - 从 `workspace.roots` 中选择受控根目录和 YAML 文件
+   - 从 `runtime.workspace.roots` 中选择受控根目录和 YAML 文件
    - 使用 `root_id + relative_path`，不向后端传任意绝对路径
    - 在线编辑和严格语义校验配置
    - 使用 `ETag` / `If-Match` 防止覆盖并发修改
@@ -110,7 +110,7 @@ python cli.py gui
 - **前端托管**：FastAPI 直接 serve `web/dist/` 静态文件
 - **退出行为**：Ctrl+C 关闭 Control Server 时，子进程跟着停止
 - **默认本地访问**：默认监听 `127.0.0.1`；可显式修改 `--host`，非 loopback 启动必须配置统一 token
-- **路径边界**：3.2 页面使用 `workspace.roots` 与相对路径，服务端拒绝 traversal 和 symlink 越界
+- **路径边界**：页面使用 `runtime.workspace.roots` 与相对路径，服务端拒绝 traversal 和 symlink 越界
 - **并发编辑**：版本化配置写入必须提供 `If-Match`，revision 冲突不会静默覆盖
 - **Job 生命周期**：Control lifespan 启动 JobService 循环，关闭时合作式停止 Worker
 
@@ -121,7 +121,7 @@ python cli.py gui
 > 认证说明：所有 `/api/*` 请求都需要 `Authorization: Bearer <token>`。
 > `python cli.py gui` 自动打开浏览器时会携带 `#token=...`，前端会自动透传。
 
-### 3.2 版本化 API
+### 4.0 版本化 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -191,7 +191,7 @@ python cli.py gui
 }
 ```
 
-语义校验覆盖数据源类型、引擎/读写器选项、并发参数、必需数据源字段、`columns_to_extract`/`columns_to_write`、主配置 `prompt.template`、routing 规则和 profile 文件。未知顶层键和已知旧配置键以 warning 返回，不会阻止保存。
+语义校验覆盖 `schema_version`、组件 section、datasource discriminator、columns、model selection、并发/重试、Gateway references、routing 规则和 profile 文件。未知或旧配置键返回 validation error；前端不会自动改写或迁移旧 YAML。
 
 #### 进程管理 API
 
@@ -289,7 +289,7 @@ STOPPED  ──start──▶  RUNNING  ──进程退出──▶  EXITED
 
 ## 配置文件编辑
 
-3.2 workspace 配置编辑器支持：
+4.0 workspace 配置编辑器支持：
 
 - **原始文本编辑**：保留 YAML 注释和格式
 - **原子写入**：通过临时文件确保写入完整性

@@ -27,23 +27,23 @@ interface Subtask {
 export default function RoutingSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
-  const enabled = (getConfig(['routing', 'enabled']) as boolean) ?? false;
-  const field = (getConfig(['routing', 'field']) as string) ?? '';
-  const subtasks = (getConfig(['routing', 'subtasks']) as Subtask[]) ?? [];
+  const enabled = (getConfig(['job', 'routing', 'enabled']) as boolean) ?? false;
+  const field = (getConfig(['job', 'routing', 'field']) as string) ?? '';
+  const subtasks = (getConfig(['job', 'routing', 'subtasks']) as Subtask[]) ?? [];
 
   /** 更新指定子任务规则的字段值 */
   const handleSubtaskUpdate = (index: number, key: keyof Subtask, value: string) => {
     const next = [...subtasks];
     next[index] = { ...next[index], [key]: value };
-    updateConfig(['routing', 'subtasks'], next);
+    updateConfig(['job', 'routing', 'subtasks'], next);
   };
 
   const handleAddSubtask = () => {
-    updateConfig(['routing', 'subtasks'], [...subtasks, { match: '', profile: '' }]);
+    updateConfig(['job', 'routing', 'subtasks'], [...subtasks, { match: '', profile: '' }]);
   };
 
   const handleRemoveSubtask = (index: number) => {
-    updateConfig(['routing', 'subtasks'], subtasks.filter((_, i) => i !== index));
+    updateConfig(['job', 'routing', 'subtasks'], subtasks.filter((_, i) => i !== index));
   };
 
   return (
@@ -52,7 +52,7 @@ export default function RoutingSection({ updateConfig, getConfig, language }: Se
         <FormField label={t.cfgEnableRouting} horizontal>
           <ToggleSwitch
             checked={enabled}
-            onChange={(v) => updateConfig(['routing', 'enabled'], v)}
+            onChange={(v) => updateConfig(['job', 'routing', 'enabled'], v)}
           />
         </FormField>
 
@@ -61,7 +61,7 @@ export default function RoutingSection({ updateConfig, getConfig, language }: Se
             <FormField label={t.cfgRoutingField} description={t.cfgRoutingFieldDesc}>
               <TextInput
                 value={field}
-                onChange={(v) => updateConfig(['routing', 'field'], v)}
+                onChange={(v) => updateConfig(['job', 'routing', 'field'], v)}
                 placeholder="category"
                 monospace
               />

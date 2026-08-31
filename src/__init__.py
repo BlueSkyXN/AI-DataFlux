@@ -59,5 +59,5 @@ AI-DataFlux: 高性能批量 AI 数据处理引擎
     python cli.py token --config config.yaml
 """
 
-__version__ = "3.2.0-dev"
+__version__ = "4.0.0-dev"
 __author__ = "AI-DataFlux Team"

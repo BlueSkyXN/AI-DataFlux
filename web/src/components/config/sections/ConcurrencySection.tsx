@@ -21,9 +21,11 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
   const t = getTranslations(language);
 
   // 读取并发配置的辅助函数
-  const get = (key: string) => getConfig(['datasource', 'concurrency', key]) as number | undefined;
+  const get = (key: string) => getConfig(['job', 'concurrency', key]) as number | undefined;
   // 更新并发配置的辅助函数
-  const set = (key: string, v: number) => updateConfig(['datasource', 'concurrency', key], v);
+  const set = (key: string, v: number) => updateConfig(['job', 'concurrency', key], v);
+  const getAttempt = (key: string) => getConfig(['job', 'retry', 'task_max_attempts', key]) as number | undefined;
+  const setAttempt = (key: string, v: number) => updateConfig(['job', 'retry', 'task_max_attempts', key], v);
 
   return (
     <div className="space-y-4">
@@ -73,10 +75,20 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
       <SectionCard title={t.cfgCircuitBreaker} description={t.cfgCircuitBreakerDesc}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField label={t.cfgApiPauseDuration} description={t.cfgApiPauseDurationDesc}>
-            <NumberInput value={get('api_pause_duration') ?? 2.0} onChange={(v) => set('api_pause_duration', v)} min={0} step={0.1} />
+            <NumberInput
+              value={(getConfig(['job', 'retry', 'api_pause_duration_seconds']) as number) ?? 2.0}
+              onChange={(v) => updateConfig(['job', 'retry', 'api_pause_duration_seconds'], v)}
+              min={0.1}
+              step={0.1}
+            />
           </FormField>
           <FormField label={t.cfgApiErrorWindow} description={t.cfgApiErrorWindowDesc}>
-            <NumberInput value={get('api_error_trigger_window') ?? 2.0} onChange={(v) => set('api_error_trigger_window', v)} min={0} step={0.1} />
+            <NumberInput
+              value={(getConfig(['job', 'retry', 'api_error_trigger_window_seconds']) as number) ?? 2.0}
+              onChange={(v) => updateConfig(['job', 'retry', 'api_error_trigger_window_seconds'], v)}
+              min={0.1}
+              step={0.1}
+            />
           </FormField>
         </div>
       </SectionCard>
@@ -84,26 +96,33 @@ export default function ConcurrencySection({ updateConfig, getConfig, language }
       {/* Retry Limits */}
       {/* 重试限制：各类错误的最大重试次数 */}
       <SectionCard title={t.cfgRetryLimits} description={t.cfgRetryLimitsDesc}>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
           <FormField label={t.cfgApiError}>
             <NumberInput
-              value={(getConfig(['datasource', 'concurrency', 'retry_limits', 'api_error']) as number) ?? 3}
-              onChange={(v) => updateConfig(['datasource', 'concurrency', 'retry_limits', 'api_error'], v)}
-              min={0}
+              value={getAttempt('api_error') ?? 4}
+              onChange={(v) => setAttempt('api_error', v)}
+              min={1}
             />
           </FormField>
           <FormField label={t.cfgContentError}>
             <NumberInput
-              value={(getConfig(['datasource', 'concurrency', 'retry_limits', 'content_error']) as number) ?? 1}
-              onChange={(v) => updateConfig(['datasource', 'concurrency', 'retry_limits', 'content_error'], v)}
-              min={0}
+              value={getAttempt('content_error') ?? 2}
+              onChange={(v) => setAttempt('content_error', v)}
+              min={1}
             />
           </FormField>
           <FormField label={t.cfgSystemError}>
             <NumberInput
-              value={(getConfig(['datasource', 'concurrency', 'retry_limits', 'system_error']) as number) ?? 2}
-              onChange={(v) => updateConfig(['datasource', 'concurrency', 'retry_limits', 'system_error'], v)}
-              min={0}
+              value={getAttempt('system_error') ?? 3}
+              onChange={(v) => setAttempt('system_error', v)}
+              min={1}
+            />
+          </FormField>
+          <FormField label="Source Error">
+            <NumberInput
+              value={getAttempt('source_error') ?? 3}
+              onChange={(v) => setAttempt('source_error', v)}
+              min={1}
             />
           </FormField>
         </div>

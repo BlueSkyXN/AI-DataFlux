@@ -68,7 +68,7 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <h1 className="font-semibold text-gray-800">AI-DataFlux</h1>
                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
-                    {version || '3.2.0'}
+                    {version || '4.0.0-dev'}
                   </span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5 text-xs text-gray-500">

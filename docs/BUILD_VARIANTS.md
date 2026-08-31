@@ -151,7 +151,7 @@ DATAFLUX_TOKEN=<token> ./AI-DataFlux-linux-amd64-full gui --no-browser
 
 # 验证核心功能可用
 ./AI-DataFlux-linux-amd64-cli version
-# 输出: AI-DataFlux v3.2.0-dev
+# 输出: AI-DataFlux v4.0.0-dev
 
 ./AI-DataFlux-linux-amd64-cli check
 # 输出: 库状态信息

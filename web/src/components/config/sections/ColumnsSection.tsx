@@ -20,8 +20,8 @@ import KeyValueEditor from '../shared/KeyValueEditor';
 export default function ColumnsSection({ updateConfig, getConfig, language }: SectionProps) {
   const t = getTranslations(language);
 
-  const columnsToExtract = (getConfig(['columns_to_extract']) as string[]) ?? [];
-  const columnsToWrite = (getConfig(['columns_to_write']) as Record<string, string>) ?? {};
+  const columnsToExtract = (getConfig(['job', 'columns', 'extract']) as string[]) ?? [];
+  const columnsToWrite = (getConfig(['job', 'columns', 'write']) as Record<string, string>) ?? {};
 
   return (
     <div className="space-y-4">
@@ -30,7 +30,7 @@ export default function ColumnsSection({ updateConfig, getConfig, language }: Se
       <SectionCard title={t.cfgColumnsToExtract} description={t.cfgColumnsToExtractDesc}>
         <StringListEditor
           value={columnsToExtract}
-          onChange={(v) => updateConfig(['columns_to_extract'], v)}
+          onChange={(v) => updateConfig(['job', 'columns', 'extract'], v)}
           placeholder={t.cfgAddColumn}
           addLabel={t.cfgAdd}
         />
@@ -41,7 +41,7 @@ export default function ColumnsSection({ updateConfig, getConfig, language }: Se
       <SectionCard title={t.cfgColumnsToWrite} description={t.cfgColumnsToWriteDesc}>
         <KeyValueEditor
           value={columnsToWrite}
-          onChange={(v) => updateConfig(['columns_to_write'], v)}
+          onChange={(v) => updateConfig(['job', 'columns', 'write'], v)}
           keyPlaceholder={t.cfgAlias}
           valuePlaceholder={t.cfgColumnName}
           addLabel={t.cfgAdd}

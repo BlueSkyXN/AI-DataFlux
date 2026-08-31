@@ -207,11 +207,12 @@ def cmd_process(args):
 
     if args.validate:
         _check_rlimit(stream=sys.stderr if json_output else sys.stdout)
-        from src.config import load_config, validate_config
+        from src.config import compile_job_config, load_config, validate_config
 
         try:
             config = load_config(args.config)
             validation = validate_config(config, args.config)
+            compiled = compile_job_config(config, args.config)
         except Exception as exc:
             if json_output:
                 _write_json(_error_payload("config_invalid", str(exc)))
@@ -239,14 +240,12 @@ def cmd_process(args):
             return EXIT_CONFIG_ERROR
 
         print(f"{console.ok} Config valid: {args.config}")
-        print(f"  - Datasource: {config.get('datasource', {}).get('type', 'excel')}")
-        print(f"  - Engine: {config.get('datasource', {}).get('engine', 'auto')}")
-        print(f"  - Input columns: {config.get('columns_to_extract', [])}")
-        print(
-            f"  - Output columns: {list(config.get('columns_to_write', {}).values())}"
-        )
+        print(f"  - Datasource: {config.job.datasource.type}")
+        print(f"  - Engine: {getattr(config.job.datasource, 'engine', 'n/a')}")
+        print(f"  - Input columns: {config.job.columns.extract}")
+        print(f"  - Output columns: {list(config.job.columns.write.values())}")
         # 显示路由配置信息（如果启用）
-        routing = config.get("routing", {})
+        routing = compiled.get("routing", {})
         if routing.get("enabled"):
             subtasks = routing.get("subtasks", [])
             print(
@@ -312,12 +311,17 @@ def cmd_gateway(args):
         - IP 池 DNS 轮询
     """
     _check_rlimit()
+    from src.config import load_config, require_gateway_config
     from src.gateway.app import run_server
+
+    gateway_config = require_gateway_config(load_config(args.config))
+    if args.workers != 1:
+        raise ValueError("AI-DataFlux 4.0 H1-H2 仅支持 gateway workers=1")
 
     run_server(
         config_path=args.config,
-        host=args.host,
-        port=args.port,
+        host=args.host or gateway_config.listen.host,
+        port=args.port or gateway_config.listen.port,
         workers=args.workers,
         reload=args.reload,
     )
@@ -498,7 +502,7 @@ def cmd_token(args):
 
 
 def cmd_config_validate(args):
-    """Validate the canonical v3.2 schema with stable JSON output."""
+    """Validate the canonical v4 schema with stable JSON output."""
 
     from src.config import load_config, validate_config
 
@@ -594,14 +598,12 @@ def _control_client(args):
             from src.config import load_config
 
             token = str(
-                load_config(getattr(args, "config", "config.yaml"))
-                .get("server", {})
-                .get("token", "")
+                load_config(getattr(args, "config", "config.yaml")).runtime.auth.token
             ).strip()
         except Exception:
             token = ""
     if not token:
-        raise RuntimeError("DATAFLUX_TOKEN or server.token is required")
+        raise RuntimeError("DATAFLUX_TOKEN or runtime.auth.token is required")
     return ControlClient(args.server, token)
 
 
@@ -835,12 +837,15 @@ def cmd_gui(args):
         print("❌ 此版本不包含 GUI 功能，请下载完整版")
         return 1
 
-    port = args.port
+    from src.config import load_config, require_control_config
+
+    control_config = require_control_config(load_config(args.config))
+    port = args.port or control_config.listen.port
     open_browser = not getattr(args, "no_browser", False)
 
     # 启动 Control Server
     run_control_server(
-        host=args.host,
+        host=args.host or control_config.listen.host,
         port=port,
         open_browser=open_browser,
         config_path=args.config,
@@ -905,13 +910,15 @@ def main():
     p_gateway.add_argument(
         "-c", "--config", default="config.yaml", help="Config file path"
     )
-    p_gateway.add_argument("--host", default="0.0.0.0", help="Listen address")
+    p_gateway.add_argument(
+        "--host", default=None, help="Listen address (default: gateway.listen.host)"
+    )
     p_gateway.add_argument(
         "-p",
         "--port",
         type=_validate_port,
-        default=8787,
-        help="Listen port (1024-65535)",
+        default=None,
+        help="Listen port (default: gateway.listen.port)",
     )
     p_gateway.add_argument(
         "-w", "--workers", type=int, default=1, help="Worker processes"
@@ -995,7 +1002,7 @@ def main():
     p_config = subparsers.add_parser("config", help="Validate configuration")
     config_subparsers = p_config.add_subparsers(dest="config_command", required=True)
     p_config_validate = config_subparsers.add_parser(
-        "validate", help="Validate canonical v3.2 config"
+        "validate", help="Validate canonical v4 config"
     )
     p_config_validate.add_argument(
         "-c", "--config", default="config.yaml", help="Config file path"
@@ -1035,14 +1042,16 @@ def main():
             "-p",
             "--port",
             type=_validate_port,
-            default=8790,
-            help="Control server port (1024-65535)",
+            default=None,
+            help="Control server port (default: control.listen.port)",
         )
         p_gui.add_argument(
             "-c", "--config", default="config.yaml", help="Config file path"
         )
         p_gui.add_argument(
-            "--host", default="127.0.0.1", help="Control server listen address"
+            "--host",
+            default=None,
+            help="Control server listen address (default: control.listen.host)",
         )
         p_gui.add_argument(
             "--no-browser", action="store_true", help="Don't open browser automatically"

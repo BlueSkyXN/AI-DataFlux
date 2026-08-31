@@ -87,10 +87,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from src import __version__
 from src.config import (
-    DEFAULT_CONFIG,
     load_config,
     make_token_checker,
-    merge_config,
+    require_gateway_config,
     resolve_access_token,
 )
 
@@ -213,7 +212,7 @@ def create_app(
         lifespan=lifespan,  # 使用生命周期管理器
     )
     if incoming_token_checker is None:
-        merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+        merged_config = load_config(config_path)
         access_token = resolve_access_token(
             merged_config, host="127.0.0.1", allow_generate_loopback=True
         )
@@ -500,7 +499,7 @@ def _register_routes(app: FastAPI) -> None:
 
 def run_server(
     config_path: str,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8787,
     workers: int = 1,
     reload: bool = False,
@@ -523,10 +522,12 @@ def run_server(
         - workers > 1 时不能使用 reload=True
         - 生产环境建议使用 gunicorn + uvicorn workers
     """
-    if workers > 1 and reload:
-        raise ValueError("workers > 1 与 reload 不能同时启用")
+    root_config = load_config(config_path)
+    require_gateway_config(root_config)
+    if workers != 1:
+        raise ValueError("AI-DataFlux 4.0 H1-H2 仅支持 gateway workers=1")
 
-    merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+    merged_config = root_config
     access_token = resolve_access_token(
         merged_config, host=host, allow_generate_loopback=True
     )
@@ -561,7 +562,7 @@ def create_app_from_env() -> FastAPI:
     if not config_path:
         raise RuntimeError("DATAFLUX_CONFIG is required")
     host = os.environ.get("DATAFLUX_GATEWAY_HOST", "127.0.0.1")
-    merged_config = merge_config(DEFAULT_CONFIG, load_config(config_path))
+    merged_config = load_config(config_path)
     access_token = resolve_access_token(
         merged_config, host=host, allow_generate_loopback=True
     )
@@ -594,8 +595,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="监听地址 (默认: 0.0.0.0)",
+        default="127.0.0.1",
+        help="监听地址 (默认: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",

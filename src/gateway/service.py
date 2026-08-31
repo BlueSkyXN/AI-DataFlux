@@ -97,7 +97,7 @@ import time
 from typing import Any, AsyncIterable, Union
 
 import aiohttp
-from src.config import load_config, validate_config
+from src.config import compile_gateway_config, init_logging, load_config
 
 from .dispatcher import ModelDispatcher, ModelConfig
 from .limiter import ModelRateLimiter
@@ -204,10 +204,8 @@ class FluxApiService:
             ValueError: YAML 格式错误或配置根节点不是字典
         """
         try:
-            self.config = load_config(self.config_path)
-            validation = validate_config(self.config, self.config_path)
-            if validation["errors"]:
-                raise ValueError("; ".join(validation["errors"]))
+            root_config = load_config(self.config_path)
+            self.config = compile_gateway_config(root_config)
             logging.info(f"配置文件 '{self.config_path}' 加载成功")
         except Exception as exc:
             raise ValueError(f"无法加载配置文件: {exc}") from exc
@@ -217,13 +215,7 @@ class FluxApiService:
         log_cfg = global_cfg.get("log", {})
 
         # 初始化日志
-        level_str = log_cfg.get("level", "info").upper()
-        level = getattr(logging, level_str, logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+        init_logging(log_cfg)
 
         # 通道配置
         self.channels = self.config.get("channels", {})
@@ -270,6 +262,8 @@ class FluxApiService:
         self.model_name_to_id: dict[str, str] = {}
         for m in self.models:
             self.model_name_to_id[m.id] = m.id  # ID 映射
+            for alias in m.aliases:
+                self.model_name_to_id[alias] = m.id
             if m.model:  # 模型标识符映射
                 if (
                     m.model in self.model_name_to_id

@@ -11,12 +11,11 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from src.config import (
-    DEFAULT_CONFIG,
+    compile_job_config,
+    execution_config_hash,
     load_config,
-    merge_config,
     resolve_workspace_path,
     resolve_workspace_roots,
-    validate_config,
 )
 from src.core.job_runner import run_processing_job
 from src.data import declared_adapter_capabilities
@@ -31,7 +30,6 @@ from src.jobs import (
     ResourcePolicy,
     ResourceProbe,
     ResourceScheduler,
-    hash_config_file,
 )
 
 MAX_JOB_MAX_IN_FLIGHT = 10_000
@@ -55,12 +53,9 @@ class JobService:
 
     def __init__(self, config_path: str):
         self.config_path = str(Path(config_path).expanduser().resolve())
-        raw = load_config(self.config_path)
-        validation = validate_config(raw, self.config_path)
-        if validation["errors"]:
-            raise ValueError("\n".join(validation["errors"]))
-        self.config = merge_config(DEFAULT_CONFIG, raw)
-        roots = resolve_workspace_roots(self.config, self.config_path)
+        self.root_config = load_config(self.config_path)
+        self.config = compile_job_config(self.root_config, self.config_path)
+        roots = resolve_workspace_roots(self.root_config, self.config_path)
         self.roots = roots
         state_dir = Path(self.config["workspace"]["state_dir"]).expanduser()
         if not state_dir.is_absolute():
@@ -99,7 +94,7 @@ class JobService:
 
     def resolve_path(self, root_id: str, relative_path: str) -> Path:
         return resolve_workspace_path(
-            self.config, root_id, relative_path, self.config_path
+            self.root_config, root_id, relative_path, self.config_path
         )
 
     def submit(
@@ -112,11 +107,8 @@ class JobService:
         config_path = self.resolve_path(root_id, relative_path)
         if config_path.suffix.lower() not in {".yaml", ".yml"}:
             raise ValueError("Job config 必须是 YAML 文件")
-        raw = load_config(config_path)
-        validation = validate_config(raw, config_path)
-        if validation["errors"]:
-            raise ValueError("\n".join(validation["errors"]))
-        merged = merge_config(DEFAULT_CONFIG, raw)
+        root_config = load_config(config_path)
+        merged = compile_job_config(root_config, config_path)
         configured_max_in_flight = int(
             merged.get("datasource", {})
             .get("concurrency", {})
@@ -131,7 +123,7 @@ class JobService:
         request = self.repository.new_request(
             mode="background",
             config_path=str(config_path),
-            config_sha256=hash_config_file(config_path),
+            config_sha256=execution_config_hash(root_config, config_path),
             options=public_options,
         )
         state = self.repository.create_job(request)
@@ -213,7 +205,8 @@ class JobService:
         max_in_flight = _validated_max_in_flight(dict(request.options), 1)
         if not Path(request.config_path).is_file():
             raise ValueError("Job config 不存在")
-        current_hash = hash_config_file(request.config_path)
+        current_config = load_config(request.config_path)
+        current_hash = execution_config_hash(current_config, request.config_path)
         command = JobCommand(
             command_id=str(uuid4()),
             job_id=job_id,
@@ -271,15 +264,16 @@ class JobService:
             resumable = False
             if Path(request.config_path).is_file():
                 try:
-                    raw_config = load_config(request.config_path)
-                    datasource_type = str(
-                        raw_config.get("datasource", {}).get("type", "excel")
-                    )
+                    root_config = load_config(request.config_path)
+                    job_config = root_config.job
+                    if job_config is None:
+                        raise ValueError("job section is required")
+                    datasource_type = job_config.datasource.type
                     capabilities = declared_adapter_capabilities(datasource_type)
                     resumable = (
                         capabilities.resumable
                         and capabilities.idempotent_write
-                        and hash_config_file(request.config_path)
+                        and execution_config_hash(root_config, request.config_path)
                         == request.config_sha256
                     )
                 except Exception:

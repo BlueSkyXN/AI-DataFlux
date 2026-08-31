@@ -21,14 +21,13 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-import yaml from 'js-yaml';
 import { fetchConfig, saveConfig, validateConfig } from '../api';
 import { getTranslations, type Language } from '../i18n';
 import type { WorkspaceSelection } from '../types';
-import { migrateConfigShape } from './configMigration';
 import ConfigSidebar, { type ConfigSectionId } from '../components/config/ConfigSidebar';
 import SectionRenderer from '../components/config/SectionRenderer';
 import RawYamlEditor from '../components/config/RawYamlEditor';
+import { parseYaml, serializeYaml, updateConfigValue } from './configDocument';
 
 /** ConfigEditor 组件的 Props 类型 */
 interface ConfigEditorProps {
@@ -43,30 +42,6 @@ interface ConfigEditorProps {
  * @param content - YAML 字符串
  * @returns 解析后的配置对象，解析失败返回空对象
  */
-function parseYaml(content: string): Record<string, unknown> {
-  const result = yaml.load(content);
-  if (typeof result !== 'object' || result === null) {
-    return {};
-  }
-  return result as Record<string, unknown>;
-}
-
-/**
- * 将 JavaScript 对象序列化为 YAML 字符串
- * @param data - 配置数据对象
- * @returns 格式化的 YAML 字符串（2 空格缩进，120 字符行宽）
- */
-function serializeYaml(data: Record<string, unknown>): string {
-  return yaml.dump(data, {
-    indent: 2,
-    lineWidth: 120,
-    noRefs: true,
-    sortKeys: false,
-    quotingType: '"',
-    forceQuotes: false,
-  });
-}
-
 /**
  * 配置编辑器主组件
  *
@@ -139,18 +114,7 @@ export default function ConfigEditor({
    * @param value - 新值
    */
   const updateConfig = useCallback((path: string[], value: unknown) => {
-    setFormData(prev => {
-      const next = structuredClone(prev);
-      let target = next as Record<string, unknown>;
-      for (let i = 0; i < path.length - 1; i++) {
-        if (target[path[i]] === undefined || target[path[i]] === null || typeof target[path[i]] !== 'object') {
-          target[path[i]] = {};
-        }
-        target = target[path[i]] as Record<string, unknown>;
-      }
-      target[path[path.length - 1]] = value;
-      return next;
-    });
+    setFormData(prev => updateConfigValue(prev, path, value));
   }, []);
 
   // --- Load config --- 从服务端加载配置文件
@@ -170,7 +134,7 @@ export default function ConfigEditor({
 
       try {
         const parsed = parseYaml(content);
-        setFormData(migrateConfigShape(parsed));
+        setFormData(parsed);
         setOriginalFormData(structuredClone(parsed));
       } catch {
         // YAML parse failed — start in raw mode

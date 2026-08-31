@@ -21,9 +21,9 @@ export default function TokenSection({ updateConfig, getConfig, language }: Sect
 
   // Token estimation
   // Token 估算参数
-  const tokenMode = (getConfig(['token_estimation', 'mode']) as string) ?? 'io';
-  const sampleSize = (getConfig(['token_estimation', 'sample_size']) as number) ?? -1;
-  const encoding = (getConfig(['token_estimation', 'encoding']) as string) ?? 'o200k_base';
+  const tokenMode = (getConfig(['runtime', 'token_estimation', 'mode']) as string) ?? 'io';
+  const sampleSize = (getConfig(['runtime', 'token_estimation', 'sample_size']) as number) ?? -1;
+  const encoding = (getConfig(['runtime', 'token_estimation', 'encoding']) as string) ?? 'o200k_base';
 
   return (
     <div className="space-y-4">
@@ -34,7 +34,7 @@ export default function TokenSection({ updateConfig, getConfig, language }: Sect
           <FormField label={t.cfgTokenMode}>
             <SelectDropdown
               value={tokenMode}
-              onChange={(v) => updateConfig(['token_estimation', 'mode'], v)}
+              onChange={(v) => updateConfig(['runtime', 'token_estimation', 'mode'], v)}
               options={[
                 { value: 'in', label: 'Input' },
                 { value: 'out', label: 'Output' },
@@ -45,7 +45,7 @@ export default function TokenSection({ updateConfig, getConfig, language }: Sect
           <FormField label={t.cfgSampleSize}>
             <NumberInput
               value={sampleSize}
-              onChange={(v) => updateConfig(['token_estimation', 'sample_size'], v)}
+              onChange={(v) => updateConfig(['runtime', 'token_estimation', 'sample_size'], v)}
               min={-1}
               placeholder="-1"
             />
@@ -53,7 +53,7 @@ export default function TokenSection({ updateConfig, getConfig, language }: Sect
           <FormField label={t.cfgEncoding}>
             <TextInput
               value={encoding}
-              onChange={(v) => updateConfig(['token_estimation', 'encoding'], v)}
+              onChange={(v) => updateConfig(['runtime', 'token_estimation', 'encoding'], v)}
               placeholder="o200k_base"
               monospace
             />

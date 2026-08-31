@@ -1,6 +1,6 @@
 # AI-DataFlux 系统架构文档
 
-> **3.2 架构增量**：原有单次 Process + Gateway + Control 架构上新增 durable Job Repository、Job Worker、资源调度、workspace root 安全边界，以及 Chat Completions / Responses capability routing。详细持久化 schema 见 [JOBS.md](./JOBS.md)，Control REST/SSE 契约见 [CONTROL_API.md](./CONTROL_API.md)，Gateway 契约见 [GATEWAY_API.md](./GATEWAY_API.md)，旧配置迁移见 [MIGRATION_3_2.md](./MIGRATION_3_2.md)。本文其余章节中的旧 Process 进度文件和 Chat-only 示例仅作历史上下文，不覆盖上述 3.2 canonical contract。
+> **4.0 架构基线**：当前源码使用 canonical v4 RootConfig、durable Job Repository/Worker、资源调度、workspace root 安全边界，以及 Chat Completions / Responses capability routing。配置合同见 [CONFIG.md](./CONFIG.md)，持久化 schema 见 [JOBS.md](./JOBS.md)，Control REST/SSE 见 [CONTROL_API.md](./CONTROL_API.md)，Gateway 见 [GATEWAY_API.md](./GATEWAY_API.md)。本文后续尚未重写的旧配置片段仅作历史架构说明，不是可加载的 4.0 YAML。
 
 本文档全面阐述 AI-DataFlux 的系统架构、设计决策、核心机制和技术实现。
 
@@ -618,7 +618,7 @@ AI-DataFlux/
 | `main.py` | 批处理模式入口 | `main()` |
 | `gateway.py` | 网关模式入口 | `main()` |
 | **配置层** |
-| `src/config/settings.py` | 配置管理 | `load_config()`, `merge_config()`, `init_logging()` |
+| `src/config/models.py`, `src/config/settings.py` | canonical v4 配置模型、加载与编译 | `RootConfig`, `load_config()`, `compile_job_config()`, `init_logging()` |
 | **模型层** |
 | `src/models/errors.py` | 错误分类 | `ErrorType(Enum)`, `classify_error()` |
 | `src/models/task.py` | 任务元数据 | `TaskMetadata`, `ErrorRecord` |
@@ -1286,7 +1286,10 @@ GET /                          # 根路径
     config.yaml
         │
         ▼
-    load_config() ──▶ 深度合并 DEFAULT_CONFIG
+    load_config() ──▶ Pydantic v2 RootConfig strict validation
+        │
+        ▼
+    compile_job_config() ──▶ defaults-expanded runtime view
         │
         ▼
     init_logging() ──▶ 初始化日志系统

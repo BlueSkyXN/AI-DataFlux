@@ -15,30 +15,32 @@ def _config(tmp_path):
     input_path = tmp_path / "input.csv"
     input_path.write_text("input,result\nhello,\n", encoding="utf-8")
     config = {
-        "global": {
+        "schema_version": 4,
+        "runtime": {
             "log": {"level": "error", "format": "text", "output": "console"},
-            "flux_api_url": "http://127.0.0.1:8787",
+            "auth": {"token": "test-token"},
+            "workspace": {
+                "roots": {"project": str(tmp_path)},
+                "state_dir": ".dataflux/jobs",
+            },
+            "scheduler": {
+                "max_active_jobs": 1,
+                "sample_interval_seconds": 0.01,
+            },
         },
-        "datasource": {
-            "type": "csv",
-            "engine": "pandas",
+        "job": {
+            "gateway_url": "http://127.0.0.1:8787",
+            "datasource": {
+                "type": "csv",
+                "input_path": str(input_path),
+                "output_path": str(input_path),
+                "engine": "pandas",
+                "require_all_input_fields": True,
+            },
+            "columns": {"extract": ["input"], "write": {"result": "result"}},
+            "prompt": {"template": "{input}"},
             "concurrency": {"batch_size": 1, "max_in_flight": 1},
         },
-        "csv": {"input_path": str(input_path), "output_path": str(input_path)},
-        "columns_to_extract": ["input"],
-        "columns_to_write": {"result": "result"},
-        "prompt": {"template": "{input}"},
-        "workspace": {
-            "roots": {"project": str(tmp_path)},
-            "state_dir": ".dataflux/jobs",
-        },
-        "server": {"token": "test-token"},
-        "scheduler": {
-            "max_active_jobs": 1,
-            "sample_interval_seconds": 0.01,
-        },
-        "models": [],
-        "channels": {},
     }
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -124,10 +126,9 @@ async def test_recovery_blocks_changed_config_and_respects_fresh_lease(tmp_path)
     service = JobService(str(config_path))
     changed = service.submit(root_id="project", relative_path="config.yaml")
     service.repository.transition(changed.job_id, JobStatus.RUNNING)
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8") + "\n# changed\n",
-        encoding="utf-8",
-    )
+    changed_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    changed_config["job"]["concurrency"]["batch_size"] = 2
+    config_path.write_text(yaml.safe_dump(changed_config), encoding="utf-8")
 
     await service.recover()
     assert service.repository.get_state(changed.job_id).status == JobStatus.BLOCKED

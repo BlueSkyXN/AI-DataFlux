@@ -109,7 +109,7 @@ from pathlib import Path
 from uuid import uuid4
 import webbrowser
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, List
+from typing import Any, AsyncGenerator, List, Literal
 from urllib.parse import quote
 
 import uvicorn
@@ -131,9 +131,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src import __version__
 from src.config import (
-    DEFAULT_CONFIG,
     load_config,
-    merge_config,
+    require_control_config,
     resolve_access_token,
     resolve_workspace_path,
     resolve_workspace_roots,
@@ -163,7 +162,7 @@ _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def get_control_auth_token(
-    config: dict[str, Any] | None = None,
+    config: Any | None = None,
     *,
     host: str = "127.0.0.1",
 ) -> str:
@@ -181,7 +180,7 @@ def get_control_auth_token(
 
     if _CONTROL_AUTH_TOKEN is None:
         access_token = resolve_access_token(
-            config or DEFAULT_CONFIG,
+            config or {"runtime": {"auth": {"token": ""}}},
             host=host,
             allow_generate_loopback=True,
         )
@@ -385,7 +384,7 @@ class GatewayStartRequest(BaseModel):
 
     config_path: str = "config.yaml"
     port: int = 8787
-    workers: int = 1
+    workers: Literal[1] = 1
 
 
 class ProcessStartRequest(BaseModel):
@@ -648,13 +647,16 @@ def create_control_app(
         FastAPI: 配置完成的应用实例
     """
 
-    raw_config = load_config(config_path)
-    validation = validate_config(raw_config, config_path)
-    if validation["errors"]:
-        raise ConfigError("; ".join(validation["errors"]))
-    merged_config = merge_config(DEFAULT_CONFIG, raw_config)
+    root_config = load_config(config_path)
+    control_config = require_control_config(root_config)
+    if host != control_config.listen.host:
+        logging.info(
+            "Control host overridden by CLI: config=%s cli=%s",
+            control_config.listen.host,
+            host,
+        )
     access_token = resolve_access_token(
-        merged_config,
+        root_config,
         host=host,
         allow_generate_loopback=True,
     )
@@ -671,11 +673,11 @@ def create_control_app(
     )
     control_auth_token = access_token.value
     app.state.config_path = str(Path(config_path).expanduser().resolve())
-    app.state.config = merged_config
+    app.state.config = root_config
     app.state.workspace_roots = resolve_workspace_roots(
-        merged_config, app.state.config_path
+        root_config, app.state.config_path
     )
-    app.state.supervise_worker = supervise_worker
+    app.state.supervise_worker = supervise_worker and root_config.job is not None
     app.state.control_auth_token = control_auth_token
     get_process_manager().set_access_token(control_auth_token)
 

@@ -6,13 +6,13 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+from ..config import execution_config_hash, load_config
 from ..jobs import (
     FileJobRepository,
     JobCounts,
     JobRequest,
     JobRunResult,
     JobStatus,
-    hash_config_file,
 )
 from .processor import UniversalAIProcessor
 from .job_tracker import JobRecordTracker
@@ -33,7 +33,7 @@ async def run_processing_job(
             JobStatus.BLOCKED,
             {"reason": "config_missing", "config_path": str(config_path)},
         )
-    current_hash = hash_config_file(config_path)
+    current_hash = execution_config_hash(load_config(config_path), config_path)
     accepted_hashes = {request.config_sha256}
     for command in repository.list_commands(job_id):
         if command.type != "resume":

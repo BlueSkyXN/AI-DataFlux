@@ -76,7 +76,7 @@ export default function Dashboard({ selection, language }: DashboardProps) {
     <div className="space-y-6 p-4 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-600">3.2 Control Plane</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-600">4.0 Control Plane</p>
           <h2 className="mt-1 text-2xl font-semibold text-gray-900">{zh ? '运行概览' : 'Operations overview'}</h2>
           <p className="mt-1 text-sm text-gray-500">
             {zh ? '状态来源于持久化 Job Repository，不再依赖浏览器本地目录。' : 'Status comes from the durable Job Repository, not browser-local directory state.'}
