@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.data.base import BaseTaskPool
+from src.data.contracts import CommitDisposition
 from src.data.mysql import MySQLConnectionPoolManager, MySQLTaskPool
 
 
@@ -85,6 +86,7 @@ def test_mysql_connection_pool_manager_lifecycle(monkeypatch):
         assert MySQLConnectionPoolManager.get_pool(config, pool_size=3) is fake_pool
         assert MySQLConnectionPoolManager.get_pool(config) is fake_pool
         assert constructor.call_args.kwargs["pool_size"] == 3
+        assert constructor.call_args.kwargs["client_flags"]
     finally:
         MySQLConnectionPoolManager.close_pool()
     assert MySQLConnectionPoolManager._pool is None
@@ -168,16 +170,88 @@ async def test_mysql_keyset_scan_and_write_receipts(mysql_pool):
     assert [item.record_id for item in second.records] == ["c"]
 
     receipt = mysql_pool.update_task_results(
-        {"a": {"answer": "done"}, "b": {"_error": "skip"}}
+        "batch-ok",
+        {"a": {"answer": "done"}},
     )
-    assert receipt.persisted_ids == ("a",)
+    assert receipt.committed_ids == ("a",)
     assert receipt.atomic is True
-    assert mysql_pool.update_task_results({}).persisted_ids == ()
-    assert mysql_pool.update_task_results({"b": {"_error": "skip"}}).persisted_ids == ()
+    assert mysql_pool.update_task_results("empty", {}).committed_ids == ()
+
+    preflight = mysql_pool.update_task_results(
+        "batch-preflight",
+        {"a": {"answer": "must-not-write"}, "b": {"_error": "skip"}},
+    )
+    assert [item.disposition for item in preflight.items] == [
+        CommitDisposition.NOT_ATTEMPTED,
+        CommitDisposition.REJECTED,
+    ]
 
     cursor.rowcount = 0
-    with pytest.raises(RuntimeError, match="更新行数异常"):
-        mysql_pool.update_task_results({"missing": {"answer": "x"}})
+    rolled_back = mysql_pool.update_task_results(
+        "batch-missing",
+        {"missing": {"answer": "x"}},
+    )
+    assert rolled_back.items[0].disposition == CommitDisposition.REJECTED
+    assert rolled_back.items[0].code == "record_not_found"
+    mysql_pool._test_connection.rollback.assert_called()
+
+
+def test_mysql_commit_loss_is_indeterminate(mysql_pool):
+    mysql_pool._test_connection.commit.side_effect = ConnectionError("lost")
+
+    receipt = mysql_pool.update_task_results(
+        "batch-unknown",
+        {"a": {"answer": "done"}},
+    )
+
+    assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
+    assert receipt.items[0].code == "commit_outcome_unknown"
+
+
+def test_mysql_reconciliation_compares_every_expected_field(mysql_pool):
+    mysql_pool._test_cursor.fetchone_values = [
+        {"output_text": "done"},
+        {"output_text": "different"},
+        None,
+    ]
+
+    receipt = mysql_pool.reconcile_task_results(
+        "readback",
+        {
+            "a": {"answer": "done"},
+            "b": {"answer": "expected"},
+            "missing": {"answer": "expected"},
+        },
+    )
+
+    assert [item.disposition for item in receipt.items] == [
+        CommitDisposition.COMMITTED,
+        CommitDisposition.REJECTED,
+        CommitDisposition.REJECTED,
+    ]
+    assert receipt.items[1].code == "readback_mismatch"
+    assert receipt.items[2].code == "record_not_found"
+
+
+def test_mysql_rejects_invalid_identifiers(monkeypatch):
+    connection_pool = MagicMock()
+    monkeypatch.setattr(
+        MySQLConnectionPoolManager,
+        "get_pool",
+        MagicMock(return_value=connection_pool),
+    )
+    with pytest.raises(ValueError, match="非法标识符"):
+        MySQLTaskPool(
+            connection_config={
+                "host": "localhost",
+                "user": "user",
+                "password": "password",
+                "database": "database",
+            },
+            columns_to_extract=["input_text"],
+            columns_to_write={"answer": "output_text"},
+            table_name="tasks;drop",
+        )
 
 
 def test_mysql_sampling_and_full_scans(mysql_pool):

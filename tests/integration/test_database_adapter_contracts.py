@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import datetime
 from typing import Any, Iterator
 
 import pytest
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(
-        os.getenv("DATAFLUX_DB_INTEGRATION") != "1",
-        reason="set DATAFLUX_DB_INTEGRATION=1 with disposable databases",
-    ),
-]
+from src.data.contracts import CommitDisposition
+
+pytestmark = [pytest.mark.integration]
+requires_live_databases = pytest.mark.skipif(
+    os.getenv("DATAFLUX_DB_INTEGRATION") != "1",
+    reason="set DATAFLUX_DB_INTEGRATION=1 with disposable databases",
+)
 
 TABLE_NAME = "dataflux_adapter_contract"
 MYSQL_APP_USER = "dataflux_contract"
@@ -23,11 +24,13 @@ MYSQL_APP_PASSWORD = "dataflux_contract"
 
 def _assert_receipt(receipt: Any, batch_id: str) -> None:
     assert receipt.batch_id == batch_id
-    assert receipt.persisted_ids == ("alpha-001", "alpha-002")
-    assert receipt.failures == ()
+    assert receipt.committed_ids == ("alpha-001", "alpha-002")
+    assert all(
+        item.disposition == CommitDisposition.COMMITTED for item in receipt.items
+    )
     assert receipt.atomic is True
     assert receipt.succeeded is True
-    assert datetime.fromisoformat(receipt.committed_at).tzinfo is not None
+    assert datetime.fromisoformat(receipt.completed_at).tzinfo is not None
 
 
 async def _assert_keyset_writeback_and_rollback(
@@ -66,20 +69,108 @@ async def _assert_keyset_writeback_and_rollback(
         "alpha-002": "keep-two",
     }
 
+    reconciled = await adapter.reconcile_results(
+        "reconcile-success",
+        {
+            "alpha-001": {"result": "persisted-one"},
+            "alpha-002": {"result": "persisted-two"},
+        },
+    )
+    assert reconciled.committed_ids == ("alpha-001", "alpha-002")
+
     reset_outputs()
-    with pytest.raises(RuntimeError):
-        await adapter.write_results(
-            "rollback-batch",
-            {
-                "alpha-001": {"result": "must-be-rolled-back"},
-                "missing-string-id": {"result": "must-not-be-acknowledged"},
-            },
-        )
+    rolled_back = await adapter.write_results(
+        "rollback-batch",
+        {
+            "alpha-001": {"result": "must-be-rolled-back"},
+            "missing-string-id": {"result": "must-not-be-acknowledged"},
+        },
+    )
+    assert [item.disposition for item in rolled_back.items] == [
+        CommitDisposition.NOT_ATTEMPTED,
+        CommitDisposition.REJECTED,
+    ]
     assert read_outputs() == {"alpha-001": None, "alpha-002": None}
     assert read_summaries() == {
         "alpha-001": "keep-one",
         "alpha-002": "keep-two",
     }
+
+    mismatched = await adapter.reconcile_results(
+        "reconcile-mismatch",
+        {
+            "alpha-001": {"result": "must-be-rolled-back"},
+            "alpha-002": {"result": "persisted-two"},
+        },
+    )
+    assert all(
+        item.disposition == CommitDisposition.REJECTED for item in mismatched.items
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_string_keyset_atomic_rollback_and_receipt(tmp_path) -> None:
+    from src.data.sqlite import SQLiteTaskPool
+
+    db_path = tmp_path / "adapter-contract.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        f'CREATE TABLE "{TABLE_NAME}" ('
+        "id TEXT PRIMARY KEY, "
+        "input_text TEXT NOT NULL, "
+        "output_result TEXT NULL, "
+        "output_summary TEXT NULL"
+        ")"
+    )
+    connection.executemany(
+        f'INSERT INTO "{TABLE_NAME}" (id, input_text, output_summary) '
+        "VALUES (?, ?, ?)",
+        [
+            ("alpha-001", "first", "keep-one"),
+            ("alpha-002", "second", "keep-two"),
+            ("beta-001", "third", None),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    adapter = SQLiteTaskPool(
+        db_path=db_path,
+        columns_to_extract=["input_text"],
+        columns_to_write={
+            "result": "output_result",
+            "summary": "output_summary",
+        },
+        table_name=TABLE_NAME,
+    )
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(db_path)
+
+    def reset_outputs() -> None:
+        connection = connect()
+        connection.execute(f'UPDATE "{TABLE_NAME}" SET output_result = NULL')
+        connection.commit()
+        connection.close()
+
+    def read_column(column: str) -> dict[str, str | None]:
+        connection = connect()
+        rows = connection.execute(
+            f'SELECT id, "{column}" FROM "{TABLE_NAME}" '
+            "WHERE id IN (?, ?) ORDER BY id",
+            ("alpha-001", "alpha-002"),
+        ).fetchall()
+        connection.close()
+        return dict(rows)
+
+    try:
+        await _assert_keyset_writeback_and_rollback(
+            adapter,
+            reset_outputs=reset_outputs,
+            read_outputs=lambda: read_column("output_result"),
+            read_summaries=lambda: read_column("output_summary"),
+        )
+    finally:
+        adapter.close()
 
 
 @pytest.fixture
@@ -172,6 +263,7 @@ def mysql_contract() -> Iterator[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
+@requires_live_databases
 async def test_mysql_string_keyset_atomic_rollback_and_receipt(mysql_contract) -> None:
     adapter = mysql_contract["adapter"]
 
@@ -287,6 +379,7 @@ def postgresql_contract() -> Iterator[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
+@requires_live_databases
 async def test_postgresql_string_keyset_atomic_rollback_and_receipt(
     postgresql_contract,
 ) -> None:

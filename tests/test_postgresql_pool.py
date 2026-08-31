@@ -35,6 +35,8 @@ PostgreSQL 数据源任务池单元测试
 import pytest
 from unittest.mock import patch, MagicMock
 
+from src.data.contracts import CommitDisposition
+
 
 def create_mock_sql():
     """创建模拟的 psycopg2.sql 模块，用于测试 SQL 标识符安全拼接"""
@@ -324,16 +326,20 @@ class TestPostgreSQLTaskPoolMocked:
         mock_cursor = mock_pool_manager["cursor"]
         mock_cursor.rowcount = 1
 
-        receipt = pool.update_task_results(results)
+        receipt = pool.update_task_results("batch-ok", results)
 
-        assert receipt.persisted_ids == (1, 2)
+        assert receipt.committed_ids == (1, 2)
         assert receipt.atomic is True
         assert mock_cursor.execute.call_count == 2
 
         mock_cursor.reset_mock()
         mock_cursor.rowcount = 0
-        with pytest.raises(RuntimeError, match="更新行数异常"):
-            pool.update_task_results({"missing": {"result": "结果"}})
+        rolled_back = pool.update_task_results(
+            "batch-missing",
+            {"missing": {"result": "结果"}},
+        )
+        assert rolled_back.items[0].disposition == CommitDisposition.REJECTED
+        assert rolled_back.items[0].code == "record_not_found"
         mock_pool_manager["conn"].rollback.assert_called()
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
@@ -361,10 +367,125 @@ class TestPostgreSQLTaskPoolMocked:
         mock_cursor = mock_pool_manager["cursor"]
         mock_cursor.rowcount = 1
 
-        receipt = pool.update_task_results({"row-a": {"summary": "new-summary"}})
+        receipt = pool.update_task_results(
+            "batch-partial",
+            {"row-a": {"summary": "new-summary"}},
+        )
 
-        assert receipt.persisted_ids == ("row-a",)
+        assert receipt.committed_ids == ("row-a",)
         assert mock_cursor.execute.call_args.args[1] == ("new-summary", "row-a")
+
+    @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
+    @patch("src.data.postgresql.extras")
+    @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
+    def test_preflight_failure_aborts_atomic_batch(
+        self,
+        mock_sql,
+        mock_extras,
+        mock_pool_manager,
+    ):
+        from src.data.postgresql import PostgreSQLTaskPool
+
+        pool = PostgreSQLTaskPool(
+            connection_config={
+                "host": "localhost",
+                "user": "test",
+                "password": "test",
+                "database": "testdb",
+            },
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            table_name="tasks",
+        )
+
+        receipt = pool.update_task_results(
+            "batch-preflight",
+            {1: {"result": "must-not-write"}, 2: {}},
+        )
+
+        assert [item.disposition for item in receipt.items] == [
+            CommitDisposition.NOT_ATTEMPTED,
+            CommitDisposition.REJECTED,
+        ]
+        mock_pool_manager["cursor"].execute.assert_not_called()
+
+    @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
+    @patch("src.data.postgresql.extras")
+    @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
+    def test_commit_loss_is_indeterminate(
+        self,
+        mock_sql,
+        mock_extras,
+        mock_pool_manager,
+    ):
+        from src.data.postgresql import PostgreSQLTaskPool
+
+        pool = PostgreSQLTaskPool(
+            connection_config={
+                "host": "localhost",
+                "user": "test",
+                "password": "test",
+                "database": "testdb",
+            },
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            table_name="tasks",
+        )
+        mock_pool_manager["cursor"].rowcount = 1
+        mock_pool_manager["conn"].commit.side_effect = ConnectionError("lost")
+
+        receipt = pool.update_task_results(
+            "batch-unknown",
+            {1: {"result": "value"}},
+        )
+
+        assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
+        assert receipt.items[0].code == "commit_outcome_unknown"
+
+    @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
+    @patch("src.data.postgresql.extras")
+    @patch("src.data.postgresql.sql", new_callable=create_mock_sql)
+    def test_reconciliation_compares_expected_fields(
+        self,
+        mock_sql,
+        mock_extras,
+        mock_pool_manager,
+    ):
+        from src.data.postgresql import PostgreSQLTaskPool
+
+        pool = PostgreSQLTaskPool(
+            connection_config={
+                "host": "localhost",
+                "user": "test",
+                "password": "test",
+                "database": "testdb",
+            },
+            columns_to_extract=["input_text"],
+            columns_to_write={"result": "output_result"},
+            table_name="tasks",
+        )
+        mock_pool_manager["cursor"].fetchone.side_effect = [
+            {"output_result": "done"},
+            {"output_result": "different"},
+            None,
+        ]
+
+        receipt = pool.reconcile_task_results(
+            "readback",
+            {
+                1: {"result": "done"},
+                2: {"result": "expected"},
+                3: {"result": "expected"},
+            },
+        )
+
+        assert [item.disposition for item in receipt.items] == [
+            CommitDisposition.COMMITTED,
+            CommitDisposition.REJECTED,
+            CommitDisposition.REJECTED,
+        ]
+        assert receipt.items[1].code == "readback_mismatch"
+        assert receipt.items[2].code == "record_not_found"
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     @patch("src.data.postgresql.extras")

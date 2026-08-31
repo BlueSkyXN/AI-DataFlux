@@ -40,6 +40,7 @@ import pytest
 import sqlite3
 import time
 from unittest.mock import MagicMock
+from src.data.contracts import CommitDisposition
 from src.data.sqlite import SQLiteTaskPool, SQLiteConnectionManager
 
 
@@ -83,8 +84,7 @@ class TestSQLiteTaskPool:
         cursor = conn.cursor()
 
         # 创建测试表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE tasks (
                 id INTEGER PRIMARY KEY,
                 input_text TEXT,
@@ -92,8 +92,7 @@ class TestSQLiteTaskPool:
                 output_result TEXT,
                 output_summary TEXT
             )
-        """
-        )
+        """)
 
         # 插入测试数据
         test_data = [
@@ -222,7 +221,8 @@ class TestSQLiteTaskPool:
             2: {"result": "处理结果2", "summary": "摘要2"},
         }
 
-        task_pool.update_task_results(results)
+        receipt = task_pool.update_task_results("batch-ok", results)
+        assert receipt.committed_ids == (1, 2)
 
         # 验证数据库
         conn = sqlite3.connect(str(temp_db))
@@ -240,25 +240,44 @@ class TestSQLiteTaskPool:
                 assert row["output_result"] == "处理结果2"
                 assert row["output_summary"] == "摘要2"
 
-    def test_update_task_results_skip_error(self, task_pool):
-        """测试跳过错误结果"""
+    def test_update_task_results_preflight_rejects_entire_atomic_batch(
+        self,
+        task_pool,
+        temp_db,
+    ):
+        """不可写记录在事务启动前拒绝，其他记录不得写入。"""
         results = {
             1: {"result": "成功", "summary": "OK"},
             2: {"_error": "API Error", "result": "失败"},  # 有错误标记
         }
 
-        task_pool.update_task_results(results)
+        receipt = task_pool.update_task_results("batch-preflight", results)
 
-        # 不应该抛出异常，错误记录被跳过
+        assert [item.disposition for item in receipt.items] == [
+            CommitDisposition.NOT_ATTEMPTED,
+            CommitDisposition.REJECTED,
+        ]
+        connection = sqlite3.connect(str(temp_db))
+        row = connection.execute(
+            "SELECT output_result, output_summary FROM tasks WHERE id = 1"
+        ).fetchone()
+        connection.close()
+        assert row == (None, None)
 
     def test_update_task_results_rolls_back_entire_batch(self, task_pool, temp_db):
-        with pytest.raises(sqlite3.IntegrityError):
-            task_pool.update_task_results(
-                {
-                    1: {"result": "must rollback", "summary": "rollback"},
-                    999: {"result": "missing", "summary": "missing"},
-                }
-            )
+        receipt = task_pool.update_task_results(
+            "batch-rollback",
+            {
+                1: {"result": "must rollback", "summary": "rollback"},
+                999: {"result": "missing", "summary": "missing"},
+            },
+        )
+
+        assert [item.disposition for item in receipt.items] == [
+            CommitDisposition.NOT_ATTEMPTED,
+            CommitDisposition.REJECTED,
+        ]
+        assert receipt.items[1].code == "record_not_found"
 
         conn = sqlite3.connect(str(temp_db))
         row = conn.execute(
@@ -266,6 +285,48 @@ class TestSQLiteTaskPool:
         ).fetchone()
         conn.close()
         assert row == (None, None)
+
+    def test_same_value_update_is_committed(self, task_pool, temp_db):
+        first = task_pool.update_task_results(
+            "batch-first",
+            {1: {"result": "same", "summary": "same-summary"}},
+        )
+        second = task_pool.update_task_results(
+            "batch-same",
+            {1: {"result": "same", "summary": "same-summary"}},
+        )
+
+        assert first.committed_ids == (1,)
+        assert second.committed_ids == (1,)
+        connection = sqlite3.connect(str(temp_db))
+        row = connection.execute(
+            "SELECT output_result, output_summary FROM tasks WHERE id = 1"
+        ).fetchone()
+        connection.close()
+        assert row == ("same", "same-summary")
+
+    def test_reconciliation_reads_all_expected_fields(self, task_pool):
+        task_pool.update_task_results(
+            "batch-write",
+            {1: {"result": "done", "summary": "summary"}},
+        )
+
+        receipt = task_pool.reconcile_task_results(
+            "batch-readback",
+            {
+                1: {"result": "done", "summary": "summary"},
+                2: {"result": "different", "summary": "expected"},
+                999: {"result": "missing"},
+            },
+        )
+
+        assert [item.disposition for item in receipt.items] == [
+            CommitDisposition.COMMITTED,
+            CommitDisposition.REJECTED,
+            CommitDisposition.REJECTED,
+        ]
+        assert receipt.items[1].code == "readback_mismatch"
+        assert receipt.items[2].code == "record_not_found"
 
     def test_reload_task_data(self, task_pool):
         """测试重载任务数据"""
@@ -318,16 +379,14 @@ class TestSQLiteTaskPoolWithRequireAny:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE tasks (
                 id INTEGER PRIMARY KEY,
                 input_text TEXT,
                 context TEXT,
                 output_result TEXT
             )
-        """
-        )
+        """)
 
         test_data = [
             (1, "有文本", "", None),  # 只有 input_text

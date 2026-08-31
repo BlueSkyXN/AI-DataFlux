@@ -644,73 +644,212 @@ class SQLiteTaskPool(BaseTaskPool):
         batch_id: str,
         results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
-        """
-        批量写回任务结果到数据库
+        """Write one atomic transaction and return only provable outcomes."""
 
-        使用显式事务（BEGIN TRANSACTION / COMMIT）确保原子性。
-        所有更新要么全部成功，要么全部回滚。
-
-        Args:
-            results: 结果字典 {记录ID: {别名: 值, ...}}
-
-        事务管理:
-            - BEGIN TRANSACTION: 开始事务
-            - COMMIT: 全部成功时提交
-            - ROLLBACK: 发生错误时回滚
-        """
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
 
+        updates: dict[Any, dict[str, Any]] = {}
+        invalid: dict[Any, WritebackItem] = {}
+        for record_id, row_result in results.items():
+            if "_error" in row_result:
+                invalid[record_id] = WritebackItem(
+                    record_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
+                continue
+            values = {
+                col_name: row_result[alias]
+                for alias, col_name in self.columns_to_write.items()
+                if alias in row_result
+            }
+            if values:
+                updates[record_id] = values
+            else:
+                invalid[record_id] = WritebackItem(
+                    record_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含任何 columns_to_write alias",
+                    False,
+                )
+        if invalid:
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(
+                    invalid.get(record_id)
+                    or WritebackItem(
+                        record_id,
+                        CommitDisposition.NOT_ATTEMPTED,
+                        "batch_preflight_failed",
+                        "同一原子批次包含不可写记录",
+                        True,
+                    )
+                    for record_id in results
+                ),
+                atomic=True,
+            )
+
         conn = SQLiteConnectionManager.get_connection()
         cursor = conn.cursor()
-        persisted_ids: list[Any] = []
+        statement_failure: WritebackItem | None = None
         try:
             cursor.execute("BEGIN TRANSACTION")
-            for record_id, row_result in results.items():
-                if "_error" in row_result:
-                    continue
-                set_parts: list[str] = []
-                params: list[Any] = []
-                for alias, col_name in self.columns_to_write.items():
-                    if alias in row_result:
-                        set_parts.append(f"[{col_name}] = ?")
-                        params.append(row_result[alias])
-                if not set_parts:
-                    continue
-                statement = f"UPDATE [{self.table_name}] SET {', '.join(set_parts)} WHERE id = ?"
+            for record_id, values in updates.items():
+                set_parts = [f"[{column}] = ?" for column in values]
+                params = list(values.values())
+                statement = (
+                    f"UPDATE [{self.table_name}] SET {', '.join(set_parts)} "
+                    "WHERE id = ?"
+                )
                 params.append(record_id)
-                cursor.execute(statement, tuple(params))
-                if cursor.rowcount != 1:
-                    raise sqlite3.IntegrityError(
-                        f"记录 {record_id} 更新行数异常: {cursor.rowcount}"
+                try:
+                    cursor.execute(statement, tuple(params))
+                except Exception as exc:
+                    statement_failure = WritebackItem(
+                        record_id,
+                        CommitDisposition.REJECTED,
+                        "statement_failed",
+                        str(exc),
+                        True,
                     )
-                persisted_ids.append(record_id)
-            cursor.execute("COMMIT")
-        except Exception:
-            cursor.execute("ROLLBACK")
-            logging.error("SQLite 批量更新失败，已回滚", exc_info=True)
-            raise
+                    break
+                if cursor.rowcount != 1:
+                    statement_failure = WritebackItem(
+                        record_id,
+                        CommitDisposition.REJECTED,
+                        "record_not_found",
+                        f"记录更新行数异常: {cursor.rowcount}",
+                        False,
+                    )
+                    break
+
+            if statement_failure is not None:
+                try:
+                    cursor.execute("ROLLBACK")
+                except Exception as rollback_error:
+                    return WritebackReceipt.indeterminate(
+                        batch_id,
+                        results,
+                        code="rollback_failed",
+                        message=str(rollback_error),
+                        atomic=True,
+                    )
+                return WritebackReceipt(
+                    batch_id=batch_id,
+                    submitted_ids=tuple(results),
+                    items=tuple(
+                        (
+                            statement_failure
+                            if record_id == statement_failure.record_id
+                            else WritebackItem(
+                                record_id,
+                                CommitDisposition.NOT_ATTEMPTED,
+                                "batch_rolled_back",
+                                "原子事务因其他记录失败而回滚",
+                                True,
+                            )
+                        )
+                        for record_id in results
+                    ),
+                    atomic=True,
+                )
+
+            try:
+                cursor.execute("COMMIT")
+            except Exception as commit_error:
+                try:
+                    cursor.execute("ROLLBACK")
+                except Exception:
+                    pass
+                return WritebackReceipt.indeterminate(
+                    batch_id,
+                    results,
+                    code="commit_outcome_unknown",
+                    message=str(commit_error),
+                    atomic=True,
+                )
         finally:
             cursor.close()
 
-        persisted = set(persisted_ids)
+        return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """Read back every expected output field from the SQLite file."""
+
+        if not results:
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
+        conn = SQLiteConnectionManager.get_connection()
+        cursor = conn.cursor()
+        items: list[WritebackItem] = []
+        try:
+            for record_id, row_result in results.items():
+                expected = {
+                    col_name: row_result[alias]
+                    for alias, col_name in self.columns_to_write.items()
+                    if alias in row_result
+                }
+                if not expected:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "no_writable_fields",
+                            "结果不包含任何 columns_to_write alias",
+                            False,
+                        )
+                    )
+                    continue
+                columns = ", ".join(f"[{column}]" for column in expected)
+                cursor.execute(
+                    f"SELECT {columns} FROM [{self.table_name}] WHERE id = ?",
+                    (record_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "record_not_found",
+                            "记录不存在",
+                            False,
+                        )
+                    )
+                elif all(row[column] == value for column, value in expected.items()):
+                    items.append(WritebackItem(record_id, CommitDisposition.COMMITTED))
+                else:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "readback_mismatch",
+                            "磁盘值与 PreparedResult 不一致",
+                            True,
+                        )
+                    )
+        except Exception as exc:
+            return WritebackReceipt.indeterminate(
+                batch_id,
+                results,
+                code="reconciliation_failed",
+                message=str(exc),
+                atomic=True,
+            )
+        finally:
+            cursor.close()
         return WritebackReceipt(
             batch_id=batch_id,
             submitted_ids=tuple(results),
-            items=tuple(
-                WritebackItem(
-                    record_id,
-                    (
-                        CommitDisposition.COMMITTED
-                        if record_id in persisted
-                        else CommitDisposition.REJECTED
-                    ),
-                    "" if record_id in persisted else "no_writable_fields",
-                    "" if record_id in persisted else "结果不包含可写字段",
-                    False,
-                )
-                for record_id in results
-            ),
+            items=tuple(items),
             atomic=True,
         )
 

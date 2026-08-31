@@ -783,107 +783,282 @@ class PostgreSQLTaskPool(BaseTaskPool):
         batch_id: str,
         results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
-        """
-        在单个事务中写回任务结果并确认每条 UPDATE 实际命中。
+        """Write one transaction and distinguish rollback from unknown commit."""
 
-        Args:
-            results: 结果字典 {记录ID: {别名: 值, ...}}
-
-        SQL 示例:
-            UPDATE schema.table SET "out1" = %s, "out2" = %s WHERE id = %s
-        """
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
 
-        # 准备更新数据
-        updates_data: list[tuple[Any, dict[str, Any]]] = []
-        failures: list[WritebackItem] = []
+        updates: dict[Any, dict[str, Any]] = {}
+        invalid: dict[Any, WritebackItem] = {}
         for record_id, row_result in results.items():
             if "_error" in row_result:
+                invalid[record_id] = WritebackItem(
+                    record_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
                 continue
-
-            update_values = {
-                col_name: row_result.get(alias)
+            values = {
+                col_name: row_result[alias]
                 for alias, col_name in self.columns_to_write.items()
                 if alias in row_result
             }
-
-            if update_values:
-                updates_data.append((record_id, update_values))
+            if values:
+                updates[record_id] = values
             else:
-                failures.append(
-                    WritebackItem(
-                        record_id=record_id,
-                        disposition=CommitDisposition.REJECTED,
-                        code="no_writable_fields",
-                        message="AI 结果不包含任何 columns_to_write alias",
-                        retryable=False,
-                    )
+                invalid[record_id] = WritebackItem(
+                    record_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含任何 columns_to_write alias",
+                    False,
                 )
-
-        if failures:
-            failures.extend(
-                WritebackItem(
-                    record_id=record_id,
-                    disposition=CommitDisposition.NOT_ATTEMPTED,
-                    code="batch_aborted",
-                    message="同一原子批次包含不可写记录",
-                    retryable=True,
-                )
-                for record_id, _ in updates_data
-            )
+        if invalid:
             return WritebackReceipt(
                 batch_id=batch_id,
                 submitted_ids=tuple(results),
-                items=tuple(failures),
+                items=tuple(
+                    invalid.get(record_id)
+                    or WritebackItem(
+                        record_id,
+                        CommitDisposition.NOT_ATTEMPTED,
+                        "batch_preflight_failed",
+                        "同一原子批次包含不可写记录",
+                        True,
+                    )
+                    for record_id in results
+                ),
                 atomic=True,
             )
 
-        if not updates_data:
-            logging.info("没有成功的记录需要更新到数据库")
-            return WritebackReceipt.committed(batch_id, (), atomic=True)
-
-        logging.info(f"准备将 {len(updates_data)} 条记录的结果更新回 PostgreSQL...")
-
-        def _perform_batch_update(conn: Any, cursor: Any) -> None:
-            """Keep all updates in one transaction and reject false receipts."""
-            try:
-                for record_id, values_dict in updates_data:
-                    columns = [
-                        col_name
-                        for col_name in self.write_colnames
-                        if col_name in values_dict
-                    ]
-                    set_parts = [
-                        sql.SQL("{} = %s").format(sql.Identifier(col_name))
-                        for col_name in columns
-                    ]
-                    update_query = sql.SQL("UPDATE {}.{} SET {} WHERE id = %s").format(
-                        sql.Identifier(self.schema_name),
-                        sql.Identifier(self.table_name),
-                        sql.SQL(", ").join(set_parts),
+        try:
+            conn = self._get_connection()
+        except Exception as exc:
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(
+                    WritebackItem(
+                        record_id,
+                        CommitDisposition.NOT_ATTEMPTED,
+                        "connection_unavailable",
+                        str(exc),
+                        True,
                     )
-                    params = [values_dict[col_name] for col_name in columns]
-                    params.append(record_id)
-                    cursor.execute(update_query, tuple(params))
-                    if cursor.rowcount != 1:
-                        raise RuntimeError(
-                            f"记录 {record_id!r} 更新行数异常: {cursor.rowcount}"
-                        )
+                    for record_id in results
+                ),
+                atomic=True,
+            )
 
-                logging.info(
-                    "PostgreSQL 事务更新完成，确认持久化 %s 条记录",
-                    len(updates_data),
+        cursor = None
+        statement_failure: WritebackItem | None = None
+        try:
+            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+            for record_id, values in updates.items():
+                columns = [column for column in self.write_colnames if column in values]
+                set_parts = [
+                    sql.SQL("{} = %s").format(sql.Identifier(column))
+                    for column in columns
+                ]
+                update_query = sql.SQL("UPDATE {}.{} SET {} WHERE id = %s").format(
+                    sql.Identifier(self.schema_name),
+                    sql.Identifier(self.table_name),
+                    sql.SQL(", ").join(set_parts),
+                )
+                params = [values[column] for column in columns]
+                params.append(record_id)
+                try:
+                    cursor.execute(update_query, tuple(params))
+                except Exception as exc:
+                    statement_failure = WritebackItem(
+                        record_id,
+                        CommitDisposition.REJECTED,
+                        "statement_failed",
+                        str(exc),
+                        True,
+                    )
+                    break
+                if cursor.rowcount != 1:
+                    statement_failure = WritebackItem(
+                        record_id,
+                        CommitDisposition.REJECTED,
+                        "record_not_found",
+                        f"记录更新行数异常: {cursor.rowcount}",
+                        False,
+                    )
+                    break
+
+            if statement_failure is not None:
+                try:
+                    conn.rollback()
+                except Exception as rollback_error:
+                    return WritebackReceipt.indeterminate(
+                        batch_id,
+                        results,
+                        code="rollback_failed",
+                        message=str(rollback_error),
+                        atomic=True,
+                    )
+                return WritebackReceipt(
+                    batch_id=batch_id,
+                    submitted_ids=tuple(results),
+                    items=tuple(
+                        (
+                            statement_failure
+                            if record_id == statement_failure.record_id
+                            else WritebackItem(
+                                record_id,
+                                CommitDisposition.NOT_ATTEMPTED,
+                                "batch_rolled_back",
+                                "原子事务因其他记录失败而回滚",
+                                True,
+                            )
+                        )
+                        for record_id in results
+                    ),
+                    atomic=True,
                 )
 
-            except psycopg2.Error as err:
-                logging.error(f"批量更新失败: {err}")
-                raise
+            try:
+                conn.commit()
+            except Exception as commit_error:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return WritebackReceipt.indeterminate(
+                    batch_id,
+                    results,
+                    code="commit_outcome_unknown",
+                    message=str(commit_error),
+                    atomic=True,
+                )
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception as rollback_error:
+                return WritebackReceipt.indeterminate(
+                    batch_id,
+                    results,
+                    code="rollback_failed",
+                    message=str(rollback_error),
+                    atomic=True,
+                )
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(
+                    WritebackItem(
+                        record_id,
+                        CommitDisposition.NOT_ATTEMPTED,
+                        "transaction_failed",
+                        str(exc),
+                        True,
+                    )
+                    for record_id in results
+                ),
+                atomic=True,
+            )
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            self._put_connection(conn)
 
-        self.execute_with_connection(_perform_batch_update, is_write=True)
-        return WritebackReceipt.committed(
-            batch_id,
-            [record_id for record_id, _ in updates_data],
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """Read back every expected PostgreSQL output value by primary key."""
+
+        if not results:
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
+        try:
+            conn = self._get_connection()
+        except Exception as exc:
+            return WritebackReceipt.indeterminate(
+                batch_id,
+                results,
+                code="reconciliation_connection_failed",
+                message=str(exc),
+                atomic=True,
+            )
+        cursor = None
+        items: list[WritebackItem] = []
+        try:
+            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+            for record_id, row_result in results.items():
+                expected = {
+                    col_name: row_result[alias]
+                    for alias, col_name in self.columns_to_write.items()
+                    if alias in row_result
+                }
+                if not expected:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "no_writable_fields",
+                            "结果不包含任何 columns_to_write alias",
+                            False,
+                        )
+                    )
+                    continue
+                columns = [sql.Identifier(column) for column in expected]
+                select_query = sql.SQL("SELECT {} FROM {}.{} WHERE id = %s").format(
+                    sql.SQL(", ").join(columns),
+                    sql.Identifier(self.schema_name),
+                    sql.Identifier(self.table_name),
+                )
+                cursor.execute(select_query, (record_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "record_not_found",
+                            "记录不存在",
+                            False,
+                        )
+                    )
+                elif all(row[column] == value for column, value in expected.items()):
+                    items.append(WritebackItem(record_id, CommitDisposition.COMMITTED))
+                else:
+                    items.append(
+                        WritebackItem(
+                            record_id,
+                            CommitDisposition.REJECTED,
+                            "readback_mismatch",
+                            "数据库值与 PreparedResult 不一致",
+                            True,
+                        )
+                    )
+        except Exception as exc:
+            return WritebackReceipt.indeterminate(
+                batch_id,
+                results,
+                code="reconciliation_failed",
+                message=str(exc),
+                atomic=True,
+            )
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            self._put_connection(conn)
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(items),
             atomic=True,
         )
 

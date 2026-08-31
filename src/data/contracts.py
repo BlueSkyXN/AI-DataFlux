@@ -148,6 +148,33 @@ class WritebackReceipt:
             atomic=atomic,
         )
 
+    @classmethod
+    def indeterminate(
+        cls,
+        batch_id: str,
+        record_ids: Iterable[Any],
+        *,
+        code: str,
+        message: str,
+        atomic: bool,
+    ) -> "WritebackReceipt":
+        submitted = tuple(record_ids)
+        return cls(
+            batch_id=batch_id,
+            submitted_ids=submitted,
+            items=tuple(
+                WritebackItem(
+                    record_id,
+                    CommitDisposition.INDETERMINATE,
+                    code,
+                    message,
+                    False,
+                )
+                for record_id in submitted
+            ),
+            atomic=atomic,
+        )
+
 
 class WritebackContractError(RuntimeError):
     """Raised when a datasource receipt cannot be trusted."""
