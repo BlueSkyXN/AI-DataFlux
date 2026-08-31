@@ -13,9 +13,9 @@
               reload_data (bool 是否重载数据)
 
     RetryStrategy:
-        - __init__(max_retries, api_pause_duration, api_error_trigger_window)
-          初始化策略，配置各错误类型重试上限和熔断参数
-          输入: Dict[ErrorType, int] 重试映射, float 暂停时长, float 触发窗口
+        - __init__(max_attempts, api_pause_duration, api_error_trigger_window)
+          初始化策略，配置各错误类型总尝试次数上限和熔断参数
+          输入: Dict[ErrorType, int] attempts 映射, float 暂停时长, float 触发窗口
         - decide(error_type, metadata) -> RetryDecision
           根据错误类型和任务元数据做出重试决策
           输入: ErrorType 错误类型, TaskMetadata 任务元数据
@@ -24,7 +24,7 @@
           记录暂停结束时间，用于触发窗口计算
 
 关键变量:
-    - max_retries: Dict[ErrorType, int] 各错误类型最大重试次数
+    - max_attempts: Dict[ErrorType, int] 各错误类型最大总尝试次数
     - api_pause_duration: float API 熔断暂停时长 (秒)
     - api_error_trigger_window: float API 错误触发窗口 (秒)
     - last_pause_end_time: float 上次暂停结束时间戳
@@ -35,18 +35,19 @@
 
 错误分类重试策略:
     ┌──────────────┬──────────────────┬────────────┬─────────────────┐
-    │ 错误类型      │ 默认最大重试次数  │ 是否重载   │ 是否触发熔断    │
+    │ 错误类型      │ 默认总 attempts   │ 是否重载   │ 是否触发熔断    │
     ├──────────────┼──────────────────┼────────────┼─────────────────┤
-    │ API_ERROR    │ 3                │ ✓          │ ✓               │
-    │ CONTENT_ERROR│ 1                │ ✗          │ ✗               │
-    │ SYSTEM_ERROR │ 2                │ ✓          │ ✗               │
+    │ API_ERROR    │ 4                │ ✓          │ ✓               │
+    │ CONTENT_ERROR│ 2                │ ✗          │ ✗               │
+    │ SYSTEM_ERROR │ 3                │ ✓          │ ✗               │
+    │ SOURCE_ERROR │ 3                │ ✓          │ ✗               │
     └──────────────┴──────────────────┴────────────┴─────────────────┘
 
 使用示例:
     from src.core.retry import RetryStrategy, RetryAction
 
     strategy = RetryStrategy(
-        max_retries={ErrorType.API: 3, ErrorType.CONTENT: 1},
+        max_attempts={ErrorType.API: 4, ErrorType.CONTENT: 2},
         api_pause_duration=2.0
     )
 

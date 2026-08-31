@@ -129,6 +129,7 @@ class TaskMetadata:
             ErrorType.API: 0,
             ErrorType.CONTENT: 0,
             ErrorType.SYSTEM: 0,
+            ErrorType.SOURCE: 0,
         }
     )
     error_history: list[ErrorRecord] = field(default_factory=list)

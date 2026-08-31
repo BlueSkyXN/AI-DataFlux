@@ -100,6 +100,7 @@ class ErrorType(str, Enum):
     API = "api_error"
     CONTENT = "content_error"
     SYSTEM = "system_error"
+    SOURCE = "source_error"
 
     def __str__(self) -> str:
         return self.value

@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import yaml
 
+from src.config import execution_config_hash, load_config
 from src.core import job_runner
 from src.core.job_tracker import JobRecordTracker
 from src.jobs import (
@@ -13,18 +15,35 @@ from src.jobs import (
     FileJobRepository,
     JobCommand,
     JobStatus,
-    hash_config_file,
 )
 
 
 def _repository_with_job(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("version: 1\n", encoding="utf-8")
+    config = {
+        "schema_version": 4,
+        "runtime": {
+            "workspace": {
+                "roots": {"project": str(tmp_path)},
+                "state_dir": ".dataflux/jobs",
+            }
+        },
+        "job": {
+            "datasource": {
+                "type": "csv",
+                "input_path": "input.csv",
+                "output_path": "output.csv",
+            },
+            "columns": {"extract": ["input"], "write": {"answer": "result"}},
+            "prompt": {"template": "v1 {record_json}"},
+        },
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     repository = FileJobRepository(tmp_path / "jobs")
     request = repository.new_request(
         mode="background",
         config_path=str(config_path),
-        config_sha256=hash_config_file(config_path),
+        config_sha256=execution_config_hash(load_config(config_path), config_path),
     )
     repository.create_job(request)
     return repository, request, config_path
@@ -78,7 +97,9 @@ async def test_changed_config_requires_explicit_accepted_resume_hash(
     tmp_path, monkeypatch
 ):
     repository, request, config_path = _repository_with_job(tmp_path)
-    config_path.write_text("version: 2\n", encoding="utf-8")
+    changed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    changed["job"]["prompt"]["template"] = "v2 {record_json}"
+    config_path.write_text(yaml.safe_dump(changed), encoding="utf-8")
 
     blocked = await job_runner.run_processing_job(
         request.job_id,
@@ -93,7 +114,11 @@ async def test_changed_config_requires_explicit_accepted_resume_hash(
         command_id=str(uuid4()),
         job_id=request.job_id,
         type="resume",
-        payload={"accepted_config_sha256": hash_config_file(config_path)},
+        payload={
+            "accepted_config_sha256": execution_config_hash(
+                load_config(config_path), config_path
+            )
+        },
     )
     repository.add_command(command)
     repository.save_command_receipt(

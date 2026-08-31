@@ -214,21 +214,6 @@ def compile_job_config(
     datasource_type = str(datasource.pop("type"))
     require_all = bool(datasource.pop("require_all_input_fields", True))
     concurrency = job.concurrency.model_dump(mode="python")
-    attempts = job.retry.task_max_attempts
-    concurrency.update(
-        {
-            "api_pause_duration": job.retry.api_pause_duration_seconds,
-            "api_error_trigger_window": job.retry.api_error_trigger_window_seconds,
-            # The pre-H1.1 runtime consumes retry counts. H1.1 switches this
-            # call site to total-attempt semantics without changing YAML.
-            "retry_limits": {
-                "api_error": attempts.api_error - 1,
-                "content_error": attempts.content_error - 1,
-                "system_error": attempts.system_error - 1,
-                "source_error": attempts.source_error - 1,
-            },
-        }
-    )
     datasource_runtime: dict[str, Any] = {
         "type": datasource_type,
         "require_all_input_fields": require_all,
@@ -266,6 +251,7 @@ def compile_job_config(
             "gateway_port": (config.gateway.listen.port if config.gateway else 8787),
         },
         "writeback": job.writeback.model_dump(mode="python"),
+        "retry": job.retry.model_dump(mode="python"),
         "execution_config_sha256": execution_config_hash(config, config_path),
     }
     return runtime

@@ -37,6 +37,7 @@
     │ API_ERROR    │ PAUSE_THEN_RETRY │ ✓          │ ✓ (api_pause)   │
     │ CONTENT_ERROR│ RETRY            │ ✗          │ ✗               │
     │ SYSTEM_ERROR │ RETRY            │ ✓          │ ✗               │
+    │ SOURCE_ERROR │ RETRY            │ ✓          │ ✗               │
     └──────────────┴──────────────────┴────────────┴─────────────────┘
 
 类清单:
@@ -70,9 +71,9 @@
         │       1.分片轮转 2.填充任务 3.等待完成 4.处理结果
         │       5.API熔断 6.重试入队 7.批量写回 8.监控日志
         │
-        ├── _process_one_record(session, record_id, row_data) -> dict  [async]
+        ├── _process_one_record(session, record_id, row_data) -> TaskSuccess | TaskFailure  [async]
         │     功能: 单条记录处理（Prompt生成→API调用→响应解析）
-        │     输出: 成功时返回解析结果; 失败时返回 {_error, _error_type} 字典
+        │     输出: 成功时返回 PreparedResult; 失败时返回显式失败阶段和重试信息
         │
         ├── _init_routing_contexts() -> None
         │     功能: 加载路由子配置，为每个规则创建独立的 ContentProcessor 和 Validator
@@ -110,10 +111,10 @@
     await processor.process_shard_async_continuous()
 
 配置要点:
-    - global.flux_api_url: API 网关地址 (必需)
-    - datasource.concurrency.batch_size: 最大并发任务数
-    - datasource.concurrency.api_pause_duration: API 熔断暂停时长
-    - datasource.concurrency.retry_limits: 各类错误最大重试次数
+    - job.gateway_url: API 网关地址
+    - job.concurrency.batch_size: 最大并发任务数
+    - job.retry.api_pause_duration_seconds: API 熔断暂停时长
+    - job.retry.task_max_attempts: 各类错误的最大总尝试次数
 
 重构历史:
     2026-01-22: 采用组件化架构重构，拆分为独立的处理组件
@@ -148,6 +149,13 @@ from .validator import JsonValidator
 # 新组件
 from .content import ContentProcessor
 from .clients import FluxAIClient
+from .contracts import (
+    FailureStage,
+    PreparedResult,
+    SourceOperationError,
+    TaskFailure,
+    TaskSuccess,
+)
 from .state import TaskStateManager
 from .retry import RetryAction, RetryDecision, RetryStrategy
 
@@ -233,25 +241,26 @@ class UniversalAIProcessor:
         self.max_connections_per_host = concurrency_cfg.get(
             "max_connections_per_host", 0
         )
-        self.write_retry_limit = int(
-            concurrency_cfg.get("retry_limits", {}).get("system_error", 2)
-        )
+        retry_cfg = self.config.get("retry", {})
+        writeback_cfg = self.config.get("writeback", {})
+        self.write_retry_limit = int(writeback_cfg.get("commit_max_attempts", 3)) - 1
         self._job_cancel_event: asyncio.Event | None = None
         self._target_concurrency_provider: Callable[[], int] | None = None
         self._job_tracker: Any | None = None
 
-        api_pause_duration = float(concurrency_cfg.get("api_pause_duration", 2.0))
+        api_pause_duration = float(retry_cfg.get("api_pause_duration_seconds", 2.0))
         api_error_trigger_window = float(
-            concurrency_cfg.get("api_error_trigger_window", 2.0)
+            retry_cfg.get("api_error_trigger_window_seconds", 2.0)
         )
 
-        # 重试限制
-        retry_limits_cfg = concurrency_cfg.get("retry_limits", {})
-        max_retry_counts = {
-            ErrorType.API: retry_limits_cfg.get("api_error", 3),
-            ErrorType.CONTENT: retry_limits_cfg.get("content_error", 1),
-            ErrorType.SYSTEM: retry_limits_cfg.get("system_error", 2),
+        task_attempts_cfg = retry_cfg.get("task_max_attempts", {})
+        max_attempts = {
+            ErrorType.API: int(task_attempts_cfg.get("api_error", 4)),
+            ErrorType.CONTENT: int(task_attempts_cfg.get("content_error", 2)),
+            ErrorType.SYSTEM: int(task_attempts_cfg.get("system_error", 3)),
+            ErrorType.SOURCE: int(task_attempts_cfg.get("source_error", 3)),
         }
+        self.source_max_attempts = max_attempts[ErrorType.SOURCE]
 
         # 3. 初始化各组件
 
@@ -272,9 +281,11 @@ class UniversalAIProcessor:
 
         # 重试策略
         self.retry_strategy = RetryStrategy(
-            max_retries=max_retry_counts,
+            max_attempts=max_attempts,
             api_pause_duration=api_pause_duration,
             api_error_trigger_window=api_error_trigger_window,
+            base_backoff_seconds=1,
+            max_backoff_seconds=30,
         )
 
         # 4. 初始化数据源和分片管理器
@@ -362,7 +373,7 @@ class UniversalAIProcessor:
                 shard_size,
                 min_shard_size,
                 max_shard_size,
-                max_retry_counts,
+                max_attempts,
             )
         except Exception as e:
             raise RuntimeError(f"无法初始化分片任务管理器: {e}") from e
@@ -579,8 +590,9 @@ class UniversalAIProcessor:
         """
         try:
             self.task_manager.start_time = time.time()
-            self.task_manager.total_estimated = await asyncio.to_thread(
-                self.task_pool.get_total_task_count
+            self.task_manager.total_estimated = await self._run_source_operation(
+                "count",
+                lambda: asyncio.to_thread(self.task_pool.get_total_task_count),
             )
             if self.task_manager.total_estimated <= 0:
                 logging.info("数据源中没有需要处理的任务")
@@ -600,6 +612,93 @@ class UniversalAIProcessor:
                 return await self._process_loop(session)
         finally:
             self.task_manager.finalize()
+
+    async def _run_source_operation(
+        self,
+        operation: str,
+        invoke: Callable[[], Any],
+    ) -> Any:
+        """Retry count/scan source operations without involving API pause."""
+
+        last_failure: TaskFailure | None = None
+        for attempt in range(1, self.source_max_attempts + 1):
+            try:
+                value = invoke()
+                if hasattr(value, "__await__"):
+                    value = await value
+                return value
+            except Exception as exc:
+                last_failure = TaskFailure(
+                    stage=FailureStage.SOURCE,
+                    code=f"source_{operation}_failed",
+                    message=f"{type(exc).__name__}: {exc}",
+                    retryable=True,
+                )
+                if attempt >= self.source_max_attempts:
+                    break
+                delay = min(30.0, float(2 ** (attempt - 1)))
+                logging.warning(
+                    "datasource %s 第 %s/%s 次尝试失败，%.2fs 后重试: %s",
+                    operation,
+                    attempt,
+                    self.source_max_attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        assert last_failure is not None
+        raise SourceOperationError(operation, last_failure)
+
+    async def _reload_record_for_retry(
+        self,
+        record_id: Any,
+        checkpoint_data: dict[str, Any],
+        metadata: Any,
+    ) -> dict[str, Any] | TaskFailure:
+        """Reload one record with its independent durable source budget."""
+
+        while True:
+            attempt = metadata.get_retry_count(ErrorType.SOURCE) + 1
+            try:
+                reloaded = await self.task_pool.reload([record_id])
+            except Exception as exc:
+                failure = TaskFailure(
+                    stage=FailureStage.SOURCE,
+                    code="source_reload_failed",
+                    message=f"{type(exc).__name__}: {exc}",
+                    retryable=True,
+                )
+            else:
+                data = reloaded.get(record_id)
+                if data is not None:
+                    return data
+                return TaskFailure(
+                    stage=FailureStage.SOURCE,
+                    code="source_record_missing",
+                    message="record was not returned by datasource reload",
+                    retryable=False,
+                )
+
+            if attempt >= self.source_max_attempts:
+                return failure
+            metadata.increment_retry(ErrorType.SOURCE)
+            self.task_manager.retried_tasks_count[ErrorType.SOURCE] += 1
+            if self._job_tracker is not None:
+                self._job_tracker.mark_pending(
+                    record_id,
+                    checkpoint_data,
+                    error_code=failure.code,
+                    retry_error_type=ErrorType.SOURCE.value,
+                )
+            delay = min(30.0, float(2 ** (attempt - 1)))
+            logging.warning(
+                "记录[%s] datasource reload 第 %s/%s 次尝试失败，%.2fs 后重试",
+                record_id,
+                attempt,
+                self.source_max_attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
     async def _process_loop(self, session: aiohttp.ClientSession) -> bool:
         """
@@ -710,7 +809,10 @@ class UniversalAIProcessor:
                     break
 
                 previous_cursor = scan_cursor
-                page = await self.task_pool.scan(scan_cursor, self.batch_size)
+                page = await self._run_source_operation(
+                    "scan",
+                    lambda: self.task_pool.scan(scan_cursor, self.batch_size),
+                )
                 scan_cursor = page.next_cursor
                 if scan_cursor is None:
                     scan_exhausted = True
@@ -809,15 +911,12 @@ class UniversalAIProcessor:
 
                 try:
                     result = completed_task.result()
-
-                    error_type = result.get("_error_type")
-                    if error_type:
-                        # 失败处理
+                    if isinstance(result, TaskFailure):
+                        error_type = result.error_type
                         metadata = self.state_manager.get_metadata(record_id)
-                        metadata.add_error(error_type, result.get("_error", ""))
+                        metadata.add_error(error_type, result.message)
 
-                        # 决策
-                        if result.get("_retryable") is False:
+                        if not result.retryable:
                             decision = RetryDecision(action=RetryAction.FAIL)
                         else:
                             decision = self.retry_strategy.decide(error_type, metadata)
@@ -826,69 +925,103 @@ class UniversalAIProcessor:
                             RetryAction.RETRY,
                             RetryAction.PAUSE_THEN_RETRY,
                         ]:
-                            # retry_limits 表示首次请求之外允许的额外尝试次数。
                             metadata.increment_retry(error_type)
                             self.task_manager.retried_tasks_count[error_type] += 1
                             logging.warning(
-                                f"记录[{record_id}] {error_type.value}: {result.get('_error')} -> 重试"
+                                "记录[%s] %s [%s]: %s -> 重试",
+                                record_id,
+                                result.stage.value,
+                                result.code,
+                                result.message,
                             )
 
-                            # 是否需要重新加载数据
+                            if self._job_tracker is not None:
+                                self._job_tracker.mark_pending(
+                                    record_id,
+                                    original_data,
+                                    error_code=result.code,
+                                    retry_error_type=error_type.value,
+                                )
+
                             retry_data: dict[str, Any] | None = original_data
                             if decision.reload_data:
-                                reloaded = await self.task_pool.reload([record_id])
-                                retry_data = reloaded.get(record_id)
+                                reloaded = await self._reload_record_for_retry(
+                                    record_id,
+                                    original_data,
+                                    metadata,
+                                )
+                                if isinstance(reloaded, TaskFailure):
+                                    metadata.add_error(
+                                        ErrorType.SOURCE,
+                                        reloaded.message,
+                                    )
+                                    logging.error(
+                                        "记录[%s] datasource reload 失败 [%s]: %s",
+                                        record_id,
+                                        reloaded.code,
+                                        reloaded.message,
+                                    )
+                                    self.task_manager.max_retries_exceeded_count += 1
+                                    if self._job_tracker is not None:
+                                        self._job_tracker.mark_failed(
+                                            record_id,
+                                            error_code=reloaded.code,
+                                        )
+                                    self.state_manager.remove_metadata(record_id)
+                                    continue
+                                retry_data = reloaded
 
-                            if retry_data:
                                 if self._job_tracker is not None:
                                     self._job_tracker.mark_pending(
                                         record_id,
                                         retry_data,
-                                        error_code=error_type.value,
-                                        retry_error_type=error_type.value,
+                                        error_code=result.code,
                                     )
-                                tasks_to_retry.append((record_id, retry_data))
-                            else:
-                                # 重新加载失败，算作系统错误或重试失败
-                                logging.error(
-                                    f"记录[{record_id}] 重新加载数据失败，放弃任务"
-                                )
-                                self.task_manager.max_retries_exceeded_count += 1
-                                if self._job_tracker is not None:
-                                    self._job_tracker.mark_failed(
-                                        record_id,
-                                        error_code="reload_failed",
-                                    )
-                                self.state_manager.remove_metadata(record_id)
 
-                            # 处理 API 暂停
+                            tasks_to_retry.append((record_id, retry_data))
+
                             if decision.action == RetryAction.PAUSE_THEN_RETRY:
                                 should_pause_api = True
                                 pause_duration = decision.pause_duration
                             retry_delay = max(
                                 retry_delay,
                                 decision.retry_delay,
-                                float(result.get("_retry_after", 0.0) or 0.0),
+                                result.retry_after_seconds,
                             )
 
                         else:  # FAIL
                             logging.error(
-                                f"记录[{record_id}] {error_type.value} 超过最大重试次数"
+                                "记录[%s] %s 终止 [%s]: %s",
+                                record_id,
+                                result.stage.value,
+                                result.code,
+                                result.message,
                             )
                             self.task_manager.max_retries_exceeded_count += 1
 
                             if self._job_tracker is not None:
                                 self._job_tracker.mark_failed(
                                     record_id,
-                                    error_code=error_type.value,
+                                    error_code=result.code,
                                 )
                             self.state_manager.remove_metadata(record_id)
-                    else:
-                        # 成功
+                    elif isinstance(result, TaskSuccess):
+                        prepared = result.prepared_result
+                        if prepared.record_id != record_id:
+                            raise ValueError(
+                                "TaskSuccess record_id does not match scheduled record"
+                            )
                         if self._job_tracker is not None:
-                            self._job_tracker.mark_ai_complete(record_id, result)
-                        results_buffer[record_id] = result
+                            self._job_tracker.mark_ai_complete(
+                                record_id,
+                                prepared.values,
+                            )
+                        results_buffer[record_id] = prepared.values
                         successful_result_ids.add(record_id)
+                    else:
+                        raise TypeError(
+                            "_process_one_record must return TaskSuccess or TaskFailure"
+                        )
 
                 except Exception as e:
                     logging.error(f"处理结果时发生未捕获异常: {e}")
@@ -1033,7 +1166,7 @@ class UniversalAIProcessor:
 
     async def _process_one_record(
         self, session: aiohttp.ClientSession, record_id: Any, row_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    ) -> TaskSuccess | TaskFailure:
         """
         处理单条记录
 
@@ -1053,18 +1186,12 @@ class UniversalAIProcessor:
             row_data: 原始记录数据字典
 
         Returns:
-            处理结果字典:
-            - 成功: 包含解析后的 AI 响应字段
-            - 失败: 包含 _error, _error_type, _details 字段
+            TaskSuccess: 包含已校验的 PreparedResult。
+            TaskFailure: 包含失败阶段、稳定错误码、消息和重试属性。
 
         Example:
-            # 成功返回
-            {"field1": "value1", "field2": "value2"}
-
-            # 失败返回
-            {"_error": "api_call_failed: TimeoutError",
-             "_error_type": ErrorType.API,
-             "_details": "Connection timeout after 30s"}
+            TaskSuccess(PreparedResult.create(record_id, {"field1": "value1"}))
+            TaskFailure(FailureStage.MODEL, "model_transport_error", "timeout", True)
         """
         try:
             routing_context = self._get_routing_context(row_data)
@@ -1086,10 +1213,12 @@ class UniversalAIProcessor:
             # 1. 生成 Prompt
             prompt = content_processor.create_prompt(row_data)
             if not prompt:
-                return {
-                    "_error": "prompt_generation_failed",
-                    "_error_type": ErrorType.SYSTEM,
-                }
+                return TaskFailure(
+                    stage=FailureStage.SYSTEM,
+                    code="prompt_generation_failed",
+                    message="prompt generation returned empty content",
+                    retryable=True,
+                )
 
             # 2. 调用 API
             messages = []
@@ -1108,30 +1237,43 @@ class UniversalAIProcessor:
 
             # 3. 解析结果
             result = content_processor.parse_response(response_content)
-            return result
+            if "_error" in result:
+                validation_errors = result.get("_validation_errors")
+                message = str(result["_error"])
+                if validation_errors:
+                    message = f"{message}: {validation_errors}"
+                return TaskFailure(
+                    stage=FailureStage.CONTENT,
+                    code=str(result["_error"]),
+                    message=message,
+                    retryable=True,
+                )
+            return TaskSuccess(PreparedResult.create(record_id, result))
 
         except aiohttp.ClientResponseError as e:
             retryable = e.status in {408, 429} or 500 <= e.status <= 599
-            return {
-                "_error": f"api_call_failed: HTTP {e.status}",
-                "_error_type": ErrorType.API,
-                "_details": str(e)[:200],
-                "_retryable": retryable,
-                "_retry_after": self._parse_retry_after(e.headers),
-            }
+            return TaskFailure(
+                stage=FailureStage.MODEL,
+                code=f"model_http_{e.status}",
+                message=f"model request failed with HTTP {e.status}",
+                retryable=retryable,
+                retry_after_seconds=self._parse_retry_after(e.headers),
+            )
         except (TimeoutError, aiohttp.ClientError) as e:
-            return {
-                "_error": f"api_call_failed: {type(e).__name__}",
-                "_error_type": ErrorType.API,
-                "_details": str(e)[:200],
-                "_retryable": True,
-            }
+            return TaskFailure(
+                stage=FailureStage.MODEL,
+                code="model_transport_error",
+                message=f"{type(e).__name__}: {e}",
+                retryable=True,
+            )
         except Exception as e:
             logging.exception(f"记录[{record_id}] 处理异常: {e}")
-            return {
-                "_error": f"unexpected_error: {str(e)}",
-                "_error_type": ErrorType.SYSTEM,
-            }
+            return TaskFailure(
+                stage=FailureStage.SYSTEM,
+                code="unexpected_error",
+                message=f"{type(e).__name__}: {e}",
+                retryable=True,
+            )
 
     @staticmethod
     def _parse_retry_after(headers: Any) -> float:

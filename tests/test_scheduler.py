@@ -14,7 +14,7 @@
         test_init_with_valid_task_pool                 验证有效任务池初始化及默认值
         test_init_with_custom_shard_sizes              验证自定义分片大小
         test_init_with_invalid_task_pool               验证无效任务池抛 TypeError
-        test_init_retry_counts                         验证默认重试次数配置
+        test_init_max_attempts                         验证默认总尝试次数配置
     TestShardCalculation                               分片计算测试
         test_calculate_optimal_shard_size_basic        验证分片大小在 min-max 范围内
         test_calculate_optimal_shard_size_small_range  验证小范围数据返回 min_shard_size
@@ -90,8 +90,8 @@ class TestShardedTaskManagerInit:
         with pytest.raises(TypeError, match="task_pool 必须是 BaseTaskPool"):
             ShardedTaskManager("not a task pool")
 
-    def test_init_retry_counts(self):
-        """测试默认重试次数配置"""
+    def test_init_max_attempts(self):
+        """测试默认总尝试次数配置"""
         from src.core.scheduler import ShardedTaskManager
         from src.data.base import BaseTaskPool
         from src.models.errors import ErrorType
@@ -100,9 +100,10 @@ class TestShardedTaskManagerInit:
 
         manager = ShardedTaskManager(mock_pool)
 
-        assert manager.max_retry_counts[ErrorType.API] == 3
-        assert manager.max_retry_counts[ErrorType.CONTENT] == 1
-        assert manager.max_retry_counts[ErrorType.SYSTEM] == 2
+        assert manager.max_attempts[ErrorType.API] == 4
+        assert manager.max_attempts[ErrorType.CONTENT] == 2
+        assert manager.max_attempts[ErrorType.SYSTEM] == 3
+        assert manager.max_attempts[ErrorType.SOURCE] == 3
 
 
 class TestShardCalculation:

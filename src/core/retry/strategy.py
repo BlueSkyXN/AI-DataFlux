@@ -14,8 +14,8 @@
         - reload_data: bool 是否需要重新加载数据源数据
 
     RetryStrategy:
-        - __init__(max_retries, api_pause_duration=2.0, api_error_trigger_window=2.0)
-          输入: Dict[ErrorType, int] 重试上限, float 暂停时长, float 触发窗口
+        - __init__(max_attempts, api_pause_duration=2.0, api_error_trigger_window=2.0)
+          输入: Dict[ErrorType, int] 总尝试次数上限, float 暂停时长, float 触发窗口
         - decide(error_type, metadata) -> RetryDecision
           核心决策方法，根据错误类型和重试计数返回决策
           输入: ErrorType 错误类型, TaskMetadata 任务元数据
@@ -24,7 +24,7 @@
           更新 last_pause_end_time 为当前时间
 
 关键变量:
-    - max_retries: Dict[ErrorType, int] 各错误类型最大重试次数
+    - max_attempts: Dict[ErrorType, int] 各错误类型最大总尝试次数
     - api_pause_duration: float 熔断暂停时长 (默认 2.0 秒)
     - api_error_trigger_window: float 熔断触发窗口 (默认 2.0 秒)
     - last_pause_end_time: float 上次暂停结束时间戳 (初始 0.0)
@@ -55,25 +55,25 @@ API 熔断机制:
     └─────────────────────────────────────────────────────────────────┘
 
 决策流程:
-    1. 检查是否超过最大重试次数 → FAIL
+    1. 检查包含首次执行的总 attempts 是否耗尽 → FAIL
     2. API 错误且超过触发窗口 → PAUSE_THEN_RETRY
     3. API 错误但在窗口内 → RETRY (重载数据)
     4. 内容错误 → RETRY (不重载)
     5. 系统错误 → RETRY (重载数据)
 
 配置说明:
-    datasource:
-      concurrency:
-        retry_limits:
-          api_error: 3        # API 错误最多重试 3 次
-          content_error: 1    # 内容错误最多重试 1 次
-          system_error: 2     # 系统错误最多重试 2 次
-        api_pause_duration: 2.0     # 熔断暂停 2 秒
-        api_error_trigger_window: 2.0  # 2 秒内的 API 错误不重复熔断
+    job:
+      retry:
+        task_max_attempts:
+          api_error: 4        # 首次执行 + 最多 3 次 retry
+          content_error: 2    # 首次执行 + 最多 1 次 retry
+          system_error: 3     # 首次执行 + 最多 2 次 retry
+          source_error: 3     # 首次执行 + 最多 2 次 retry
+        api_pause_duration_seconds: 2.0
+        api_error_trigger_window_seconds: 2.0
 """
 
 import time
-import random
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict
@@ -121,7 +121,7 @@ class RetryStrategy:
     实现分类重试和 API 熔断两个核心机制。
 
     分类重试:
-        - 每种错误类型有独立的最大重试次数
+        - 每种错误类型有独立的最大总尝试次数
         - 超过次数后标记为失败，不再重试
 
     API 熔断:
@@ -130,7 +130,7 @@ class RetryStrategy:
         - 暂停期间其他任务也会被阻塞
 
     Attributes:
-        max_retries: 各错误类型的最大重试次数
+        max_attempts: 各错误类型的最大总尝试次数
         api_pause_duration: API 熔断暂停时长 (秒)
         api_error_trigger_window: API 错误触发窗口 (秒)
         last_pause_end_time: 上次暂停结束时间戳
@@ -138,7 +138,7 @@ class RetryStrategy:
 
     def __init__(
         self,
-        max_retries: Dict[ErrorType, int],
+        max_attempts: Dict[ErrorType, int],
         api_pause_duration: float = 2.0,
         api_error_trigger_window: float = 2.0,
         base_backoff_seconds: float = 0.5,
@@ -148,13 +148,13 @@ class RetryStrategy:
         初始化重试策略
 
         Args:
-            max_retries: 各错误类型的最大重试次数映射
-                例: {ErrorType.API: 3, ErrorType.CONTENT: 1}
+            max_attempts: 各错误类型的最大总尝试次数映射，包含首次执行
+                例: {ErrorType.API: 4, ErrorType.CONTENT: 2}
             api_pause_duration: API 错误触发后的暂停时长（秒）
             api_error_trigger_window: API 错误触发的时间窗口（秒）
                 在此窗口内的多次 API 错误只会触发一次暂停
         """
-        self.max_retries = max_retries
+        self.max_attempts = max_attempts
         self.api_pause_duration = api_pause_duration
         self.api_error_trigger_window = api_error_trigger_window
         self.base_backoff_seconds = base_backoff_seconds
@@ -180,17 +180,18 @@ class RetryStrategy:
             5. 系统错误 → RETRY (重载数据)
         """
         current_retries = metadata.get_retry_count(error_type)
-        max_allowed = self.max_retries.get(error_type, 1)
+        attempts_used = current_retries + 1
+        max_allowed = self.max_attempts.get(error_type, 1)
 
         # 1. 检查是否超过最大重试次数
-        if current_retries >= max_allowed:
+        if attempts_used >= max_allowed:
             return RetryDecision(action=RetryAction.FAIL)
 
         base_delay = min(
             self.max_backoff_seconds,
             self.base_backoff_seconds * (2**current_retries),
         )
-        retry_delay = base_delay + random.uniform(0, base_delay * 0.25)
+        retry_delay = base_delay
 
         # 2. API 错误特殊处理（熔断机制）
         if error_type == ErrorType.API:
@@ -219,7 +220,7 @@ class RetryStrategy:
         # 系统错误: 可能涉及数据处理异常，需要重新加载数据
         return RetryDecision(
             action=RetryAction.RETRY,
-            reload_data=(error_type == ErrorType.SYSTEM),
+            reload_data=(error_type in {ErrorType.SYSTEM, ErrorType.SOURCE}),
             retry_delay=retry_delay,
         )
 

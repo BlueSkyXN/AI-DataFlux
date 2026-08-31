@@ -8,6 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.processor import UniversalAIProcessor
+from src.core.contracts import (
+    FailureStage,
+    PreparedResult,
+    SourceOperationError,
+    TaskFailure,
+    TaskSuccess,
+)
 from src.core.job_tracker import JobRecordTracker
 from src.core.retry import RetryStrategy
 from src.core.state import TaskStateManager
@@ -62,13 +69,15 @@ def _processor_for_loop(pool):
     )
     processor.state_manager = TaskStateManager()
     processor.retry_strategy = RetryStrategy(
-        {
-            ErrorType.API: 0,
-            ErrorType.CONTENT: 1,
-            ErrorType.SYSTEM: 0,
+        max_attempts={
+            ErrorType.API: 1,
+            ErrorType.CONTENT: 2,
+            ErrorType.SYSTEM: 1,
+            ErrorType.SOURCE: 3,
         },
         base_backoff_seconds=0,
     )
+    processor.source_max_attempts = 3
     processor.max_in_flight = 1
     processor.batch_size = 1
     processor.write_retry_limit = 0
@@ -81,7 +90,7 @@ def _processor_for_loop(pool):
 
 
 @pytest.mark.asyncio
-async def test_content_retry_limit_one_makes_one_real_extra_request():
+async def test_content_max_attempts_two_makes_one_real_retry():
     pool = _Pool()
     processor = _processor_for_loop(pool)
     calls = []
@@ -89,11 +98,13 @@ async def test_content_retry_limit_one_makes_one_real_extra_request():
     async def process_one(_session, _record_id, row_data):
         calls.append(dict(row_data))
         if len(calls) == 1:
-            return {
-                "_error": "invalid_or_missing_json",
-                "_error_type": ErrorType.CONTENT,
-            }
-        return {"answer": "ok"}
+            return TaskFailure(
+                FailureStage.CONTENT,
+                "invalid_or_missing_json",
+                "invalid content",
+                True,
+            )
+        return TaskSuccess(PreparedResult.create(_record_id, {"answer": "ok"}))
 
     processor._process_one_record = process_one
     completed = await processor._process_loop(object())
@@ -103,6 +114,214 @@ async def test_content_retry_limit_one_makes_one_real_extra_request():
     assert processor.task_manager.retried_tasks_count[ErrorType.CONTENT] == 1
     assert processor.task_manager.total_processed_successfully == 1
     assert pool.writes == [{"record-a": {"answer": "ok"}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "expected_inputs", "error_type"),
+    [
+        (
+            FailureStage.CONTENT,
+            [{"input": "original"}, {"input": "original"}],
+            ErrorType.CONTENT,
+        ),
+        (
+            FailureStage.MODEL,
+            [{"input": "original"}, {"input": "reloaded"}],
+            ErrorType.API,
+        ),
+        (
+            FailureStage.SYSTEM,
+            [{"input": "original"}, {"input": "reloaded"}],
+            ErrorType.SYSTEM,
+        ),
+    ],
+)
+async def test_retry_stage_controls_reload(stage, expected_inputs, error_type):
+    pool = _Pool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[error_type] = 2
+    processor.retry_strategy.last_pause_end_time = float("inf")
+    calls = []
+
+    async def process_one(_session, record_id, row_data):
+        calls.append(dict(row_data))
+        if len(calls) == 1:
+            return TaskFailure(stage, "failure", "failed", True)
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": "ok"}))
+
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert calls == expected_inputs
+    assert processor.task_manager.retried_tasks_count[error_type] == 1
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_failure_stops_after_first_attempt():
+    pool = _Pool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[ErrorType.API] = 4
+    calls = 0
+
+    async def process_one(*_args):
+        nonlocal calls
+        calls += 1
+        return TaskFailure(
+            FailureStage.MODEL,
+            "model_http_400",
+            "invalid request",
+            False,
+        )
+
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert calls == 1
+    assert processor.task_manager.max_retries_exceeded_count == 1
+    assert pool.writes == []
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_one_means_no_retry():
+    pool = _Pool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[ErrorType.CONTENT] = 1
+    calls = 0
+
+    async def process_one(*_args):
+        nonlocal calls
+        calls += 1
+        return TaskFailure(
+            FailureStage.CONTENT,
+            "invalid_json",
+            "invalid content",
+            True,
+        )
+
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert calls == 1
+    assert processor.task_manager.retried_tasks_count[ErrorType.CONTENT] == 0
+
+
+@pytest.mark.asyncio
+async def test_model_retry_after_uses_larger_of_server_and_local_delay(monkeypatch):
+    pool = _Pool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[ErrorType.API] = 2
+    processor.retry_strategy.base_backoff_seconds = 1
+    processor.retry_strategy.api_pause_duration = 2
+    calls = 0
+
+    async def process_one(_session, record_id, _row_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return TaskFailure(
+                FailureStage.MODEL,
+                "model_http_429",
+                "rate limited",
+                True,
+                retry_after_seconds=3,
+            )
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": "ok"}))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    sleep.assert_awaited_once_with(3)
+
+
+@pytest.mark.asyncio
+async def test_reload_missing_fails_record_without_reusing_stale_input():
+    class MissingReloadPool(_Pool):
+        async def reload(self, _record_ids):
+            return {}
+
+    pool = MissingReloadPool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[ErrorType.SYSTEM] = 2
+    calls = 0
+
+    async def process_one(*_args):
+        nonlocal calls
+        calls += 1
+        return TaskFailure(FailureStage.SYSTEM, "system", "failed", True)
+
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert calls == 1
+    assert processor.task_manager.max_retries_exceeded_count == 1
+    assert pool.writes == []
+
+
+@pytest.mark.asyncio
+async def test_reload_source_failures_use_independent_attempt_budget(monkeypatch):
+    class FlakyReloadPool(_Pool):
+        def __init__(self):
+            super().__init__()
+            self.reload_calls = 0
+
+        async def reload(self, record_ids):
+            self.reload_calls += 1
+            if self.reload_calls < 3:
+                raise OSError("source unavailable")
+            return {record_id: {"input": "fresh"} for record_id in record_ids}
+
+    pool = FlakyReloadPool()
+    processor = _processor_for_loop(pool)
+    processor.retry_strategy.max_attempts[ErrorType.SYSTEM] = 2
+    processor.source_max_attempts = 3
+    calls = []
+
+    async def process_one(_session, record_id, row_data):
+        calls.append(dict(row_data))
+        if len(calls) == 1:
+            return TaskFailure(FailureStage.SYSTEM, "system", "failed", True)
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": "ok"}))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert pool.reload_calls == 3
+    assert calls == [{"input": "original"}, {"input": "fresh"}]
+    assert processor.task_manager.retried_tasks_count[ErrorType.SOURCE] == 2
+    assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_scan_failure_retries_then_succeeds_without_empty_completion(monkeypatch):
+    class FlakyScanPool(_Pool):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def scan(self, cursor, limit):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("scan failed")
+            return await super().scan(cursor, limit)
+
+    pool = FlakyScanPool()
+    processor = _processor_for_loop(pool)
+
+    async def process_one(_session, record_id, _row_data):
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": "ok"}))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert pool.calls == 2
+    sleep.assert_awaited_once_with(1.0)
 
 
 @pytest.mark.asyncio
@@ -130,7 +349,7 @@ async def test_processor_uses_opaque_adapter_cursor_for_all_pages():
     processor = _processor_for_loop(pool)
 
     async def process_one(_session, record_id, _row_data):
-        return {"answer": record_id}
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": record_id}))
 
     processor._process_one_record = process_one
     completed = await processor._process_loop(object())
@@ -274,8 +493,9 @@ async def test_datasource_count_failure_is_not_treated_as_empty_success():
     processor.task_pool = BrokenPool()
     processor.task_manager = SimpleNamespace(finalize=finalize)
     processor.batch_size = 1
+    processor.source_max_attempts = 1
 
-    with pytest.raises(RuntimeError, match="database unavailable"):
+    with pytest.raises(SourceOperationError, match="source count failed"):
         await processor.process_shard_async_continuous()
     assert finalized is True
 
@@ -310,10 +530,12 @@ async def test_retry_budget_survives_checkpoint_recovery(tmp_path):
     async def content_error(*_args):
         nonlocal calls
         calls += 1
-        return {
-            "_error": "invalid_or_missing_json",
-            "_error_type": ErrorType.CONTENT,
-        }
+        return TaskFailure(
+            FailureStage.CONTENT,
+            "invalid_or_missing_json",
+            "invalid content",
+            True,
+        )
 
     processor._process_one_record = content_error
     completed = await processor._process_loop(object())

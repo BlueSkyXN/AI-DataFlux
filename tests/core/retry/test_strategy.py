@@ -7,17 +7,17 @@
 - 重试决策逻辑 (RETRY/FAIL/PAUSE_THEN_RETRY)
 - 错误类型分类处理
 - API 熔断机制
-- 最大重试次数限制
+- 最大总尝试次数限制
 
 测试类/函数清单:
     TestRetryStrategy                          重试策略测试
         test_decide_retry_success              验证首次 API 错误触发 PAUSE_THEN_RETRY
         test_decide_retry_after_pause          验证暂停窗口内直接 RETRY 不再暂停
-        test_decide_fail_max_retries           验证超过最大重试次数返回 FAIL
+        test_decide_fail_max_attempts           验证总尝试次数耗尽返回 FAIL
         test_decide_content_error              验证内容错误直接 RETRY 且不重载数据
         test_decide_content_error_fail         验证内容错误超限返回 FAIL
         test_decide_system_error               验证系统错误 RETRY 并重载数据
-        test_default_max_retries               验证未配置类型默认最大重试 1 次
+        test_default_max_attempts               验证未配置类型默认仅首次执行
 """
 
 import pytest
@@ -32,7 +32,11 @@ class TestRetryStrategy:
     @pytest.fixture
     def strategy(self):
         return RetryStrategy(
-            max_retries={ErrorType.API: 3, ErrorType.CONTENT: 1},
+            max_attempts={
+                ErrorType.API: 3,
+                ErrorType.CONTENT: 2,
+                ErrorType.SYSTEM: 2,
+            },
             api_pause_duration=1.0,
             api_error_trigger_window=1.0,
         )
@@ -59,11 +63,10 @@ class TestRetryStrategy:
         assert decision.action == RetryAction.RETRY
         assert decision.reload_data is True
 
-    def test_decide_fail_max_retries(self, strategy, metadata):
-        # API 错误超过最大次数
+    def test_decide_fail_max_attempts(self, strategy, metadata):
+        # 首次执行加两次 retry 已用完 3 attempts
         metadata.increment_retry(ErrorType.API)
         metadata.increment_retry(ErrorType.API)
-        metadata.increment_retry(ErrorType.API)  # 3次
 
         decision = strategy.decide(ErrorType.API, metadata)
         assert decision.action == RetryAction.FAIL
@@ -75,7 +78,7 @@ class TestRetryStrategy:
         assert decision.reload_data is False
 
     def test_decide_content_error_fail(self, strategy, metadata):
-        # 内容错误超过 1 次
+        # 内容错误首次执行后已安排一次 retry，共 2 attempts
         metadata.increment_retry(ErrorType.CONTENT)
         decision = strategy.decide(ErrorType.CONTENT, metadata)
         assert decision.action == RetryAction.FAIL
@@ -86,11 +89,20 @@ class TestRetryStrategy:
         assert decision.action == RetryAction.RETRY
         assert decision.reload_data is True
 
-    def test_default_max_retries(self, strategy, metadata):
-        # 未配置的错误类型，默认最大重试 1 次
-        decision = strategy.decide(ErrorType.SYSTEM, metadata)
-        assert decision.action == RetryAction.RETRY
-
-        metadata.increment_retry(ErrorType.SYSTEM)
-        decision = strategy.decide(ErrorType.SYSTEM, metadata)
+    def test_default_max_attempts(self, strategy, metadata):
+        # 未配置类型默认只有首次 attempt，不再重试
+        decision = strategy.decide(ErrorType.SOURCE, metadata)
         assert decision.action == RetryAction.FAIL
+
+    def test_source_error_reloads_without_api_pause(self, metadata):
+        strategy = RetryStrategy(
+            max_attempts={ErrorType.SOURCE: 2},
+            base_backoff_seconds=1,
+        )
+
+        decision = strategy.decide(ErrorType.SOURCE, metadata)
+
+        assert decision.action == RetryAction.RETRY
+        assert decision.reload_data is True
+        assert decision.pause_duration == 0
+        assert decision.retry_delay == 1

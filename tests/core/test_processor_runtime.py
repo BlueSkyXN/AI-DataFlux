@@ -9,9 +9,10 @@ import pytest
 import yaml
 
 from src.core.processor import UniversalAIProcessor
+from src.core.contracts import FailureStage, PreparedResult, TaskFailure, TaskSuccess
 from src.core.job_tracker import JobRecordTracker
-from src.jobs import FileJobRepository, RecordStatus, hash_config_file
-from src.models.errors import ErrorType
+from src.config import execution_config_hash, load_config
+from src.jobs import FileJobRepository, RecordStatus
 
 
 def _processor_config(tmp_path, *, routing: bool = False):
@@ -21,41 +22,47 @@ def _processor_config(tmp_path, *, routing: bool = False):
         csv_path, index=False
     )
     config = {
-        "global": {
+        "schema_version": 4,
+        "runtime": {
             "log": {"level": "error", "format": "text", "output": "console"},
-            "flux_api_url": "http://127.0.0.1:8787",
+            "auth": {"token": ""},
+            "workspace": {
+                "roots": {"project": str(tmp_path)},
+                "state_dir": ".dataflux/jobs",
+            },
         },
-        "datasource": {
-            "type": "csv",
-            "engine": "pandas",
+        "job": {
+            "gateway_url": "http://127.0.0.1:8787",
+            "datasource": {
+                "type": "csv",
+                "input_path": str(csv_path),
+                "output_path": str(csv_path),
+                "engine": "pandas",
+                "require_all_input_fields": True,
+            },
+            "columns": {"extract": ["input"], "write": {"answer": "result"}},
             "concurrency": {
                 "batch_size": 1,
                 "max_in_flight": 1,
-                "retry_limits": {
-                    "api_error": 1,
-                    "content_error": 1,
-                    "system_error": 1,
+            },
+            "retry": {
+                "task_max_attempts": {
+                    "api_error": 2,
+                    "content_error": 2,
+                    "system_error": 2,
+                    "source_error": 2,
                 },
             },
+            "prompt": {
+                "template": "Process {record_json}",
+                "required_fields": ["answer"],
+                "use_json_schema": True,
+                "temperature": 0.2,
+                "temperature_override": True,
+                "system_prompt": "system",
+            },
+            "validation": {"enabled": False, "field_rules": {}},
         },
-        "csv": {"input_path": str(csv_path), "output_path": str(csv_path)},
-        "columns_to_extract": ["input"],
-        "columns_to_write": {"answer": "result"},
-        "prompt": {
-            "template": "Process {record_json}",
-            "required_fields": ["answer"],
-            "use_json_schema": True,
-            "temperature": 0.2,
-            "temperature_override": True,
-            "system_prompt": "system",
-        },
-        "validation": {"enabled": False, "field_rules": {}},
-        "workspace": {
-            "roots": {"project": str(tmp_path)},
-            "state_dir": ".dataflux/jobs",
-        },
-        "models": [],
-        "channels": {},
     }
     if routing:
         profile = {
@@ -69,7 +76,7 @@ def _processor_config(tmp_path, *, routing: bool = False):
         (tmp_path / "special.yaml").write_text(
             yaml.safe_dump(profile), encoding="utf-8"
         )
-        config["routing"] = {
+        config["job"]["routing"] = {
             "enabled": True,
             "field": "category",
             "subtasks": [{"match": "special", "profile": "special.yaml"}],
@@ -87,7 +94,7 @@ async def test_processor_initializes_and_persists_successful_csv(tmp_path):
     request = repository.new_request(
         mode="background",
         config_path=str(config_path),
-        config_sha256=hash_config_file(config_path),
+        config_sha256=execution_config_hash(load_config(config_path), config_path),
     )
     repository.create_job(request)
     tracker = JobRecordTracker(repository, request.job_id)
@@ -95,7 +102,7 @@ async def test_processor_initializes_and_persists_successful_csv(tmp_path):
 
     async def process_one(_session, _record_id, row_data):
         assert row_data["input"] == "hello"
-        return {"answer": "done"}
+        return TaskSuccess(PreparedResult.create(_record_id, {"answer": "done"}))
 
     processor._process_one_record = process_one
     completed = await processor.process_shard_async_continuous()
@@ -124,7 +131,8 @@ async def test_processor_routing_context_and_ai_error_classification(tmp_path):
         result = await processor._process_one_record(
             session, "record-a", {"input": "hello", "category": "special"}
         )
-        assert result == {"answer": "routed"}
+        assert isinstance(result, TaskSuccess)
+        assert result.prepared_result.values == {"answer": "routed"}
         call = processor.client.call.call_args
         assert call.kwargs["temperature"] is None
         assert call.args[1][0] == {"role": "system", "content": "routed-system"}
@@ -140,9 +148,10 @@ async def test_processor_routing_context_and_ai_error_classification(tmp_path):
         rate_limited = await processor._process_one_record(
             session, "record-a", {"input": "hello"}
         )
-        assert rate_limited["_error_type"] == ErrorType.API
-        assert rate_limited["_retryable"] is True
-        assert rate_limited["_retry_after"] == 3
+        assert isinstance(rate_limited, TaskFailure)
+        assert rate_limited.stage == FailureStage.MODEL
+        assert rate_limited.retryable is True
+        assert rate_limited.retry_after_seconds == 3
 
         processor.client.call = AsyncMock(
             side_effect=aiohttp.ClientResponseError(
@@ -152,19 +161,22 @@ async def test_processor_routing_context_and_ai_error_classification(tmp_path):
         permanent = await processor._process_one_record(
             session, "record-a", {"input": "hello"}
         )
-        assert permanent["_retryable"] is False
+        assert isinstance(permanent, TaskFailure)
+        assert permanent.retryable is False
 
         processor.client.call = AsyncMock(side_effect=TimeoutError("timeout"))
         timeout = await processor._process_one_record(
             session, "record-a", {"input": "hello"}
         )
-        assert timeout["_retryable"] is True
+        assert isinstance(timeout, TaskFailure)
+        assert timeout.retryable is True
 
         processor.client.call = AsyncMock(side_effect=RuntimeError("broken"))
         system = await processor._process_one_record(
             session, "record-a", {"input": "hello"}
         )
-        assert system["_error_type"] == ErrorType.SYSTEM
+        assert isinstance(system, TaskFailure)
+        assert system.stage == FailureStage.SYSTEM
     finally:
         processor.task_pool.close()
 
@@ -201,7 +213,7 @@ def test_processor_run_cleans_progress_on_success(tmp_path):
     processor = UniversalAIProcessor(str(config_path), progress_file=str(progress_path))
 
     async def process_one(_session, _record_id, _row_data):
-        return {"answer": "sync"}
+        return TaskSuccess(PreparedResult.create(_record_id, {"answer": "sync"}))
 
     processor._process_one_record = process_one
     progress_path.write_text("{}", encoding="utf-8")

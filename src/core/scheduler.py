@@ -51,7 +51,7 @@
             processing_metrics (dict): 处理速率指标 (EMA 平滑)
 
         方法:
-        ├── __init__(task_pool, optimal_shard_size, min_shard_size, max_shard_size, max_retry_counts)
+        ├── __init__(task_pool, optimal_shard_size, min_shard_size, max_shard_size, max_attempts)
         │     输入: 任务池实例及分片/重试参数
         │
         ├── calculate_optimal_shard_size(total_range) -> int
@@ -138,7 +138,7 @@ class ShardedTaskManager:
         optimal_shard_size: 理想分片大小
         min_shard_size: 最小分片大小
         max_shard_size: 最大分片大小
-        max_retry_counts: 各错误类型的最大重试次数
+        max_attempts: 各错误类型包含首次执行的最大总尝试次数
         current_shard_index: 当前分片索引
         total_shards: 总分片数
         shard_boundaries: 分片边界列表 [(min_id, max_id), ...]
@@ -151,7 +151,7 @@ class ShardedTaskManager:
         optimal_shard_size: int = 10000,
         min_shard_size: int = 1000,
         max_shard_size: int = 50000,
-        max_retry_counts: dict[ErrorType, int] | None = None,
+        max_attempts: dict[ErrorType, int] | None = None,
     ):
         """
         初始化分片任务管理器
@@ -161,7 +161,7 @@ class ShardedTaskManager:
             optimal_shard_size: 理想分片大小
             min_shard_size: 最小分片大小
             max_shard_size: 最大分片大小
-            max_retry_counts: 各错误类型的最大重试次数
+            max_attempts: 各错误类型包含首次执行的最大总尝试次数
         """
         if not isinstance(task_pool, BaseTaskPool):
             raise TypeError("task_pool 必须是 BaseTaskPool 的实例")
@@ -171,11 +171,12 @@ class ShardedTaskManager:
         self.min_shard_size = min_shard_size
         self.max_shard_size = max_shard_size
 
-        # 重试限制
-        self.max_retry_counts = max_retry_counts or {
-            ErrorType.API: 3,
-            ErrorType.CONTENT: 1,
-            ErrorType.SYSTEM: 2,
+        # 总尝试次数限制
+        self.max_attempts = max_attempts or {
+            ErrorType.API: 4,
+            ErrorType.CONTENT: 2,
+            ErrorType.SYSTEM: 3,
+            ErrorType.SOURCE: 3,
         }
 
         # 分片状态
@@ -199,6 +200,7 @@ class ShardedTaskManager:
             ErrorType.API: 0,
             ErrorType.CONTENT: 0,
             ErrorType.SYSTEM: 0,
+            ErrorType.SOURCE: 0,
         }
         self.max_retries_exceeded_count = 0
 
@@ -540,9 +542,9 @@ class ShardedTaskManager:
         # 重试统计
         logging.info("重试统计信息:")
         for error_type, count in self.retried_tasks_count.items():
-            max_retries = self.max_retry_counts.get(error_type, 0)
+            max_attempts = self.max_attempts.get(error_type, 0)
             logging.info(
-                f"  - {error_type.value}: {count} 次重试 (最大重试次数: {max_retries})"
+                f"  - {error_type.value}: {count} 次重试 (最大总尝试次数: {max_attempts})"
             )
         logging.info(f"  - 重试次数超限任务数: {self.max_retries_exceeded_count}")
 
