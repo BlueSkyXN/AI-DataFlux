@@ -62,6 +62,7 @@ export type JobStatus =
   | 'blocked'
   | 'completed'
   | 'completed_with_errors'
+  | 'completed_with_unresolved_writes'
   | 'failed'
   | 'cancelled';
 
@@ -71,6 +72,7 @@ export interface JobCounts {
   in_flight: number;
   ai_complete: number;
   persisted: number;
+  unresolved_writes: number;
   failed: number;
   cancelled: number;
   retries: number;

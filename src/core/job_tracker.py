@@ -9,10 +9,13 @@ from typing import Any, Iterable, Mapping
 from src.jobs import (
     FileJobRepository,
     JobCounts,
+    JobRepositoryError,
     RecordCheckpoint,
     RecordStatus,
     ShardState,
 )
+
+from .contracts import PreparedResult
 
 
 class JobRecordTracker:
@@ -66,18 +69,21 @@ class JobRecordTracker:
         checkpoint = self.get(record_id)
         return dict(checkpoint.retry_counts) if checkpoint is not None else {}
 
+    def commit_attempts_for(self, record_id: Any) -> int:
+        checkpoint = self.get(record_id)
+        return checkpoint.commit_attempts if checkpoint is not None else 0
+
+    def reconciliation_attempts_for(self, record_id: Any) -> int:
+        checkpoint = self.get(record_id)
+        return checkpoint.reconciliation_attempts if checkpoint is not None else 0
+
     def should_process_scanned(self, record_id: Any) -> bool:
-        """Avoid repeating AI work for already durable or replayable outputs."""
+        """Only unfinished model work may re-enter the model execution path."""
 
         checkpoint = self.get(record_id)
         if checkpoint is None:
             return True
-        if checkpoint.status == RecordStatus.PERSISTED:
-            return False
-        return not (
-            checkpoint.status in {RecordStatus.AI_COMPLETE, RecordStatus.FAILED}
-            and checkpoint.result is not None
-        )
+        return checkpoint.status in {RecordStatus.PENDING, RecordStatus.IN_FLIGHT}
 
     def new_scan_shard_id(self) -> str:
         shard_id = f"scan-{self._next_scan_shard:06d}"
@@ -140,7 +146,7 @@ class JobRecordTracker:
             RecordStatus.IN_FLIGHT,
             attempt=attempt,
             input_data=dict(input_data),
-            result=current.result if current else None,
+            retry_counts=dict(current.retry_counts) if current else {},
             event_type="record_in_flight",
         )
 
@@ -161,36 +167,77 @@ class JobRecordTracker:
             RecordStatus.PENDING,
             attempt=current.attempt if current else 0,
             input_data=dict(input_data),
-            result=current.result if current else None,
             error={"code": error_code} if error_code else None,
             retry_counts=retry_counts,
             event_type="record_retry_scheduled",
         )
 
-    def mark_ai_complete(
-        self,
-        record_id: Any,
-        result: Mapping[str, Any],
-    ) -> RecordCheckpoint:
-        current = self.get(record_id)
+    def mark_prepared(self, prepared: PreparedResult) -> RecordCheckpoint:
+        """Persist blob first, then publish its immutable checkpoint reference."""
+
+        prepared.validate()
+        current = self.get(prepared.record_id)
+        reference = self.repository.save_prepared_result(
+            self.job_id,
+            prepared.commit_id,
+            prepared.to_dict(),
+        )
         return self._transition(
-            record_id,
-            RecordStatus.AI_COMPLETE,
+            prepared.record_id,
+            RecordStatus.PENDING_COMMIT,
             attempt=current.attempt if current else 1,
             input_data=current.input_data if current else None,
-            result=dict(result),
-            event_type="record_ai_complete",
+            prepared_ref=reference,
+            prepared_hash=prepared.payload_hash,
+            commit_id=prepared.commit_id,
+            retry_counts=dict(current.retry_counts) if current else {},
+            event_type="record_pending_commit",
+        )
+
+    def mark_commit_attempt(self, record_id: Any) -> RecordCheckpoint:
+        current = self._require_prepared_checkpoint(record_id)
+        return self._transition_from_prepared(
+            current,
+            RecordStatus.PENDING_COMMIT,
+            commit_attempts=current.commit_attempts + 1,
+            reconciliation_attempts=current.reconciliation_attempts,
+            event_type="record_commit_attempted",
+        )
+
+    def mark_reconciliation_attempt(self, record_id: Any) -> RecordCheckpoint:
+        current = self._require_prepared_checkpoint(record_id)
+        return self._transition_from_prepared(
+            current,
+            RecordStatus.PENDING_COMMIT,
+            commit_attempts=current.commit_attempts,
+            reconciliation_attempts=current.reconciliation_attempts + 1,
+            event_type="record_reconciliation_attempted",
         )
 
     def mark_persisted(self, record_id: Any) -> RecordCheckpoint:
-        current = self.get(record_id)
-        return self._transition(
-            record_id,
+        current = self._require_prepared_checkpoint(record_id)
+        return self._transition_from_prepared(
+            current,
             RecordStatus.PERSISTED,
-            attempt=current.attempt if current else 0,
-            input_data=current.input_data if current else None,
-            result=current.result if current else None,
+            commit_attempts=current.commit_attempts,
+            reconciliation_attempts=current.reconciliation_attempts,
             event_type="record_persisted",
+        )
+
+    def mark_unresolved(
+        self,
+        record_id: Any,
+        *,
+        error_code: str = "unresolved_write",
+    ) -> RecordCheckpoint:
+        current = self._require_prepared_checkpoint(record_id)
+        return self._transition_from_prepared(
+            current,
+            RecordStatus.UNRESOLVED_WRITE,
+            commit_attempts=current.commit_attempts,
+            reconciliation_attempts=current.reconciliation_attempts,
+            error={"code": error_code},
+            event_type="record_write_unresolved",
         )
 
     def mark_failed(
@@ -198,30 +245,60 @@ class JobRecordTracker:
         record_id: Any,
         *,
         error_code: str,
-        result: Mapping[str, Any] | None = None,
     ) -> RecordCheckpoint:
         current = self.get(record_id)
+        if current is not None and current.prepared_ref is not None:
+            return self._transition_from_prepared(
+                current,
+                RecordStatus.FAILED,
+                commit_attempts=current.commit_attempts,
+                reconciliation_attempts=current.reconciliation_attempts,
+                error={"code": error_code},
+                event_type="record_failed",
+            )
         return self._transition(
             record_id,
             RecordStatus.FAILED,
             attempt=current.attempt if current else 0,
             input_data=current.input_data if current else None,
-            result=(
-                dict(result)
-                if result is not None
-                else (current.result if current else None)
-            ),
             error={"code": error_code},
+            retry_counts=dict(current.retry_counts) if current else {},
             event_type="record_failed",
         )
 
-    def replayable_results(self) -> dict[Any, dict[str, Any]]:
-        return {
-            checkpoint.record_id: dict(checkpoint.result)
-            for checkpoint in self._records.values()
-            if checkpoint.status in {RecordStatus.AI_COMPLETE, RecordStatus.FAILED}
-            and checkpoint.result is not None
-        }
+    def pending_prepared_results(self) -> dict[Any, PreparedResult]:
+        """Load only checkpoint-referenced blobs; orphan blobs stay inert."""
+
+        prepared_results: dict[Any, PreparedResult] = {}
+        for checkpoint in self._records.values():
+            if checkpoint.status != RecordStatus.PENDING_COMMIT:
+                continue
+            if not (
+                checkpoint.prepared_ref
+                and checkpoint.prepared_hash
+                and checkpoint.commit_id
+            ):
+                raise JobRepositoryError(
+                    f"pending commit record lacks prepared reference: {checkpoint.record_id!r}"
+                )
+            payload = self.repository.load_prepared_result(
+                self.job_id,
+                checkpoint.prepared_ref,
+            )
+            try:
+                prepared = PreparedResult.from_dict(payload)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise JobRepositoryError(
+                    f"invalid prepared result blob: {checkpoint.prepared_ref}"
+                ) from exc
+            if self._key(prepared.record_id) != self._key(checkpoint.record_id):
+                raise JobRepositoryError("prepared result record_id mismatch")
+            if prepared.commit_id != checkpoint.commit_id:
+                raise JobRepositoryError("prepared result commit_id mismatch")
+            if prepared.payload_hash != checkpoint.prepared_hash:
+                raise JobRepositoryError("prepared result checkpoint hash mismatch")
+            prepared_results[checkpoint.record_id] = prepared
+        return prepared_results
 
     def counts(self, *, cancelled: int | None = None) -> JobCounts:
         records = tuple(self._records.values())
@@ -233,18 +310,53 @@ class JobRecordTracker:
             in_flight=sum(
                 record.status == RecordStatus.IN_FLIGHT for record in records
             ),
-            ai_complete=sum(
-                record.status in {RecordStatus.AI_COMPLETE, RecordStatus.PERSISTED}
-                for record in records
-            ),
+            ai_complete=sum(record.prepared_ref is not None for record in records),
             persisted=sum(
                 record.status == RecordStatus.PERSISTED for record in records
+            ),
+            unresolved_writes=sum(
+                record.status == RecordStatus.UNRESOLVED_WRITE for record in records
             ),
             failed=sum(record.status == RecordStatus.FAILED for record in records),
             cancelled=(
                 current_state.counts.cancelled if cancelled is None else cancelled
             ),
             retries=retries,
+        )
+
+    def _require_prepared_checkpoint(self, record_id: Any) -> RecordCheckpoint:
+        current = self.get(record_id)
+        if current is None or not (
+            current.prepared_ref and current.prepared_hash and current.commit_id
+        ):
+            raise JobRepositoryError(
+                f"record has no durable PreparedResult: {record_id!r}"
+            )
+        return current
+
+    def _transition_from_prepared(
+        self,
+        current: RecordCheckpoint,
+        status: RecordStatus,
+        *,
+        commit_attempts: int,
+        reconciliation_attempts: int,
+        event_type: str,
+        error: Mapping[str, Any] | None = None,
+    ) -> RecordCheckpoint:
+        return self._transition(
+            current.record_id,
+            status,
+            attempt=current.attempt,
+            input_data=current.input_data,
+            prepared_ref=current.prepared_ref,
+            prepared_hash=current.prepared_hash,
+            commit_id=current.commit_id,
+            commit_attempts=commit_attempts,
+            reconciliation_attempts=reconciliation_attempts,
+            error=error,
+            retry_counts=dict(current.retry_counts),
+            event_type=event_type,
         )
 
     def _transition(
@@ -254,23 +366,26 @@ class JobRecordTracker:
         *,
         attempt: int,
         input_data: Mapping[str, Any] | None = None,
-        result: Mapping[str, Any] | None = None,
+        prepared_ref: str | None = None,
+        prepared_hash: str | None = None,
+        commit_id: str | None = None,
+        commit_attempts: int = 0,
+        reconciliation_attempts: int = 0,
         error: Mapping[str, Any] | None = None,
         retry_counts: Mapping[str, int] | None = None,
         event_type: str,
     ) -> RecordCheckpoint:
-        current = self.get(record_id)
         checkpoint = RecordCheckpoint(
             record_id=record_id,
             status=status,
             attempt=attempt,
-            retry_counts=(
-                dict(retry_counts)
-                if retry_counts is not None
-                else (dict(current.retry_counts) if current else {})
-            ),
+            retry_counts=dict(retry_counts or {}),
             input_data=input_data,
-            result=result,
+            prepared_ref=prepared_ref,
+            prepared_hash=prepared_hash,
+            commit_id=commit_id,
+            commit_attempts=commit_attempts,
+            reconciliation_attempts=reconciliation_attempts,
             error=error,
         )
         key = self._key(record_id)
@@ -297,7 +412,11 @@ class JobRecordTracker:
             for key in sorted(self._records)
             if self._record_shards.get(key) == shard_id
         )
-        terminal = {RecordStatus.PERSISTED, RecordStatus.FAILED}
+        terminal = {
+            RecordStatus.PERSISTED,
+            RecordStatus.UNRESOLVED_WRITE,
+            RecordStatus.FAILED,
+        }
         status = (
             "completed"
             if records and all(record.status in terminal for record in records)
@@ -330,12 +449,12 @@ class JobRecordTracker:
             "in_flight": sum(
                 record.status == RecordStatus.IN_FLIGHT for record in records
             ),
-            "ai_complete": sum(
-                record.status in {RecordStatus.AI_COMPLETE, RecordStatus.PERSISTED}
-                for record in records
-            ),
+            "ai_complete": sum(record.prepared_ref is not None for record in records),
             "persisted": sum(
                 record.status == RecordStatus.PERSISTED for record in records
+            ),
+            "unresolved_writes": sum(
+                record.status == RecordStatus.UNRESOLVED_WRITE for record in records
             ),
             "failed": sum(record.status == RecordStatus.FAILED for record in records),
             "retries": sum(sum(record.retry_counts.values()) for record in records),

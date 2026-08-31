@@ -191,8 +191,18 @@ class FileJobRepository:
     def shards_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "shards"
 
+    def prepared_dir(self, job_id: str) -> Path:
+        return self.job_dir(job_id) / "prepared"
+
     def commands_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "commands"
+
+    def prepared_result_path(self, job_id: str, commit_id: str) -> Path:
+        if len(commit_id) != 32 or any(
+            character not in "0123456789abcdef" for character in commit_id
+        ):
+            raise ValueError("commit_id must be a lowercase UUID hex value")
+        return self.prepared_dir(job_id) / f"{commit_id}.json"
 
     @staticmethod
     def _validate_job_id(job_id: str) -> None:
@@ -252,6 +262,7 @@ class FileJobRepository:
 
         try:
             self.shards_dir(request.job_id).mkdir()
+            self.prepared_dir(request.job_id).mkdir()
             self.commands_dir(request.job_id).mkdir()
             atomic_write_json(self.request_path(request.job_id), request.to_dict())
             state = JobState.initial(request)
@@ -471,6 +482,57 @@ class FileJobRepository:
             self.shards_dir(shard.job_id) / f"{shard.shard_id}.json",
             shard.to_dict(),
         )
+
+    def save_prepared_result(
+        self,
+        job_id: str,
+        commit_id: str,
+        payload: Mapping[str, Any],
+    ) -> str:
+        """Atomically persist one immutable PreparedResult blob."""
+
+        self._require_job(job_id)
+        if payload.get("commit_id") != commit_id:
+            raise ValueError("prepared result commit_id does not match blob path")
+        path = self.prepared_result_path(job_id, commit_id)
+        reference = f"prepared/{commit_id}.json"
+        with _exclusive_file_lock(self._job_lock(job_id)):
+            if path.exists() or path.is_symlink():
+                if path.is_symlink() or not path.is_file():
+                    raise ImmutableRecordError(
+                        f"invalid prepared result blob: {commit_id}"
+                    )
+                if read_json(path) != dict(payload):
+                    raise ImmutableRecordError(
+                        f"prepared result commit_id collision: {commit_id}"
+                    )
+                return reference
+            atomic_write_json(path, dict(payload))
+        return reference
+
+    def load_prepared_result(
+        self,
+        job_id: str,
+        reference: str,
+    ) -> dict[str, Any]:
+        """Load one checkpoint-referenced blob without following arbitrary paths."""
+
+        self._require_job(job_id)
+        candidate = Path(reference)
+        if (
+            candidate.is_absolute()
+            or candidate.parts[:1] != ("prepared",)
+            or len(candidate.parts) != 2
+            or candidate.suffix != ".json"
+        ):
+            raise JobRepositoryError(
+                f"invalid prepared result reference: {reference!r}"
+            )
+        commit_id = candidate.stem
+        path = self.prepared_result_path(job_id, commit_id)
+        if path.is_symlink() or not path.is_file():
+            raise JobRepositoryError(f"prepared result blob is missing: {reference!r}")
+        return read_json(path)
 
     def get_shard(self, job_id: str, shard_id: str) -> ShardState:
         self._require_job(job_id)

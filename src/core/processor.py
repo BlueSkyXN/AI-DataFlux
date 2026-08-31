@@ -142,7 +142,12 @@ from ..config.settings import (
     load_routing_profile,
 )
 from ..models.errors import ErrorType
-from ..data import create_task_pool
+from ..data import (
+    CommitDisposition,
+    WritebackContractError,
+    create_task_pool,
+    validate_writeback_receipt,
+)
 from .scheduler import ShardedTaskManager
 from .validator import JsonValidator
 
@@ -155,6 +160,7 @@ from .contracts import (
     SourceOperationError,
     TaskFailure,
     TaskSuccess,
+    WritebackOutcome,
 )
 from .state import TaskStateManager
 from .retry import RetryAction, RetryDecision, RetryStrategy
@@ -243,7 +249,16 @@ class UniversalAIProcessor:
         )
         retry_cfg = self.config.get("retry", {})
         writeback_cfg = self.config.get("writeback", {})
-        self.write_retry_limit = int(writeback_cfg.get("commit_max_attempts", 3)) - 1
+        self.commit_max_attempts = int(writeback_cfg.get("commit_max_attempts", 3))
+        self.reconciliation_max_attempts = int(
+            writeback_cfg.get("reconciliation_max_attempts", 3)
+        )
+        self.writeback_backoff_initial_seconds = float(
+            writeback_cfg.get("backoff_initial_seconds", 1)
+        )
+        self.writeback_backoff_max_seconds = float(
+            writeback_cfg.get("backoff_max_seconds", 30)
+        )
         self._job_cancel_event: asyncio.Event | None = None
         self._target_concurrency_provider: Callable[[], int] | None = None
         self._job_tracker: Any | None = None
@@ -402,6 +417,7 @@ class UniversalAIProcessor:
                 "active": self.state_manager.get_active_count(),
                 "shard": f"{current_shard}/{self.task_manager.total_shards}",
                 "errors": self.task_manager.max_retries_exceeded_count,
+                "unresolved_writes": self.task_manager.unresolved_writes_count,
                 "ts": time.time(),
             }
 
@@ -757,8 +773,7 @@ class UniversalAIProcessor:
         retry_queue: deque[Tuple[Any, Dict[str, Any]]] = deque()
         scan_cursor: Any | None = None
         scan_exhausted = False
-        results_buffer: Dict[Any, Dict[str, Any]] = {}
-        successful_result_ids: set[Any] = set()
+        results_buffer: dict[Any, PreparedResult] = {}
 
         last_progress_time = time.time()
 
@@ -1012,12 +1027,8 @@ class UniversalAIProcessor:
                                 "TaskSuccess record_id does not match scheduled record"
                             )
                         if self._job_tracker is not None:
-                            self._job_tracker.mark_ai_complete(
-                                record_id,
-                                prepared.values,
-                            )
-                        results_buffer[record_id] = prepared.values
-                        successful_result_ids.add(record_id)
+                            self._job_tracker.mark_prepared(prepared)
+                        results_buffer[record_id] = prepared
                     else:
                         raise TypeError(
                             "_process_one_record must return TaskSuccess or TaskFailure"
@@ -1042,33 +1053,25 @@ class UniversalAIProcessor:
 
             # 6. 批量回写结果
             if results_buffer:
-                persisted_ids = await self._persist_results_with_retry(results_buffer)
-                for record_id in persisted_ids:
-                    if record_id in successful_result_ids:
-                        self.task_manager.total_processed_successfully += 1
-                        if self._job_tracker is not None:
-                            self._job_tracker.mark_persisted(record_id)
+                outcome = await self._commit_prepared_results(results_buffer)
+                for record_id in outcome.committed:
+                    self.task_manager.total_processed_successfully += 1
                     self.state_manager.remove_metadata(record_id)
-                failed_write_ids = set(results_buffer) - persisted_ids
-                for record_id in failed_write_ids:
+                for record_id in outcome.failed:
                     logging.error(
                         "记录[%s] AI 处理完成但结果未持久化，不能计为成功",
                         record_id,
                     )
                     self.task_manager.max_retries_exceeded_count += 1
-                    if self._job_tracker is not None:
-                        self._job_tracker.mark_failed(
-                            record_id,
-                            error_code="writeback_failed",
-                            result=(
-                                results_buffer[record_id]
-                                if record_id in successful_result_ids
-                                else None
-                            ),
-                        )
+                    self.state_manager.remove_metadata(record_id)
+                for record_id in outcome.unresolved:
+                    logging.error(
+                        "记录[%s] 写回结果无法确认，已停止盲目重试",
+                        record_id,
+                    )
+                    self.task_manager.unresolved_writes_count += 1
                     self.state_manager.remove_metadata(record_id)
                 results_buffer.clear()
-                successful_result_ids.clear()
 
             # 7. 监控与日志
             current_time = time.time()
@@ -1085,84 +1088,276 @@ class UniversalAIProcessor:
                 # 写入进度文件 (GUI 控制面板读取)
                 self._write_progress()
 
-    async def _persist_results_with_retry(
-        self, results: dict[Any, dict[str, Any]]
-    ) -> set[Any]:
-        """Persist result batches and only acknowledge datasource receipts."""
+    @staticmethod
+    def _record_identity(record_id: Any) -> str:
+        return json.dumps(
+            record_id,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
-        pending = dict(results)
-        persisted: set[Any] = set()
-        attempts = self.write_retry_limit + 1
+    async def _writeback_backoff(self, attempts_used: int) -> None:
+        delay = min(
+            self.writeback_backoff_max_seconds,
+            self.writeback_backoff_initial_seconds * (2 ** max(0, attempts_used - 1)),
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
 
-        for attempt in range(attempts):
-            if not pending:
-                break
-            batch_id = uuid.uuid4().hex
-            try:
-                receipt = await self.task_pool.write_results(batch_id, pending)
-                pending_ids = set(pending)
-                acknowledged = set(receipt.persisted_ids)
-                receipt_failure_ids = {
-                    failure.record_id for failure in receipt.failures
-                }
-                unknown_ids = (acknowledged | receipt_failure_ids) - pending_ids
-                conflicting_ids = acknowledged & receipt_failure_ids
-                if unknown_ids or conflicting_ids:
-                    raise ValueError(
-                        "invalid writeback receipt: "
-                        f"unknown_ids={sorted(map(str, unknown_ids))}, "
-                        f"conflicting_ids={sorted(map(str, conflicting_ids))}"
-                    )
-                persisted.update(acknowledged)
-                retryable_failed_ids = {
-                    failure.record_id
-                    for failure in receipt.failures
-                    if failure.retryable and failure.record_id not in acknowledged
-                }
-                permanent_failed_ids = {
-                    failure.record_id
-                    for failure in receipt.failures
-                    if not failure.retryable and failure.record_id not in acknowledged
-                }
-                failed_ids = retryable_failed_ids | permanent_failed_ids
-                unacknowledged = set(pending) - acknowledged - failed_ids
-                retry_ids = retryable_failed_ids | unacknowledged
-                pending = {
-                    record_id: value
-                    for record_id, value in pending.items()
-                    if record_id in retry_ids
-                }
-            except Exception as exc:
-                logging.error(
-                    "结果写回批次 %s 失败 (%s/%s): %s",
-                    batch_id,
-                    attempt + 1,
-                    attempts,
-                    exc,
-                    exc_info=True,
-                )
+    async def _commit_prepared_results(
+        self,
+        prepared_results: dict[Any, PreparedResult],
+        *,
+        reconcile_first: bool = False,
+    ) -> WritebackOutcome:
+        """Commit immutable PreparedResults without re-entering model execution."""
 
-            if pending and attempt + 1 < attempts:
-                await asyncio.sleep(min(2**attempt, 5))
+        prepared = dict(prepared_results)
+        for record_id, item in prepared.items():
+            item.validate()
+            if self._record_identity(record_id) != self._record_identity(
+                item.record_id
+            ):
+                raise ValueError("PreparedResult record_id does not match batch key")
 
-        return persisted
+        committed: set[Any] = set()
+        failed: set[Any] = set()
+        unresolved: set[Any] = set()
+        commit_queue = {} if reconcile_first else dict(prepared)
+        reconcile_queue = dict(prepared) if reconcile_first else {}
+        commit_attempts = {
+            record_id: (
+                self._job_tracker.commit_attempts_for(record_id)
+                if self._job_tracker is not None
+                else 0
+            )
+            for record_id in prepared
+        }
+        reconciliation_attempts = {
+            record_id: (
+                self._job_tracker.reconciliation_attempts_for(record_id)
+                if self._job_tracker is not None
+                else 0
+            )
+            for record_id in prepared
+        }
+        commit_needs_backoff = False
+        reconciliation_needs_backoff = False
 
-    async def persist_checkpoint_results(
-        self, results: dict[Any, dict[str, Any]]
-    ) -> set[Any]:
-        """Replay AI-complete outputs before datasource scanning resumes."""
-
-        persisted = await self._persist_results_with_retry(results)
-        if self._job_tracker is not None:
-            for record_id in persisted:
+        def finish_committed(record_id: Any) -> None:
+            committed.add(record_id)
+            commit_queue.pop(record_id, None)
+            reconcile_queue.pop(record_id, None)
+            if self._job_tracker is not None:
                 self._job_tracker.mark_persisted(record_id)
-            for record_id in set(results) - persisted:
-                self._job_tracker.mark_failed(
-                    record_id,
-                    error_code="checkpoint_writeback_failed",
-                    result=results[record_id],
-                )
-        return persisted
+
+        def finish_failed(record_id: Any, code: str) -> None:
+            failed.add(record_id)
+            commit_queue.pop(record_id, None)
+            reconcile_queue.pop(record_id, None)
+            if self._job_tracker is not None:
+                self._job_tracker.mark_failed(record_id, error_code=code)
+
+        def finish_unresolved(record_id: Any, code: str) -> None:
+            unresolved.add(record_id)
+            commit_queue.pop(record_id, None)
+            reconcile_queue.pop(record_id, None)
+            if self._job_tracker is not None:
+                self._job_tracker.mark_unresolved(record_id, error_code=code)
+
+        while commit_queue or reconcile_queue:
+            if commit_queue:
+                exhausted = [
+                    record_id
+                    for record_id in commit_queue
+                    if commit_attempts[record_id] >= self.commit_max_attempts
+                ]
+                for record_id in exhausted:
+                    finish_failed(record_id, "commit_attempts_exhausted")
+
+                if commit_queue:
+                    if commit_needs_backoff:
+                        await self._writeback_backoff(
+                            max(
+                                commit_attempts[record_id] for record_id in commit_queue
+                            )
+                        )
+                    batch = dict(commit_queue)
+                    commit_queue.clear()
+                    for record_id in batch:
+                        commit_attempts[record_id] += 1
+                        if self._job_tracker is not None:
+                            self._job_tracker.mark_commit_attempt(record_id)
+                    batch_id = uuid.uuid4().hex
+                    values = {
+                        record_id: item.values for record_id, item in batch.items()
+                    }
+                    try:
+                        receipt = await self.task_pool.write_results(batch_id, values)
+                        validate_writeback_receipt(
+                            receipt,
+                            batch_id=batch_id,
+                            submitted_ids=batch,
+                        )
+                    except WritebackContractError:
+                        raise
+                    except Exception as exc:
+                        logging.error(
+                            "写回批次 %s 未返回可信 receipt，转入 reconciliation: %s",
+                            batch_id,
+                            exc,
+                            exc_info=True,
+                        )
+                        reconcile_queue.update(batch)
+                    else:
+                        items = {
+                            self._record_identity(item.record_id): item
+                            for item in receipt.items
+                        }
+                        for record_id, prepared_item in batch.items():
+                            receipt_item = items[self._record_identity(record_id)]
+                            if receipt_item.disposition == CommitDisposition.COMMITTED:
+                                finish_committed(record_id)
+                            elif (
+                                receipt_item.disposition
+                                == CommitDisposition.INDETERMINATE
+                            ):
+                                reconcile_queue[record_id] = prepared_item
+                            elif (
+                                receipt_item.disposition
+                                == CommitDisposition.NOT_ATTEMPTED
+                            ):
+                                if (
+                                    commit_attempts[record_id]
+                                    < self.commit_max_attempts
+                                ):
+                                    commit_queue[record_id] = prepared_item
+                                else:
+                                    finish_failed(
+                                        record_id,
+                                        receipt_item.code
+                                        or "commit_not_attempted_exhausted",
+                                    )
+                            elif receipt_item.retryable and (
+                                commit_attempts[record_id] < self.commit_max_attempts
+                            ):
+                                commit_queue[record_id] = prepared_item
+                            else:
+                                finish_failed(
+                                    record_id,
+                                    receipt_item.code or "writeback_rejected",
+                                )
+                    commit_needs_backoff = bool(commit_queue)
+
+            if reconcile_queue:
+                exhausted = [
+                    record_id
+                    for record_id in reconcile_queue
+                    if reconciliation_attempts[record_id]
+                    >= self.reconciliation_max_attempts
+                ]
+                for record_id in exhausted:
+                    finish_unresolved(record_id, "reconciliation_attempts_exhausted")
+
+                if reconcile_queue:
+                    if reconciliation_needs_backoff:
+                        await self._writeback_backoff(
+                            max(
+                                reconciliation_attempts[record_id]
+                                for record_id in reconcile_queue
+                            )
+                        )
+                    batch = dict(reconcile_queue)
+                    reconcile_queue.clear()
+                    for record_id in batch:
+                        reconciliation_attempts[record_id] += 1
+                        if self._job_tracker is not None:
+                            self._job_tracker.mark_reconciliation_attempt(record_id)
+                    batch_id = uuid.uuid4().hex
+                    values = {
+                        record_id: item.values for record_id, item in batch.items()
+                    }
+                    try:
+                        receipt = await self.task_pool.reconcile_results(
+                            batch_id,
+                            values,
+                        )
+                        validate_writeback_receipt(
+                            receipt,
+                            batch_id=batch_id,
+                            submitted_ids=batch,
+                        )
+                    except WritebackContractError:
+                        raise
+                    except Exception as exc:
+                        logging.error(
+                            "reconciliation 批次 %s 失败: %s",
+                            batch_id,
+                            exc,
+                            exc_info=True,
+                        )
+                        for record_id, prepared_item in batch.items():
+                            if (
+                                reconciliation_attempts[record_id]
+                                < self.reconciliation_max_attempts
+                            ):
+                                reconcile_queue[record_id] = prepared_item
+                            else:
+                                finish_unresolved(
+                                    record_id,
+                                    "reconciliation_failed",
+                                )
+                    else:
+                        items = {
+                            self._record_identity(item.record_id): item
+                            for item in receipt.items
+                        }
+                        for record_id, prepared_item in batch.items():
+                            receipt_item = items[self._record_identity(record_id)]
+                            if receipt_item.disposition == CommitDisposition.COMMITTED:
+                                finish_committed(record_id)
+                            elif (
+                                receipt_item.disposition == CommitDisposition.REJECTED
+                                and receipt_item.retryable
+                                and commit_attempts[record_id]
+                                < self.commit_max_attempts
+                            ):
+                                commit_queue[record_id] = prepared_item
+                                commit_needs_backoff = commit_attempts[record_id] > 0
+                            elif receipt_item.disposition == CommitDisposition.REJECTED:
+                                finish_failed(
+                                    record_id,
+                                    receipt_item.code or "reconciliation_rejected",
+                                )
+                            elif (
+                                reconciliation_attempts[record_id]
+                                < self.reconciliation_max_attempts
+                            ):
+                                reconcile_queue[record_id] = prepared_item
+                            else:
+                                finish_unresolved(
+                                    record_id,
+                                    receipt_item.code or "unresolved_write",
+                                )
+                    reconciliation_needs_backoff = bool(reconcile_queue)
+
+        return WritebackOutcome(
+            committed=frozenset(committed),
+            failed=frozenset(failed),
+            unresolved=frozenset(unresolved),
+        )
+
+    async def reconcile_checkpoint_results(
+        self,
+        prepared_results: dict[Any, PreparedResult],
+    ) -> WritebackOutcome:
+        """Reconcile durable pending commits before any model work resumes."""
+
+        return await self._commit_prepared_results(
+            prepared_results,
+            reconcile_first=True,
+        )
 
     async def _process_one_record(
         self, session: aiohttp.ClientSession, record_id: Any, row_data: Dict[str, Any]

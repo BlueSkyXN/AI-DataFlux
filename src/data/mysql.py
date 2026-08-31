@@ -153,14 +153,15 @@ SQL 查询示例:
 import asyncio
 import logging
 import threading
-import uuid
 from typing import Any
 
 from .base import BaseTaskPool
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
+    WritebackItem,
     WritebackReceipt,
 )
 
@@ -783,7 +784,9 @@ class MySQLTaskPool(BaseTaskPool):
         )
 
     def update_task_results(
-        self, results: dict[Any, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果到数据库
@@ -804,7 +807,7 @@ class MySQLTaskPool(BaseTaskPool):
             UPDATE table SET out1 = %s, out2 = %s WHERE id = %s
         """
         if not results:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
 
         # 准备更新数据
         updates_data: list[tuple[Any, dict[str, Any]]] = []
@@ -823,7 +826,14 @@ class MySQLTaskPool(BaseTaskPool):
 
         if not updates_data:
             logging.info("没有成功的记录需要更新到数据库")
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
+            return WritebackReceipt.rejected(
+                batch_id,
+                results,
+                code="no_writable_fields",
+                message="结果不包含可写字段",
+                retryable=False,
+                atomic=True,
+            )
 
         logging.info(f"准备将 {len(updates_data)} 条记录的结果更新回数据库...")
 
@@ -854,7 +864,26 @@ class MySQLTaskPool(BaseTaskPool):
             return persisted_ids
 
         persisted_ids = self.execute_with_connection(_perform_updates, is_write=True)
-        return WritebackReceipt.persisted(uuid.uuid4().hex, persisted_ids, atomic=True)
+        persisted = set(persisted_ids)
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(
+                WritebackItem(
+                    record_id,
+                    (
+                        CommitDisposition.COMMITTED
+                        if record_id in persisted
+                        else CommitDisposition.REJECTED
+                    ),
+                    "" if record_id in persisted else "no_writable_fields",
+                    "" if record_id in persisted else "结果不包含可写字段",
+                    False,
+                )
+                for record_id in results
+            ),
+            atomic=True,
+        )
 
     def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """

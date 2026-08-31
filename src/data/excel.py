@@ -149,9 +149,10 @@ from typing import Any, cast
 from .base import BaseTaskPool
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
-    WriteFailure,
+    WritebackItem,
     WritebackReceipt,
 )
 from .engines import (
@@ -596,16 +597,17 @@ class ExcelTaskPool(BaseTaskPool):
         return await asyncio.to_thread(read_page)
 
     def update_task_results(
-        self, results: dict[int, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
     ) -> WritebackReceipt:
         """Update rows and acknowledge them only after an atomic file replace."""
 
-        batch_id = uuid.uuid4().hex
         if not results:
-            return WritebackReceipt(batch_id=batch_id)
+            return WritebackReceipt.committed(batch_id, (), atomic=False)
 
         updated_indices: list[int] = []
-        failures: list[WriteFailure] = []
+        failures: dict[int, WritebackItem] = {}
         original_df = self.engine.copy(self.df)
 
         try:
@@ -613,15 +615,21 @@ class ExcelTaskPool(BaseTaskPool):
                 all_indices = set(self.engine.get_indices(self.df))
                 for idx, row_result in results.items():
                     if "_error" in row_result:
+                        failures[idx] = WritebackItem(
+                            idx,
+                            CommitDisposition.REJECTED,
+                            "invalid_result",
+                            "结果包含 _error",
+                            False,
+                        )
                         continue
                     if idx not in all_indices:
-                        failures.append(
-                            WriteFailure(
-                                record_id=idx,
-                                code="record_not_found",
-                                message=f"索引 {idx} 不存在",
-                                retryable=False,
-                            )
+                        failures[idx] = WritebackItem(
+                            record_id=idx,
+                            disposition=CommitDisposition.REJECTED,
+                            code="record_not_found",
+                            message=f"索引 {idx} 不存在",
+                            retryable=False,
                         )
                         continue
 
@@ -631,13 +639,12 @@ class ExcelTaskPool(BaseTaskPool):
                         if alias in row_result
                     ]
                     if not writable_fields:
-                        failures.append(
-                            WriteFailure(
-                                record_id=idx,
-                                code="no_writable_fields",
-                                message="AI 结果不包含任何 columns_to_write alias",
-                                retryable=False,
-                            )
+                        failures[idx] = WritebackItem(
+                            record_id=idx,
+                            disposition=CommitDisposition.REJECTED,
+                            code="no_writable_fields",
+                            message="AI 结果不包含任何 columns_to_write alias",
+                            retryable=False,
                         )
                         continue
 
@@ -647,13 +654,12 @@ class ExcelTaskPool(BaseTaskPool):
                     for alias, col_name in writable_fields:
                         if not self.engine.has_column(self.df, col_name):
                             record_failed = True
-                            failures.append(
-                                WriteFailure(
-                                    record_id=idx,
-                                    code="column_not_found",
-                                    message=f"输出列 {col_name} 不存在",
-                                    retryable=False,
-                                )
+                            failures[idx] = WritebackItem(
+                                record_id=idx,
+                                disposition=CommitDisposition.REJECTED,
+                                code="column_not_found",
+                                message=f"输出列 {col_name} 不存在",
+                                retryable=False,
                             )
                             break
                         try:
@@ -663,12 +669,12 @@ class ExcelTaskPool(BaseTaskPool):
                             applied_columns.append(col_name)
                         except Exception as exc:
                             record_failed = True
-                            failures.append(
-                                WriteFailure(
-                                    record_id=idx,
-                                    code="set_value_failed",
-                                    message=f"列 {col_name}: {exc}",
-                                )
+                            failures[idx] = WritebackItem(
+                                record_id=idx,
+                                disposition=CommitDisposition.REJECTED,
+                                code="set_value_failed",
+                                message=f"列 {col_name}: {exc}",
+                                retryable=True,
                             )
                             break
                     if record_failed:
@@ -695,8 +701,15 @@ class ExcelTaskPool(BaseTaskPool):
 
         return WritebackReceipt(
             batch_id=batch_id,
-            persisted_ids=tuple(updated_indices),
-            failures=tuple(failures),
+            submitted_ids=tuple(results),
+            items=tuple(
+                (
+                    WritebackItem(idx, CommitDisposition.COMMITTED)
+                    if idx in updated_indices
+                    else failures[idx]
+                )
+                for idx in results
+            ),
             atomic=False,
         )
 

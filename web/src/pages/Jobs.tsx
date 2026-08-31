@@ -268,10 +268,11 @@ function JobCard({ job, selected, busy, zh, onSelect, onCancel, onResume }: JobC
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-gray-100">
         <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all" style={{ width: `${progress}%` }} />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-5">
+      <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-6">
         <Metric label={zh ? '发现' : 'Discovered'} value={job.counts.discovered} />
         <Metric label="AI complete" value={job.counts.ai_complete} />
         <Metric label={zh ? '持久化' : 'Persisted'} value={job.counts.persisted} />
+        <Metric label={zh ? '未决写回' : 'Unresolved'} value={job.counts.unresolved_writes} danger />
         <Metric label={zh ? '失败' : 'Failed'} value={job.counts.failed} danger />
         <Metric label="max_in_flight" value={job.resource.effective_max_in_flight} />
       </div>
@@ -297,7 +298,7 @@ function Metric({ label, value, danger = false }: { label: string; value: number
 
 function StatusBadge({ status, dark = false }: { status: string; dark?: boolean }) {
   const active = ['queued', 'running', 'cancelling'].includes(status);
-  const attention = ['failed', 'blocked', 'interrupted'].includes(status);
+  const attention = ['failed', 'blocked', 'interrupted', 'completed_with_unresolved_writes'].includes(status);
   const colors = dark
     ? 'bg-slate-800 text-slate-200'
     : active

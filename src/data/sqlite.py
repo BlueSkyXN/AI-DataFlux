@@ -153,15 +153,16 @@ import logging
 import re
 import sqlite3
 import threading
-import uuid
 from pathlib import Path
 from typing import Any
 
 from .base import BaseTaskPool
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
+    WritebackItem,
     WritebackReceipt,
 )
 
@@ -639,7 +640,9 @@ class SQLiteTaskPool(BaseTaskPool):
         return await asyncio.to_thread(read_page)
 
     def update_task_results(
-        self, results: dict[Any, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果到数据库
@@ -656,7 +659,7 @@ class SQLiteTaskPool(BaseTaskPool):
             - ROLLBACK: 发生错误时回滚
         """
         if not results:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
 
         conn = SQLiteConnectionManager.get_connection()
         cursor = conn.cursor()
@@ -690,7 +693,26 @@ class SQLiteTaskPool(BaseTaskPool):
         finally:
             cursor.close()
 
-        return WritebackReceipt.persisted(uuid.uuid4().hex, persisted_ids, atomic=True)
+        persisted = set(persisted_ids)
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(
+                WritebackItem(
+                    record_id,
+                    (
+                        CommitDisposition.COMMITTED
+                        if record_id in persisted
+                        else CommitDisposition.REJECTED
+                    ),
+                    "" if record_id in persisted else "no_writable_fields",
+                    "" if record_id in persisted else "结果不包含可写字段",
+                    False,
+                )
+                for record_id in results
+            ),
+            atomic=True,
+        )
 
     def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """

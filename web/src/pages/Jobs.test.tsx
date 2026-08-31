@@ -25,6 +25,7 @@ function job(overrides: Partial<JobState> = {}): JobState {
       in_flight: 0,
       ai_complete: 11,
       persisted: 10,
+      unresolved_writes: 0,
       failed: 2,
       cancelled: 0,
       retries: 1,

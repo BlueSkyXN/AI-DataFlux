@@ -101,15 +101,16 @@ import asyncio
 import logging
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import replace
 from typing import Any
 
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
-    WriteFailure,
+    WritebackItem,
     WritebackReceipt,
+    validate_writeback_receipt,
 )
 
 
@@ -227,7 +228,9 @@ class BaseTaskPool(ABC):
 
     @abstractmethod
     def update_task_results(
-        self, results: dict[Any, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果
@@ -237,6 +240,7 @@ class BaseTaskPool(ABC):
         对于数据库，通常立即提交事务。
 
         Args:
+            batch_id: 调用方生成的批次标识，receipt 必须原样返回
             results: 结果字典 {task_id: {field: value, ...}, ...}
                     field 是 columns_to_write 中的别名
         """
@@ -340,7 +344,7 @@ class BaseTaskPool(ABC):
         with self.lock:
             self.tasks.clear()
 
-    # ==================== v3.2 async adapter contract ====================
+    # ==================== v4 async adapter contract ====================
 
     @property
     def capabilities(self) -> AdapterCapabilities:
@@ -399,13 +403,58 @@ class BaseTaskPool(ABC):
     ) -> WritebackReceipt:
         """Write results and require the adapter's durable receipt."""
 
-        receipt = await asyncio.to_thread(self.update_task_results, results)
-        if not isinstance(receipt, WritebackReceipt):
-            raise TypeError(
-                f"{type(self).__name__}.update_task_results() must return "
-                "WritebackReceipt"
-            )
-        return replace(receipt, batch_id=batch_id)
+        receipt = await asyncio.to_thread(
+            self.update_task_results,
+            batch_id,
+            results,
+        )
+        return validate_writeback_receipt(
+            receipt,
+            batch_id=batch_id,
+            submitted_ids=results,
+        )
+
+    def reconcile_task_results(
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """Read back expected values; adapters override when they can prove state."""
+
+        submitted_ids = tuple(results)
+        return WritebackReceipt(
+            batch_id=batch_id,
+            submitted_ids=submitted_ids,
+            items=tuple(
+                WritebackItem(
+                    record_id,
+                    CommitDisposition.INDETERMINATE,
+                    "reconciliation_not_supported",
+                    f"{type(self).__name__} does not implement reconciliation",
+                    False,
+                )
+                for record_id in submitted_ids
+            ),
+            atomic=False,
+        )
+
+    async def reconcile_results(
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
+    ) -> WritebackReceipt:
+        """Return a complete readback receipt for previously uncertain writes."""
+
+        receipt = await asyncio.to_thread(
+            self.reconcile_task_results,
+            batch_id,
+            results,
+        )
+        return validate_writeback_receipt(
+            receipt,
+            batch_id=batch_id,
+            submitted_ids=results,
+        )
 
     async def sample(
         self,
@@ -453,16 +502,19 @@ class BaseTaskPool(ABC):
     ) -> WritebackReceipt:
         """Build a uniform receipt for an adapter-level write failure."""
 
+        submitted_ids = tuple(results)
         return WritebackReceipt(
             batch_id=batch_id,
-            failures=tuple(
-                WriteFailure(
+            submitted_ids=submitted_ids,
+            items=tuple(
+                WritebackItem(
                     record_id=record_id,
+                    disposition=CommitDisposition.REJECTED,
                     code=type(exc).__name__,
                     message=str(exc),
                     retryable=retryable,
                 )
-                for record_id in results
+                for record_id in submitted_ids
             ),
             atomic=False,
         )

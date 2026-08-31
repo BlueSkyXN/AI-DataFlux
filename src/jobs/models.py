@@ -13,6 +13,8 @@ import time
 from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
+SHARD_SCHEMA_VERSION = 2
+RECORD_SCHEMA_VERSION = 2
 
 
 class JobStatus(str, Enum):
@@ -25,6 +27,7 @@ class JobStatus(str, Enum):
     BLOCKED = "blocked"
     COMPLETED = "completed"
     COMPLETED_WITH_ERRORS = "completed_with_errors"
+    COMPLETED_WITH_UNRESOLVED_WRITES = "completed_with_unresolved_writes"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -34,8 +37,9 @@ class RecordStatus(str, Enum):
 
     PENDING = "pending"
     IN_FLIGHT = "in_flight"
-    AI_COMPLETE = "ai_complete"
+    PENDING_COMMIT = "pending_commit"
     PERSISTED = "persisted"
+    UNRESOLVED_WRITE = "unresolved_write"
     FAILED = "failed"
 
 
@@ -43,6 +47,7 @@ TERMINAL_JOB_STATUSES = frozenset(
     {
         JobStatus.COMPLETED,
         JobStatus.COMPLETED_WITH_ERRORS,
+        JobStatus.COMPLETED_WITH_UNRESOLVED_WRITES,
         JobStatus.FAILED,
         JobStatus.CANCELLED,
     }
@@ -96,6 +101,7 @@ class JobCounts:
     in_flight: int = 0
     ai_complete: int = 0
     persisted: int = 0
+    unresolved_writes: int = 0
     failed: int = 0
     cancelled: int = 0
     retries: int = 0
@@ -112,6 +118,7 @@ class JobCounts:
             in_flight=int(raw.get("in_flight", 0)),
             ai_complete=int(raw.get("ai_complete", 0)),
             persisted=int(raw.get("persisted", 0)),
+            unresolved_writes=int(raw.get("unresolved_writes", 0)),
             failed=int(raw.get("failed", 0)),
             cancelled=int(raw.get("cancelled", 0)),
             retries=int(raw.get("retries", 0)),
@@ -340,9 +347,14 @@ class RecordCheckpoint:
     attempt: int = 0
     retry_counts: Mapping[str, int] = field(default_factory=dict)
     input_data: Mapping[str, Any] | None = None
-    result: Mapping[str, Any] | None = None
+    prepared_ref: str | None = None
+    prepared_hash: str | None = None
+    commit_id: str | None = None
+    commit_attempts: int = 0
+    reconciliation_attempts: int = 0
     error: Mapping[str, Any] | None = None
     updated_at: float = field(default_factory=utc_timestamp)
+    schema_version: int = RECORD_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -351,7 +363,13 @@ class RecordCheckpoint:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RecordCheckpoint":
+        version = data.get("schema_version")
+        if type(version) is not int or version != RECORD_SCHEMA_VERSION:
+            raise ValueError(
+                f"record checkpoint schema_version must be {RECORD_SCHEMA_VERSION}"
+            )
         return cls(
+            schema_version=version,
             record_id=data.get("record_id"),
             status=RecordStatus(str(data["status"])),
             attempt=int(data.get("attempt", 0)),
@@ -364,11 +382,21 @@ class RecordCheckpoint:
                 if isinstance(data.get("input_data"), Mapping)
                 else None
             ),
-            result=(
-                dict(data["result"])
-                if isinstance(data.get("result"), Mapping)
+            prepared_ref=(
+                str(data["prepared_ref"])
+                if data.get("prepared_ref") is not None
                 else None
             ),
+            prepared_hash=(
+                str(data["prepared_hash"])
+                if data.get("prepared_hash") is not None
+                else None
+            ),
+            commit_id=(
+                str(data["commit_id"]) if data.get("commit_id") is not None else None
+            ),
+            commit_attempts=int(data.get("commit_attempts", 0)),
+            reconciliation_attempts=int(data.get("reconciliation_attempts", 0)),
             error=(
                 dict(data["error"]) if isinstance(data.get("error"), Mapping) else None
             ),
@@ -387,7 +415,7 @@ class ShardState:
     cursor: Any | None = None
     counts: Mapping[str, int] = field(default_factory=dict)
     records: tuple[RecordCheckpoint, ...] = ()
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = SHARD_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -396,8 +424,11 @@ class ShardState:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ShardState":
+        version = data.get("schema_version")
+        if type(version) is not int or version != SHARD_SCHEMA_VERSION:
+            raise ValueError(f"shard schema_version must be {SHARD_SCHEMA_VERSION}")
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=version,
             shard_id=str(data["shard_id"]),
             job_id=str(data["job_id"]),
             status=str(data["status"]),

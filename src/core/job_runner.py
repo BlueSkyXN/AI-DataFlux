@@ -18,6 +18,26 @@ from .processor import UniversalAIProcessor
 from .job_tracker import JobRecordTracker
 
 
+def resolve_terminal_status(
+    *,
+    cancelled: bool,
+    job_failed: bool,
+    unresolved_writes: int,
+    failed_records: int,
+) -> JobStatus:
+    """Apply the v4 terminal-state priority without conflating record failures."""
+
+    if cancelled:
+        return JobStatus.CANCELLED
+    if job_failed:
+        return JobStatus.FAILED
+    if unresolved_writes:
+        return JobStatus.COMPLETED_WITH_UNRESOLVED_WRITES
+    if failed_records:
+        return JobStatus.COMPLETED_WITH_ERRORS
+    return JobStatus.COMPLETED
+
+
 async def run_processing_job(
     job_id: str,
     request: JobRequest,
@@ -57,23 +77,28 @@ async def run_processing_job(
         target_concurrency_provider=target_concurrency_provider,
         job_tracker=tracker,
     )
-    replayable = tracker.replayable_results()
-    if replayable:
+    pending_commits = tracker.pending_prepared_results()
+    if pending_commits:
         repository.append_event(
             job_id,
-            "checkpoint_replay_started",
-            payload={"record_count": len(replayable)},
+            "checkpoint_reconciliation_started",
+            payload={"record_count": len(pending_commits)},
         )
-        await processor.persist_checkpoint_results(replayable)
+        await processor.reconcile_checkpoint_results(pending_commits)
     completed = await processor.process_shard_async_continuous()
     manager = processor.task_manager
     checkpoint_counts = tracker.counts()
     persisted = checkpoint_counts.persisted
     failed = checkpoint_counts.failed
+    unresolved_writes = checkpoint_counts.unresolved_writes
     discovered = max(manager.total_estimated, checkpoint_counts.discovered)
     pending = max(
         checkpoint_counts.pending,
-        discovered - persisted - failed - checkpoint_counts.in_flight,
+        discovered
+        - persisted
+        - failed
+        - unresolved_writes
+        - checkpoint_counts.in_flight,
     )
     retries = checkpoint_counts.retries
     cancelled = pending if cancel_event.is_set() or not completed else 0
@@ -87,6 +112,7 @@ async def run_processing_job(
                 in_flight=checkpoint_counts.in_flight,
                 ai_complete=checkpoint_counts.ai_complete,
                 persisted=persisted,
+                unresolved_writes=unresolved_writes,
                 failed=failed,
                 cancelled=cancelled,
                 retries=retries,
@@ -94,14 +120,18 @@ async def run_processing_job(
         )
 
     repository.update_state(job_id, update_counts)
-    if cancel_event.is_set() or not completed:
-        return JobRunResult(JobStatus.CANCELLED, {"persisted": persisted})
-    status = JobStatus.COMPLETED_WITH_ERRORS if failed else JobStatus.COMPLETED
+    status = resolve_terminal_status(
+        cancelled=cancel_event.is_set() or not completed,
+        job_failed=False,
+        unresolved_writes=unresolved_writes,
+        failed_records=failed,
+    )
     return JobRunResult(
         status,
         {
             "discovered": discovered,
             "persisted": persisted,
+            "unresolved_writes": unresolved_writes,
             "failed": failed,
             "retries": retries,
         },

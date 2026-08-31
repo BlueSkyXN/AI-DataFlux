@@ -269,20 +269,30 @@ def cmd_process(args):
 
     manager = processor.task_manager
     failed = manager.max_retries_exceeded_count
+    unresolved_writes = manager.unresolved_writes_count
     payload = {
         "status": (
             "cancelled"
             if not completed
-            else "completed_with_errors" if failed else "completed"
+            else (
+                "completed_with_unresolved_writes"
+                if unresolved_writes
+                else "completed_with_errors" if failed else "completed"
+            )
         ),
         "persisted": manager.total_processed_successfully,
+        "unresolved_writes": unresolved_writes,
         "failed": failed,
         "discovered": manager.total_estimated,
         "retries": sum(manager.retried_tasks_count.values()),
     }
     if json_output:
         _write_json(payload)
-    return EXIT_OK if completed and not failed else EXIT_JOB_FAILED
+    return (
+        EXIT_OK
+        if completed and not failed and not unresolved_writes
+        else EXIT_JOB_FAILED
+    )
 
 
 def cmd_gateway(args):

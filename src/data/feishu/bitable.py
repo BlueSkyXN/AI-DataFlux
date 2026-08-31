@@ -75,11 +75,15 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 import asyncio
 import logging
 import threading
-import uuid
 from typing import Any
 
 from ..base import BaseTaskPool
-from ..contracts import AdapterCapabilities, WriteFailure, WritebackReceipt
+from ..contracts import (
+    AdapterCapabilities,
+    CommitDisposition,
+    WritebackItem,
+    WritebackReceipt,
+)
 from . import run_async
 from .client import BITABLE_BATCH_UPDATE_LIMIT, FeishuClient
 
@@ -309,7 +313,9 @@ class FeishuBitableTaskPool(BaseTaskPool):
         )
 
     def update_task_results(
-        self, results: dict[int, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果到飞书多维表格
@@ -321,25 +327,31 @@ class FeishuBitableTaskPool(BaseTaskPool):
             results: {task_id: {alias: value, ...}, ...}
         """
         if not results:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex)
+            return WritebackReceipt.committed(batch_id, (), atomic=False)
 
         # 构建待更新记录
         update_records: list[dict[str, Any]] = []
         task_ids_by_record: dict[str, int] = {}
-        failures: list[WriteFailure] = []
+        outcomes: dict[int, WritebackItem] = {}
         for task_id, row_result in results.items():
             if "_error" in row_result:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
                 continue
 
             record_id = self._id_map.get(task_id)
             if not record_id:
-                failures.append(
-                    WriteFailure(
-                        record_id=task_id,
-                        code="record_not_found",
-                        message="task_id 无对应 record_id",
-                        retryable=False,
-                    )
+                outcomes[task_id] = WritebackItem(
+                    record_id=task_id,
+                    disposition=CommitDisposition.REJECTED,
+                    code="record_not_found",
+                    message="task_id 无对应 record_id",
+                    retryable=False,
                 )
                 continue
 
@@ -356,9 +368,22 @@ class FeishuBitableTaskPool(BaseTaskPool):
                     }
                 )
                 task_ids_by_record[record_id] = task_id
+            else:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含可写字段",
+                    False,
+                )
 
         if not update_records:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, failures=tuple(failures))
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(outcomes[task_id] for task_id in results),
+                atomic=False,
+            )
 
         persisted_record_ids, chunk_failures = run_async(
             self._batch_update(update_records)
@@ -368,20 +393,37 @@ class FeishuBitableTaskPool(BaseTaskPool):
             for record_id in persisted_record_ids
             if record_id in task_ids_by_record
         ]
-        failures.extend(
-            WriteFailure(
-                record_id=task_ids_by_record[record_id],
+        for record_id, message in chunk_failures:
+            if record_id not in task_ids_by_record:
+                continue
+            task_id = task_ids_by_record[record_id]
+            outcomes[task_id] = WritebackItem(
+                record_id=task_id,
+                disposition=CommitDisposition.REJECTED,
                 code="bitable_chunk_failed",
                 message=message,
                 retryable=True,
             )
-            for record_id, message in chunk_failures
-            if record_id in task_ids_by_record
-        )
+        for task_id in persisted_task_ids:
+            outcomes[task_id] = WritebackItem(
+                task_id,
+                CommitDisposition.COMMITTED,
+            )
+        for task_id in results:
+            outcomes.setdefault(
+                task_id,
+                WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "bitable_result_missing",
+                    "Bitable 响应未覆盖该记录",
+                    False,
+                ),
+            )
         return WritebackReceipt(
-            batch_id=uuid.uuid4().hex,
-            persisted_ids=tuple(persisted_task_ids),
-            failures=tuple(failures),
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(outcomes[task_id] for task_id in results),
             atomic=False,
         )
 

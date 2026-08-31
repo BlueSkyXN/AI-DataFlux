@@ -9,6 +9,8 @@ import yaml
 
 from src.config import execution_config_hash, load_config
 from src.core import job_runner
+from src.core.contracts import PreparedResult, WritebackOutcome
+from src.core.job_runner import resolve_terminal_status
 from src.core.job_tracker import JobRecordTracker
 from src.jobs import (
     CommandReceipt,
@@ -50,11 +52,15 @@ def _repository_with_job(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_job_runner_replays_ai_complete_before_scanning(tmp_path, monkeypatch):
+async def test_job_runner_reconciles_pending_commit_before_scanning(
+    tmp_path,
+    monkeypatch,
+):
     repository, request, _config_path = _repository_with_job(tmp_path)
     tracker = JobRecordTracker(repository, request.job_id)
     tracker.mark_in_flight("record-a", {"input": "hello"})
-    tracker.mark_ai_complete("record-a", {"answer": "checkpointed"})
+    prepared = PreparedResult.create("record-a", {"answer": "checkpointed"})
+    tracker.mark_prepared(prepared)
     replayed = []
 
     class FakeProcessor:
@@ -69,11 +75,11 @@ async def test_job_runner_replays_ai_complete_before_scanning(tmp_path, monkeypa
         def configure_job_control(self, **kwargs):
             self.tracker = kwargs["job_tracker"]
 
-        async def persist_checkpoint_results(self, results):
+        async def reconcile_checkpoint_results(self, results):
             replayed.append(results)
             for record_id in results:
                 self.tracker.mark_persisted(record_id)
-            return set(results)
+            return WritebackOutcome(frozenset(results), frozenset(), frozenset())
 
         async def process_shard_async_continuous(self):
             return True
@@ -88,7 +94,7 @@ async def test_job_runner_replays_ai_complete_before_scanning(tmp_path, monkeypa
     )
 
     assert result.status == JobStatus.COMPLETED
-    assert replayed == [{"record-a": {"answer": "checkpointed"}}]
+    assert replayed == [{"record-a": prepared}]
     assert repository.get_state(request.job_id).counts.persisted == 1
 
 
@@ -149,3 +155,37 @@ async def test_changed_config_requires_explicit_accepted_resume_hash(
         asyncio.Event(),
     )
     assert accepted.status == JobStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("cancelled", "job_failed", "unresolved", "failed", "expected"),
+    [
+        (True, True, 1, 1, JobStatus.CANCELLED),
+        (False, True, 1, 1, JobStatus.FAILED),
+        (
+            False,
+            False,
+            1,
+            1,
+            JobStatus.COMPLETED_WITH_UNRESOLVED_WRITES,
+        ),
+        (False, False, 0, 1, JobStatus.COMPLETED_WITH_ERRORS),
+        (False, False, 0, 0, JobStatus.COMPLETED),
+    ],
+)
+def test_terminal_status_priority(
+    cancelled,
+    job_failed,
+    unresolved,
+    failed,
+    expected,
+):
+    assert (
+        resolve_terminal_status(
+            cancelled=cancelled,
+            job_failed=job_failed,
+            unresolved_writes=unresolved,
+            failed_records=failed,
+        )
+        == expected
+    )

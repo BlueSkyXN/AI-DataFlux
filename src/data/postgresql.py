@@ -146,15 +146,15 @@ import asyncio
 import logging
 import re
 import threading
-import uuid
 from typing import Any
 
 from .base import BaseTaskPool
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
-    WriteFailure,
+    WritebackItem,
     WritebackReceipt,
 )
 
@@ -643,14 +643,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 ]
                 where_clause = self._build_unprocessed_condition()
 
-                query = sql.SQL(
-                    """
+                query = sql.SQL("""
                     SELECT {}
                     FROM {}.{}
                     WHERE id BETWEEN %s AND %s AND {}
                     ORDER BY id ASC
-                """
-                ).format(
+                """).format(
                     sql.SQL(", ").join(columns_identifiers),
                     sql.Identifier(self.schema_name),
                     sql.Identifier(self.table_name),
@@ -781,7 +779,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
         )
 
     def update_task_results(
-        self, results: dict[Any, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         在单个事务中写回任务结果并确认每条 UPDATE 实际命中。
@@ -793,11 +793,11 @@ class PostgreSQLTaskPool(BaseTaskPool):
             UPDATE schema.table SET "out1" = %s, "out2" = %s WHERE id = %s
         """
         if not results:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
 
         # 准备更新数据
         updates_data: list[tuple[Any, dict[str, Any]]] = []
-        failures: list[WriteFailure] = []
+        failures: list[WritebackItem] = []
         for record_id, row_result in results.items():
             if "_error" in row_result:
                 continue
@@ -812,8 +812,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 updates_data.append((record_id, update_values))
             else:
                 failures.append(
-                    WriteFailure(
+                    WritebackItem(
                         record_id=record_id,
+                        disposition=CommitDisposition.REJECTED,
                         code="no_writable_fields",
                         message="AI 结果不包含任何 columns_to_write alias",
                         retryable=False,
@@ -822,8 +823,9 @@ class PostgreSQLTaskPool(BaseTaskPool):
 
         if failures:
             failures.extend(
-                WriteFailure(
+                WritebackItem(
                     record_id=record_id,
+                    disposition=CommitDisposition.NOT_ATTEMPTED,
                     code="batch_aborted",
                     message="同一原子批次包含不可写记录",
                     retryable=True,
@@ -831,14 +833,15 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 for record_id, _ in updates_data
             )
             return WritebackReceipt(
-                batch_id=uuid.uuid4().hex,
-                failures=tuple(failures),
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(failures),
                 atomic=True,
             )
 
         if not updates_data:
             logging.info("没有成功的记录需要更新到数据库")
-            return WritebackReceipt(batch_id=uuid.uuid4().hex, atomic=True)
+            return WritebackReceipt.committed(batch_id, (), atomic=True)
 
         logging.info(f"准备将 {len(updates_data)} 条记录的结果更新回 PostgreSQL...")
 
@@ -878,8 +881,8 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 raise
 
         self.execute_with_connection(_perform_batch_update, is_write=True)
-        return WritebackReceipt.persisted(
-            uuid.uuid4().hex,
+        return WritebackReceipt.committed(
+            batch_id,
             [record_id for record_id, _ in updates_data],
             atomic=True,
         )
@@ -1016,14 +1019,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.columns_to_extract]
             where_clause = self._build_unprocessed_condition()
 
-            query = sql.SQL(
-                """
+            query = sql.SQL("""
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """
-            ).format(
+            """).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),
@@ -1065,14 +1066,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.write_colnames]
             where_clause = self._build_processed_condition()
 
-            query = sql.SQL(
-                """
+            query = sql.SQL("""
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """
-            ).format(
+            """).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),

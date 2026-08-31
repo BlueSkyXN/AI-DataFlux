@@ -14,14 +14,17 @@ from src.core.contracts import (
     SourceOperationError,
     TaskFailure,
     TaskSuccess,
+    WritebackOutcome,
 )
 from src.core.job_tracker import JobRecordTracker
 from src.core.retry import RetryStrategy
 from src.core.state import TaskStateManager
 from src.data.contracts import (
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
-    WriteFailure,
+    WritebackContractError,
+    WritebackItem,
     WritebackReceipt,
 )
 from src.models.errors import ErrorType
@@ -50,7 +53,10 @@ class _Pool:
 
     async def write_results(self, batch_id, results):
         self.writes.append(dict(results))
-        return WritebackReceipt.persisted(batch_id, list(results), atomic=True)
+        return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    async def reconcile_results(self, batch_id, results):
+        return WritebackReceipt.committed(batch_id, results, atomic=True)
 
 
 def _processor_for_loop(pool):
@@ -63,6 +69,7 @@ def _processor_for_loop(pool):
         total_estimated=1,
         total_processed_successfully=0,
         max_retries_exceeded_count=0,
+        unresolved_writes_count=0,
         retried_tasks_count=defaultdict(int),
         monitor_memory_usage=lambda: None,
         progress_percent=100.0,
@@ -80,12 +87,26 @@ def _processor_for_loop(pool):
     processor.source_max_attempts = 3
     processor.max_in_flight = 1
     processor.batch_size = 1
-    processor.write_retry_limit = 0
+    processor.commit_max_attempts = 3
+    processor.reconciliation_max_attempts = 3
+    processor.writeback_backoff_initial_seconds = 1
+    processor.writeback_backoff_max_seconds = 30
     processor.columns_to_write = {"answer": "result"}
     processor._job_cancel_event = None
     processor._target_concurrency_provider = None
     processor._job_tracker = None
     processor._write_progress = lambda: None
+    return processor
+
+
+def _writeback_processor(pool, *, commit_attempts=3, reconciliation_attempts=3):
+    processor = object.__new__(UniversalAIProcessor)
+    processor.task_pool = pool
+    processor.commit_max_attempts = commit_attempts
+    processor.reconciliation_max_attempts = reconciliation_attempts
+    processor.writeback_backoff_initial_seconds = 1
+    processor.writeback_backoff_max_seconds = 30
+    processor._job_tracker = None
     return processor
 
 
@@ -114,6 +135,50 @@ async def test_content_max_attempts_two_makes_one_real_retry():
     assert processor.task_manager.retried_tasks_count[ErrorType.CONTENT] == 1
     assert processor.task_manager.total_processed_successfully == 1
     assert pool.writes == [{"record-a": {"answer": "ok"}}]
+
+
+@pytest.mark.asyncio
+async def test_commit_retry_does_not_call_model_again(monkeypatch):
+    class RetryWritePool(_Pool):
+        async def write_results(self, batch_id, results):
+            self.writes.append(dict(results))
+            if len(self.writes) == 1:
+                return WritebackReceipt(
+                    batch_id=batch_id,
+                    submitted_ids=tuple(results),
+                    items=(
+                        WritebackItem(
+                            "record-a",
+                            CommitDisposition.REJECTED,
+                            "temporary",
+                            "retry",
+                            True,
+                        ),
+                    ),
+                    atomic=True,
+                )
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    pool = RetryWritePool()
+    processor = _processor_for_loop(pool)
+    model_calls = 0
+
+    async def process_one(_session, record_id, _row_data):
+        nonlocal model_calls
+        model_calls += 1
+        return TaskSuccess(PreparedResult.create(record_id, {"answer": "ok"}))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    processor._process_one_record = process_one
+
+    assert await processor._process_loop(object()) is True
+    assert model_calls == 1
+    assert pool.writes == [
+        {"record-a": {"answer": "ok"}},
+        {"record-a": {"answer": "ok"}},
+    ]
+    sleep.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio
@@ -364,26 +429,41 @@ async def test_processor_uses_opaque_adapter_cursor_for_all_pages():
 
 
 @pytest.mark.asyncio
-async def test_writeback_only_acknowledges_persisted_ids():
+async def test_persisted_advances_only_for_committed_receipt_items():
     processor = object.__new__(UniversalAIProcessor)
-    processor.write_retry_limit = 0
+    processor.commit_max_attempts = 1
+    processor.reconciliation_max_attempts = 1
+    processor.writeback_backoff_initial_seconds = 0
+    processor.writeback_backoff_max_seconds = 0
+    processor._job_tracker = None
 
     class PartialPool:
-        async def write_results(self, batch_id, _results):
+        async def write_results(self, batch_id, results):
             return WritebackReceipt(
                 batch_id=batch_id,
-                persisted_ids=("a",),
-                failures=(
-                    WriteFailure("b", "remote_failure", "failed", retryable=True),
+                submitted_ids=tuple(results),
+                items=(
+                    WritebackItem("a", CommitDisposition.COMMITTED),
+                    WritebackItem(
+                        "b",
+                        CommitDisposition.REJECTED,
+                        "remote_failure",
+                        "failed",
+                        False,
+                    ),
                 ),
+                atomic=False,
             )
 
     processor.task_pool = PartialPool()
-    persisted = await processor._persist_results_with_retry(
-        {"a": {"answer": "ok"}, "b": {"answer": "not persisted"}}
+    outcome = await processor._commit_prepared_results(
+        {
+            "a": PreparedResult.create("a", {"answer": "ok"}),
+            "b": PreparedResult.create("b", {"answer": "not persisted"}),
+        }
     )
 
-    assert persisted == {"a"}
+    assert outcome == WritebackOutcome(frozenset({"a"}), frozenset({"b"}), frozenset())
 
 
 def test_retry_after_supports_seconds_and_http_date():
@@ -392,89 +472,265 @@ def test_retry_after_supports_seconds_and_http_date():
 
 
 @pytest.mark.asyncio
-async def test_writeback_exception_retries_whole_pending_batch(monkeypatch):
-    processor = object.__new__(UniversalAIProcessor)
-    processor.write_retry_limit = 1
-    calls = 0
+async def test_retryable_rejection_reuses_identical_prepared_payload(
+    monkeypatch,
+):
+    calls = []
 
     class FlakyPool:
         async def write_results(self, batch_id, results):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise OSError("temporary write failure")
-            return WritebackReceipt.persisted(batch_id, list(results), atomic=True)
+            calls.append((batch_id, dict(results)))
+            if len(calls) == 1:
+                return WritebackReceipt(
+                    batch_id=batch_id,
+                    submitted_ids=tuple(results),
+                    items=(
+                        WritebackItem(
+                            "a",
+                            CommitDisposition.REJECTED,
+                            "temporary",
+                            "retry",
+                            True,
+                        ),
+                    ),
+                    atomic=True,
+                )
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
 
-    processor.task_pool = FlakyPool()
+    processor = _writeback_processor(FlakyPool(), commit_attempts=2)
     sleep = AsyncMock()
     monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    prepared = PreparedResult.create("a", {"answer": "ok"})
+    original = prepared.to_dict()
 
-    persisted = await processor._persist_results_with_retry({"a": {"answer": "ok"}})
+    outcome = await processor._commit_prepared_results({"a": prepared})
 
-    assert persisted == {"a"}
-    assert calls == 2
+    assert outcome.committed == {"a"}
+    assert [values for _batch_id, values in calls] == [
+        {"a": prepared.values},
+        {"a": prepared.values},
+    ]
+    assert prepared.to_dict() == original
     sleep.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio
 async def test_permanent_write_failure_is_not_retried(monkeypatch):
-    processor = object.__new__(UniversalAIProcessor)
-    processor.write_retry_limit = 3
     calls = 0
 
     class PermanentFailurePool:
-        async def write_results(self, batch_id, _results):
+        async def write_results(self, batch_id, results):
             nonlocal calls
             calls += 1
             return WritebackReceipt(
                 batch_id=batch_id,
-                failures=(
-                    WriteFailure(
+                submitted_ids=tuple(results),
+                items=(
+                    WritebackItem(
                         "missing",
+                        CommitDisposition.REJECTED,
                         "record_not_found",
                         "record does not exist",
-                        retryable=False,
+                        False,
                     ),
                 ),
+                atomic=True,
             )
 
-    processor.task_pool = PermanentFailurePool()
+    processor = _writeback_processor(PermanentFailurePool())
     sleep = AsyncMock()
     monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
 
-    persisted = await processor._persist_results_with_retry(
-        {"missing": {"answer": "not writable"}}
+    outcome = await processor._commit_prepared_results(
+        {
+            "missing": PreparedResult.create(
+                "missing",
+                {"answer": "not writable"},
+            )
+        }
     )
 
-    assert persisted == set()
+    assert outcome.failed == {"missing"}
     assert calls == 1
     sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conflicting", [False, True])
-async def test_malformed_write_receipt_cannot_create_phantom_success(conflicting):
-    processor = object.__new__(UniversalAIProcessor)
-    processor.write_retry_limit = 0
+async def test_indeterminate_write_only_reconciles_and_never_blind_retries():
+    writes = 0
+    reconciliations = 0
+
+    class UncertainPool:
+        async def write_results(self, batch_id, results):
+            nonlocal writes
+            writes += 1
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=(
+                    WritebackItem(
+                        "record-a",
+                        CommitDisposition.INDETERMINATE,
+                        "transport_lost",
+                        "unknown commit outcome",
+                        False,
+                    ),
+                ),
+                atomic=True,
+            )
+
+        async def reconcile_results(self, batch_id, results):
+            nonlocal reconciliations
+            reconciliations += 1
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    processor = _writeback_processor(UncertainPool())
+    outcome = await processor._commit_prepared_results(
+        {
+            "record-a": PreparedResult.create(
+                "record-a",
+                {"answer": "value"},
+            )
+        }
+    )
+
+    assert outcome.committed == {"record-a"}
+    assert writes == 1
+    assert reconciliations == 1
+
+
+@pytest.mark.asyncio
+async def test_write_exception_is_reconciled_without_reissuing_write():
+    writes = 0
+
+    class LostReceiptPool:
+        async def write_results(self, _batch_id, _results):
+            nonlocal writes
+            writes += 1
+            raise ConnectionError("receipt lost")
+
+        async def reconcile_results(self, batch_id, results):
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    processor = _writeback_processor(LostReceiptPool())
+    outcome = await processor._commit_prepared_results(
+        {"a": PreparedResult.create("a", {"answer": "ok"})}
+    )
+
+    assert outcome.committed == {"a"}
+    assert writes == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_budget_exhaustion_becomes_unresolved(monkeypatch):
+    reconciliations = 0
+
+    class UnknownPool:
+        async def write_results(self, batch_id, results):
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(
+                    WritebackItem(
+                        record_id,
+                        CommitDisposition.INDETERMINATE,
+                        "unknown",
+                        "unknown",
+                        False,
+                    )
+                    for record_id in results
+                ),
+                atomic=False,
+            )
+
+        async def reconcile_results(self, batch_id, results):
+            nonlocal reconciliations
+            reconciliations += 1
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(
+                    WritebackItem(
+                        record_id,
+                        CommitDisposition.INDETERMINATE,
+                        "still_unknown",
+                        "still unknown",
+                        False,
+                    )
+                    for record_id in results
+                ),
+                atomic=False,
+            )
+
+    processor = _writeback_processor(UnknownPool(), reconciliation_attempts=2)
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    outcome = await processor._commit_prepared_results(
+        {"a": PreparedResult.create("a", {"answer": "ok"})}
+    )
+
+    assert outcome.unresolved == {"a"}
+    assert reconciliations == 2
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_malformed_write_receipt_fails_closed():
 
     class MalformedReceiptPool:
         async def write_results(self, batch_id, _results):
             return WritebackReceipt(
-                batch_id=batch_id,
-                persisted_ids=(("record-a",) if conflicting else ("phantom",)),
-                failures=(
-                    (WriteFailure("record-a", "conflict", "conflicting receipt"),)
-                    if conflicting
-                    else ()
-                ),
+                batch_id=f"wrong-{batch_id}",
+                submitted_ids=("record-a",),
+                items=(WritebackItem("record-a", CommitDisposition.COMMITTED),),
+                atomic=True,
             )
 
-    processor.task_pool = MalformedReceiptPool()
-    persisted = await processor._persist_results_with_retry(
-        {"record-a": {"answer": "value"}}
-    )
+    processor = _writeback_processor(MalformedReceiptPool())
+    with pytest.raises(WritebackContractError, match="batch_id mismatch"):
+        await processor._commit_prepared_results(
+            {
+                "record-a": PreparedResult.create(
+                    "record-a",
+                    {"answer": "value"},
+                )
+            }
+        )
 
-    assert persisted == set()
+
+@pytest.mark.asyncio
+async def test_malformed_receipt_never_promotes_pending_commit(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("version: 1\n", encoding="utf-8")
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = repository.new_request(
+        mode="background",
+        config_path=str(config_path),
+        config_sha256=hash_config_file(config_path),
+    )
+    repository.create_job(request)
+    tracker = JobRecordTracker(repository, request.job_id)
+    tracker.mark_in_flight("a", {"input": "original"})
+    prepared = PreparedResult.create("a", {"answer": "ok"})
+    tracker.mark_prepared(prepared)
+
+    class MissingItemPool:
+        async def write_results(self, batch_id, results):
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=(),
+                atomic=True,
+            )
+
+    processor = _writeback_processor(MissingItemPool())
+    processor._job_tracker = tracker
+    with pytest.raises(WritebackContractError, match="item coverage"):
+        await processor._commit_prepared_results({"a": prepared})
+
+    recovered = JobRecordTracker(repository, request.job_id)
+    assert recovered.get("a").status == RecordStatus.PENDING_COMMIT
+    assert recovered.counts().persisted == 0
 
 
 @pytest.mark.asyncio
@@ -549,41 +805,93 @@ async def test_retry_budget_survives_checkpoint_recovery(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_replay_tracks_persisted_and_failed_ids():
-    processor = object.__new__(UniversalAIProcessor)
-    processor.write_retry_limit = 0
+async def test_checkpoint_recovery_reconciles_committed_before_any_rewrite(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("version: 1\n", encoding="utf-8")
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = repository.new_request(
+        mode="background",
+        config_path=str(config_path),
+        config_sha256=hash_config_file(config_path),
+    )
+    repository.create_job(request)
+    tracker = JobRecordTracker(repository, request.job_id)
+    tracker.mark_in_flight("a", {"input": "original"})
+    tracker.mark_prepared(PreparedResult.create("a", {"answer": "ok"}))
+    writes = 0
 
-    class PartialPool:
-        async def write_results(self, batch_id, _results):
-            return WritebackReceipt(
-                batch_id=batch_id,
-                persisted_ids=("a",),
-                failures=(WriteFailure("b", "write_failed", "failed"),),
-            )
+    class AlreadyCommittedPool:
+        async def write_results(self, _batch_id, _results):
+            nonlocal writes
+            writes += 1
+            raise AssertionError("recovery must reconcile before writing")
 
-    class Tracker:
-        def __init__(self):
-            self.persisted = []
-            self.failed = []
+        async def reconcile_results(self, batch_id, results):
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
 
-        def mark_persisted(self, record_id):
-            self.persisted.append(record_id)
+    recovered = JobRecordTracker(repository, request.job_id)
+    processor = _writeback_processor(AlreadyCommittedPool())
+    processor._job_tracker = recovered
 
-        def mark_failed(self, record_id, **kwargs):
-            self.failed.append((record_id, kwargs))
-
-    tracker = Tracker()
-    processor.task_pool = PartialPool()
-    processor._job_tracker = tracker
-
-    persisted = await processor.persist_checkpoint_results(
-        {"a": {"answer": "ok"}, "b": {"answer": "retry"}}
+    outcome = await processor.reconcile_checkpoint_results(
+        recovered.pending_prepared_results()
     )
 
-    assert persisted == {"a"}
-    assert tracker.persisted == ["a"]
-    assert tracker.failed[0][0] == "b"
-    assert tracker.failed[0][1]["error_code"] == "checkpoint_writeback_failed"
+    assert outcome.committed == {"a"}
+    assert writes == 0
+    assert JobRecordTracker(repository, request.job_id).get("a").status == (
+        RecordStatus.PERSISTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_recovery_writes_only_after_reconciliation_rejects(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("version: 1\n", encoding="utf-8")
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = repository.new_request(
+        mode="background",
+        config_path=str(config_path),
+        config_sha256=hash_config_file(config_path),
+    )
+    repository.create_job(request)
+    tracker = JobRecordTracker(repository, request.job_id)
+    tracker.mark_in_flight("a", {"input": "original"})
+    tracker.mark_prepared(PreparedResult.create("a", {"answer": "ok"}))
+    calls = []
+
+    class NotCommittedPool:
+        async def reconcile_results(self, batch_id, results):
+            calls.append("reconcile")
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=(
+                    WritebackItem(
+                        "a",
+                        CommitDisposition.REJECTED,
+                        "not_committed",
+                        "expected values are absent",
+                        True,
+                    ),
+                ),
+                atomic=True,
+            )
+
+        async def write_results(self, batch_id, results):
+            calls.append("write")
+            return WritebackReceipt.committed(batch_id, results, atomic=True)
+
+    recovered = JobRecordTracker(repository, request.job_id)
+    processor = _writeback_processor(NotCommittedPool())
+    processor._job_tracker = recovered
+
+    outcome = await processor.reconcile_checkpoint_results(
+        recovered.pending_prepared_results()
+    )
+
+    assert outcome.committed == {"a"}
+    assert calls == ["reconcile", "write"]
 
 
 @pytest.mark.asyncio

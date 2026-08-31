@@ -39,7 +39,7 @@ export default function Dashboard({ selection, language }: DashboardProps) {
     const jobs = data?.jobs ?? [];
     return {
       active: jobs.filter((job) => ['queued', 'running', 'cancelling'].includes(job.status)).length,
-      complete: jobs.filter((job) => ['completed', 'completed_with_errors'].includes(job.status)).length,
+      complete: jobs.filter((job) => ['completed', 'completed_with_errors', 'completed_with_unresolved_writes'].includes(job.status)).length,
       persisted: jobs.reduce((total, job) => total + job.counts.persisted, 0),
       failed: jobs.reduce((total, job) => total + job.counts.failed, 0),
     };

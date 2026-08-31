@@ -203,6 +203,7 @@ class ShardedTaskManager:
             ErrorType.SOURCE: 0,
         }
         self.max_retries_exceeded_count = 0
+        self.unresolved_writes_count = 0
 
         # 内存监控
         self.memory_tracker = {
@@ -547,6 +548,7 @@ class ShardedTaskManager:
                 f"  - {error_type.value}: {count} 次重试 (最大总尝试次数: {max_attempts})"
             )
         logging.info(f"  - 重试次数超限任务数: {self.max_retries_exceeded_count}")
+        logging.info(f"  - 未决写回记录数: {self.unresolved_writes_count}")
 
         # 处理速率
         if self.total_processed_successfully > 0 and total_duration > 0:

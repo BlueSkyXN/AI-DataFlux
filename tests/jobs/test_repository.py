@@ -15,6 +15,7 @@ from src.jobs import (
     JobStatus,
     LeaseConflictError,
     RevisionConflictError,
+    SHARD_SCHEMA_VERSION,
     ShardState,
     compute_config_hash,
     hash_config_file,
@@ -48,6 +49,7 @@ def test_create_job_writes_modular_layout_and_immutable_request(
         "state.json",
         "events.jsonl",
         "shards",
+        "prepared",
         "commands",
     }
     assert repository.get_request(created_job.job_id) == created_job
@@ -205,6 +207,57 @@ def test_shards_commands_and_command_receipts_round_trip(
     )
     repository.save_command_receipt(receipt)
     assert repository.get_command_receipt(created_job.job_id, "cancel-1") == receipt
+
+
+@pytest.mark.parametrize("schema_value", [None, 1, 3])
+def test_old_or_missing_shard_schema_is_rejected(
+    repository: FileJobRepository,
+    created_job,
+    schema_value,
+):
+    payload = {
+        "shard_id": "legacy",
+        "job_id": created_job.job_id,
+        "status": "active",
+        "updated_at": 1.0,
+        "cursor": None,
+        "counts": {},
+        "records": [],
+    }
+    if schema_value is not None:
+        payload["schema_version"] = schema_value
+    path = repository.shards_dir(created_job.job_id) / "legacy.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="shard schema_version"):
+        repository.get_shard(created_job.job_id, "legacy")
+
+
+def test_old_record_checkpoint_schema_is_rejected(
+    repository: FileJobRepository,
+    created_job,
+):
+    payload = {
+        "schema_version": SHARD_SCHEMA_VERSION,
+        "shard_id": "legacy-record",
+        "job_id": created_job.job_id,
+        "status": "active",
+        "updated_at": 1.0,
+        "cursor": None,
+        "counts": {},
+        "records": [
+            {
+                "record_id": "a",
+                "status": "pending",
+                "updated_at": 1.0,
+            }
+        ],
+    }
+    path = repository.shards_dir(created_job.job_id) / "legacy-record.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="record checkpoint schema_version"):
+        repository.get_shard(created_job.job_id, "legacy-record")
 
 
 def test_prune_is_dry_run_until_explicit_confirmation(

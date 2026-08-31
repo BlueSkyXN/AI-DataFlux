@@ -77,11 +77,15 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 
 import logging
 import threading
-import uuid
 from typing import Any
 
 from ..base import BaseTaskPool
-from ..contracts import AdapterCapabilities, WriteFailure, WritebackReceipt
+from ..contracts import (
+    AdapterCapabilities,
+    CommitDisposition,
+    WritebackItem,
+    WritebackReceipt,
+)
 from . import run_async
 from .client import FeishuClient
 
@@ -356,7 +360,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
         )
 
     def update_task_results(
-        self, results: dict[int, dict[str, Any]]
+        self,
+        batch_id: str,
+        results: dict[int, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果到飞书电子表格
@@ -367,36 +373,77 @@ class FeishuSheetTaskPool(BaseTaskPool):
             results: {task_id(行索引): {alias: value, ...}, ...}
         """
         if not results:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex)
+            return WritebackReceipt.committed(batch_id, (), atomic=False)
 
         # 按输出列分组写入（每列一次 API 调用更高效）
         # 构建写入数据: {col_name: {row_idx: value}}
         col_data: dict[str, dict[int, Any]] = {}
+        outcomes: dict[int, WritebackItem] = {}
 
         for task_id, row_result in results.items():
             if "_error" in row_result:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "invalid_result",
+                    "结果包含 _error",
+                    False,
+                )
                 continue
 
+            writable = False
             for alias, col_name in self.columns_to_write.items():
                 if alias in row_result:
+                    writable = True
                     if col_name not in col_data:
                         col_data[col_name] = {}
                     col_data[col_name][task_id] = row_result[alias]
+            if not writable:
+                outcomes[task_id] = WritebackItem(
+                    task_id,
+                    CommitDisposition.REJECTED,
+                    "no_writable_fields",
+                    "结果不包含可写字段",
+                    False,
+                )
 
         if not col_data:
-            return WritebackReceipt(batch_id=uuid.uuid4().hex)
+            return WritebackReceipt(
+                batch_id=batch_id,
+                submitted_ids=tuple(results),
+                items=tuple(outcomes[task_id] for task_id in results),
+                atomic=False,
+            )
 
         persisted, failures = run_async(self._write_results(col_data))
+        for failure in failures:
+            outcomes.setdefault(failure.record_id, failure)
+        for task_id in persisted:
+            outcomes[task_id] = WritebackItem(
+                task_id,
+                CommitDisposition.COMMITTED,
+            )
+        for task_id in results:
+            outcomes.setdefault(
+                task_id,
+                WritebackItem(
+                    task_id,
+                    CommitDisposition.INDETERMINATE,
+                    "sheet_result_missing",
+                    "Sheet 写入结果未覆盖该记录",
+                    False,
+                ),
+            )
         return WritebackReceipt(
-            batch_id=uuid.uuid4().hex,
-            persisted_ids=tuple(sorted(persisted)),
-            failures=tuple(failures),
+            batch_id=batch_id,
+            submitted_ids=tuple(results),
+            items=tuple(outcomes[task_id] for task_id in results),
             atomic=False,
         )
 
     async def _write_results(
         self, col_data: dict[str, dict[int, Any]]
-    ) -> tuple[set[int], list[WriteFailure]]:
+    ) -> tuple[set[int], list[WritebackItem]]:
         """
         异步写入结果到电子表格
 
@@ -407,7 +454,7 @@ class FeishuSheetTaskPool(BaseTaskPool):
         error_count = 0
         candidate_ids = {task_id for rows in col_data.values() for task_id in rows}
         failed_ids: set[int] = set()
-        failures: list[WriteFailure] = []
+        failures: list[WritebackItem] = []
 
         for col_name, rows in col_data.items():
             col_idx = self._col_name_to_index.get(col_name)
@@ -417,8 +464,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
                 for task_id in rows:
                     failed_ids.add(task_id)
                     failures.append(
-                        WriteFailure(
+                        WritebackItem(
                             record_id=task_id,
+                            disposition=CommitDisposition.REJECTED,
                             code="column_not_found",
                             message=f"列 {col_name} 不在表头中",
                             retryable=False,
@@ -465,8 +513,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
                     for row_idx, _ in segment:
                         failed_ids.add(row_idx)
                         failures.append(
-                            WriteFailure(
+                            WritebackItem(
                                 record_id=row_idx,
+                                disposition=CommitDisposition.REJECTED,
                                 code="sheet_write_failed",
                                 message=str(e),
                             )

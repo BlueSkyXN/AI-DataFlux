@@ -3,7 +3,14 @@ from __future__ import annotations
 import pytest
 
 from src.data.base import BaseTaskPool
-from src.data.contracts import WritebackReceipt, declared_adapter_capabilities
+from src.data.contracts import (
+    CommitDisposition,
+    WritebackContractError,
+    WritebackItem,
+    WritebackReceipt,
+    declared_adapter_capabilities,
+    validate_writeback_receipt,
+)
 
 
 class _LegacyPool(BaseTaskPool):
@@ -31,9 +38,9 @@ class _LegacyPool(BaseTaskPool):
         self.tasks = self.tasks[batch_size:]
         return batch
 
-    def update_task_results(self, results):
+    def update_task_results(self, batch_id, results):
         if self.return_receipt:
-            return WritebackReceipt.persisted("adapter-id", list(results), atomic=False)
+            return WritebackReceipt.committed(batch_id, results, atomic=False)
         return None
 
     def reload_task_data(self, task_id):
@@ -76,14 +83,20 @@ async def test_legacy_adapter_bridge_scan_reload_write_and_close():
         await pool.scan(None, 0)
 
     assert await pool.reload([1, 999]) == {1: {"input": "a"}}
-    with pytest.raises(TypeError, match="must return WritebackReceipt"):
+    with pytest.raises(WritebackContractError, match="must return WritebackReceipt"):
         await pool.write_results(
             "batch-a", {1: {"answer": "ok"}, 2: {"_error": "skip"}}
         )
     pool.return_receipt = True
     receipt = await pool.write_results("batch-b", {1: {"answer": "ok"}})
     assert receipt.batch_id == "batch-b"
-    assert receipt.persisted_ids == (1,)
+    assert receipt.committed_ids == (1,)
+
+    reconciliation = await pool.reconcile_results(
+        "batch-c",
+        {1: {"answer": "ok"}},
+    )
+    assert reconciliation.items[0].disposition == CommitDisposition.INDETERMINATE
 
     await pool.aclose()
     assert pool.closed is True
@@ -111,8 +124,8 @@ async def test_sampling_full_scan_defaults_and_failure_receipt():
     failure = pool.failed_receipt(
         "batch", {1: {}, 2: {}}, ValueError("invalid"), retryable=False
     )
-    assert [item.record_id for item in failure.failures] == [1, 2]
-    assert all(not item.retryable for item in failure.failures)
+    assert [item.record_id for item in failure.items] == [1, 2]
+    assert all(not item.retryable for item in failure.items)
 
     legacy = _LegacyPool()
     legacy.rows = []
@@ -128,3 +141,94 @@ def test_declared_capability_registry_and_unknown_type():
     assert declared_adapter_capabilities("csv").atomic_batch is False
     with pytest.raises(ValueError, match="unsupported"):
         declared_adapter_capabilities("unknown")
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        WritebackReceipt(
+            batch_id="wrong",
+            submitted_ids=("a", "b"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED),
+                WritebackItem("b", CommitDisposition.COMMITTED),
+            ),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a",),
+            items=(WritebackItem("a", CommitDisposition.COMMITTED),),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "b", "unknown"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED),
+                WritebackItem("b", CommitDisposition.COMMITTED),
+                WritebackItem("unknown", CommitDisposition.COMMITTED),
+            ),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "a"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED),
+                WritebackItem("a", CommitDisposition.REJECTED),
+            ),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "b"),
+            items=(WritebackItem("a", CommitDisposition.COMMITTED),),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "b"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED),
+                WritebackItem("unknown", CommitDisposition.COMMITTED),
+            ),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "b"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED),
+                WritebackItem("a", CommitDisposition.REJECTED),
+            ),
+            atomic=True,
+        ),
+        WritebackReceipt(
+            batch_id="batch",
+            submitted_ids=("a", "b"),
+            items=(
+                WritebackItem("a", CommitDisposition.COMMITTED, retryable=True),
+                WritebackItem("b", CommitDisposition.COMMITTED),
+            ),
+            atomic=True,
+        ),
+    ],
+    ids=[
+        "wrong-batch",
+        "missing-submitted-id",
+        "unknown-submitted-id",
+        "duplicate-submitted-id",
+        "missing-item",
+        "unknown-item",
+        "conflicting-duplicate-item",
+        "committed-retryable",
+    ],
+)
+def test_receipt_contract_rejects_malformed_coverage(receipt):
+    with pytest.raises(WritebackContractError):
+        validate_writeback_receipt(
+            receipt,
+            batch_id="batch",
+            submitted_ids=("a", "b"),
+        )

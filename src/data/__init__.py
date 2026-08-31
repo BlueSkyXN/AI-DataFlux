@@ -66,22 +66,28 @@
 from .base import BaseTaskPool
 from .contracts import (
     AdapterCapabilities,
+    CommitDisposition,
     TaskBatch,
     TaskRecord,
-    WriteFailure,
+    WritebackContractError,
+    WritebackItem,
     WritebackReceipt,
     declared_adapter_capabilities,
+    validate_writeback_receipt,
 )
 from .factory import create_task_pool, EXCEL_ENABLED, FEISHU_AVAILABLE, MYSQL_AVAILABLE
 
 __all__ = [
     "BaseTaskPool",
     "AdapterCapabilities",
+    "CommitDisposition",
     "TaskBatch",
     "TaskRecord",
-    "WriteFailure",
+    "WritebackContractError",
+    "WritebackItem",
     "WritebackReceipt",
     "declared_adapter_capabilities",
+    "validate_writeback_receipt",
     "create_task_pool",
     "MYSQL_AVAILABLE",
     "EXCEL_ENABLED",
