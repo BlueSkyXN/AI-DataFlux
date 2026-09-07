@@ -254,7 +254,7 @@ gateway:
 - `channel_id` 必须存在。
 - `chat_completions` / `responses` capability 必须有对应 channel endpoint。
 - `fallback_groups` 是有序 route ID 列表；未知 ID、空列表和重复 ID 都失败。
-- H1 只冻结 schema 并接入当前 Gateway；strict/fallback/affinity 完整语义属于 H3 验收。
+- 当前本地源码已接入 strict/auto/fallback 与 Responses affinity；运行语义及失效行为见 [GATEWAY_API.md](./GATEWAY_API.md)。本地协议测试不替代真实 provider UAT。
 
 ## 5. `control`
 

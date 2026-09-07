@@ -35,6 +35,7 @@ on:
       - 'config-example.yaml'
       - 'web/**'
       - '.github/scripts/smoke_control.py'
+      - '.github/scripts/smoke_workflow.py'
       - '.github/workflows/build-nuitka.yml'
   pull_request:
     paths:
@@ -43,6 +44,7 @@ on:
       - 'config-example.yaml'
       - 'web/**'
       - '.github/scripts/smoke_control.py'
+      - '.github/scripts/smoke_workflow.py'
       - '.github/workflows/build-nuitka.yml'
   workflow_dispatch:                       # 支持手动触发
     inputs:
@@ -253,6 +255,14 @@ jobs:
             }
             Wait-Process -Id $control.Id -ErrorAction SilentlyContinue
           }
+
+      - name: Smoke packaged processing workflow
+        timeout-minutes: 3
+        run: python .github/scripts/smoke_workflow.py --binary "dist/${{ matrix.artifact_name }}"
+
+      - name: Smoke packaged workflow with separate worker
+        timeout-minutes: 3
+        run: python .github/scripts/smoke_workflow.py --binary "dist/${{ matrix.artifact_name }}" --separate-worker
 
       - name: Upload artifact               # 上传到 GitHub Artifacts，保留30天
         uses: actions/upload-artifact@v4

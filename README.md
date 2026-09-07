@@ -4,6 +4,8 @@ AI-DataFlux 是面向批量 AI 数据处理的 Python 3.10+ 引擎，包含 Open
 
 > 当前活动开发版本为 **4.0.0-dev**。4.0 配置是 clean break：只接受 `schema_version: 4` 的 canonical `RootConfig`，不读取、不迁移、不兼容 3.x YAML。
 
+当前工作区的实现、验证和剩余交付见 [4.0 验证记录](./docs/V4_LOCAL_VALIDATION.md)。Repository state 已使用独立 schema 2；旧 state schema 1 不自动迁移，也不能只改版本号后继续使用。
+
 ## 能力
 
 - Excel、CSV、SQLite、MySQL、PostgreSQL、Feishu Bitable、Feishu Sheet 数据源

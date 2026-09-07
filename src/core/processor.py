@@ -342,7 +342,9 @@ class UniversalAIProcessor:
 
         # 提前读取 prompt 配置（_init_routing_contexts 需要这些属性）
         prompt_cfg = self.config.get("prompt", {})
-        self.ai_model = prompt_cfg.get("model", "auto")
+        selection = self.config.get("model_selection", {"mode": "auto"})
+        self.ai_model = selection.get("route_id", "auto")
+        self.fallback_group = selection.get("group")
         self.ai_temperature = prompt_cfg.get("temperature", 0.7)
         self.ai_temperature_override = prompt_cfg.get("temperature_override", True)
         self.ai_system_prompt = prompt_cfg.get("system_prompt")
@@ -504,7 +506,7 @@ class UniversalAIProcessor:
             self.routing_contexts[match_value] = {
                 "content_processor": processor,
                 "validator": validator,
-                "model": prompt_cfg.get("model", self.ai_model),
+                "model": self.ai_model,
                 "temperature": prompt_cfg.get("temperature", self.ai_temperature),
                 "temperature_override": prompt_cfg.get(
                     "temperature_override", self.ai_temperature_override
@@ -717,6 +719,18 @@ class UniversalAIProcessor:
             await asyncio.sleep(delay)
 
     async def _process_loop(self, session: aiohttp.ClientSession) -> bool:
+        active_tasks: Set[asyncio.Task] = set()
+        try:
+            return await self._process_loop_inner(session, active_tasks)
+        finally:
+            for task in active_tasks:
+                task.cancel()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+
+    async def _process_loop_inner(
+        self, session: aiohttp.ClientSession, active_tasks: Set[asyncio.Task]
+    ) -> bool:
         """
         主处理循环
 
@@ -767,7 +781,6 @@ class UniversalAIProcessor:
             session: aiohttp 客户端会话
         """
         current_shard_num = 0
-        active_tasks: Set[asyncio.Task] = set()
         task_id_map: Dict[asyncio.Task, Tuple[Any, Dict[str, Any]]] = {}
         source_queue: deque[Tuple[Any, Dict[str, Any]]] = deque()
         retry_queue: deque[Tuple[Any, Dict[str, Any]]] = deque()
@@ -909,10 +922,10 @@ class UniversalAIProcessor:
                 continue
 
             # 2. 等待任一任务完成
-            done, pending = await asyncio.wait(
+            done, _ = await asyncio.wait(
                 active_tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
             )
-            active_tasks = pending
+            active_tasks.difference_update(done)
 
             # 3. 处理完成的任务
             tasks_to_retry: List[Tuple[Any, Dict[str, Any]]] = []
@@ -1428,6 +1441,11 @@ class UniversalAIProcessor:
                 temperature=temperature if temperature_override else None,
                 use_json_schema=use_schema,
                 json_schema=(content_processor.build_schema() if use_schema else None),
+                **(
+                    {"fallback_group": self.fallback_group}
+                    if self.fallback_group
+                    else {}
+                ),
             )
 
             # 3. 解析结果

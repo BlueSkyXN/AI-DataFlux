@@ -84,3 +84,19 @@ def test_default_active_limit_matches_bounded_cpu_formula(monkeypatch):
     assert default_max_active_jobs() == 4
     monkeypatch.setattr("src.jobs.scheduler.os.cpu_count", lambda: 2)
     assert default_max_active_jobs() == 1
+
+
+def test_fifo_queue_drains_after_pressure_without_exceeding_active_limit():
+    scheduler = ResourceScheduler(max_active_jobs=3)
+    for index in range(25):
+        scheduler.enqueue(str(index), created_at=float(index), max_in_flight=4)
+    assert scheduler.tick(snapshot(pressure=True)).admitted_job_ids == ()
+    admitted = []
+    while scheduler.queued_job_ids:
+        decision = scheduler.tick(snapshot(pressure=False))
+        admitted.extend(decision.admitted_job_ids)
+        assert len(scheduler.active_job_ids) <= 3
+        assert all(1 <= target <= 4 for target in decision.targets.values())
+        for job_id in tuple(scheduler.active_job_ids):
+            scheduler.release(job_id)
+    assert admitted == [str(index) for index in range(25)]

@@ -37,6 +37,33 @@
 """
 
 import pytest
+import subprocess
+import sys
+
+
+def test_factory_import_does_not_load_unselected_database_drivers():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import builtins, sys
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == 'psycopg2' or name.startswith('psycopg2.') or name == 'mysql.connector':
+        raise AssertionError('eager database driver import: ' + name)
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+import src.data.factory
+assert 'psycopg2' not in sys.modules
+assert 'mysql.connector' not in sys.modules
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class TestFactoryBasics:

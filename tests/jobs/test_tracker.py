@@ -211,3 +211,91 @@ def test_scan_pages_are_checkpointed_as_independent_shards(tracker_context):
     assert recovered.counts().persisted == 1
     assert recovered.get("row-c").status == RecordStatus.PENDING
     assert recovered.new_scan_shard_id() == "scan-000003"
+
+
+def test_state_not_diagnostic_shard_is_recovery_truth(tracker_context):
+    repository, job_id = tracker_context
+    tracker = JobRecordTracker(repository, job_id)
+    tracker.mark_in_flight("a", {"input": "a"})
+    prepared = PreparedResult.create("a", {"answer": "committed reference"})
+    tracker.mark_prepared(prepared)
+    state = json.loads(repository.state_path(job_id).read_text())
+    record = state["checkpoints"]["records"]["records"][0]
+    assert record["status"] == "pending_commit"
+    assert record["prepared_hash"] == prepared.payload_hash
+    assert "checkpoints" not in repository.get_state(job_id).to_dict()
+    (repository.shards_dir(job_id) / "records.json").write_text("broken diagnostic")
+    assert JobRecordTracker(repository, job_id).pending_prepared_results() == {
+        "a": prepared
+    }
+
+
+def test_state_commit_failure_leaves_blob_orphan_and_rolls_back_memory(
+    tracker_context, monkeypatch
+):
+    import src.jobs.repository as module
+
+    repository, job_id = tracker_context
+    tracker = JobRecordTracker(repository, job_id)
+    tracker.mark_in_flight("a", {"input": "a"})
+    before = repository.state_path(job_id).read_bytes()
+    original = module.atomic_write_json
+
+    def write(path, payload):
+        if path == repository.state_path(job_id):
+            raise OSError("state commit failed")
+        original(path, payload)
+
+    prepared = PreparedResult.create("a", {"answer": "not committed"})
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "atomic_write_json", write)
+        with pytest.raises(OSError, match="state commit failed"):
+            tracker.mark_prepared(prepared)
+    assert repository.state_path(job_id).read_bytes() == before
+    assert tracker.get("a").status == RecordStatus.IN_FLIGHT
+    assert tracker.pending_prepared_results() == {}
+    assert JobRecordTracker(repository, job_id).pending_prepared_results() == {}
+    orphan = f"prepared/{prepared.commit_id}.json"
+    assert repository.prune_orphan_prepared(job_id) == (orphan,)
+    assert repository.prepared_result_path(job_id, prepared.commit_id).exists()
+    assert repository.prune_orphan_prepared(job_id, confirm=True) == (orphan,)
+    assert not repository.prepared_result_path(job_id, prepared.commit_id).exists()
+
+
+def test_event_failure_cannot_erase_committed_prepared_reference(
+    tracker_context, monkeypatch
+):
+    repository, job_id = tracker_context
+    tracker = JobRecordTracker(repository, job_id)
+    tracker.mark_in_flight("a", {"input": "a"})
+    prepared = PreparedResult.create("a", {"answer": "durable"})
+
+    def fail_event(*args, **kwargs):
+        raise OSError("event fault")
+
+    monkeypatch.setattr(repository, "append_event", fail_event)
+    with pytest.raises(OSError, match="event fault"):
+        tracker.mark_prepared(prepared)
+    assert JobRecordTracker(repository, job_id).pending_prepared_results() == {
+        "a": prepared
+    }
+    assert repository.get_state(job_id).counts.ai_complete == 1
+    assert repository.prune_orphan_prepared(job_id, confirm=True) == ()
+
+
+def test_prepared_parent_symlink_cannot_escape_job(tracker_context, tmp_path):
+    repository, job_id = tracker_context
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    prepared_dir = repository.prepared_dir(job_id)
+    prepared_dir.rmdir()
+    try:
+        prepared_dir.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink unavailable on this platform")
+    prepared = PreparedResult.create("a", {"answer": "never written outside"})
+    with pytest.raises(JobRepositoryError, match="symlink"):
+        repository.save_prepared_result(job_id, prepared.commit_id, prepared.to_dict())
+    with pytest.raises(JobRepositoryError, match="symlink"):
+        repository.prune_orphan_prepared(job_id, confirm=True)
+    assert list(outside.iterdir()) == []

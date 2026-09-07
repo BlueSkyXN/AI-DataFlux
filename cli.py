@@ -17,7 +17,7 @@ Token 估算、版本信息和库状态检查等所有功能的统一入口。
     python cli.py process --config config.yaml     # 运行数据处理
     python cli.py process -c config.yaml --validate  # 仅验证配置
     python cli.py gateway --port 8787              # 启动 API 网关
-    python cli.py gateway -p 8787 -w 4             # 4 worker 进程
+    python cli.py gateway -p 8787 -w 1             # 单进程 Gateway
     python cli.py token --config config.yaml       # 估算输入+输出 Token
     python cli.py token -c config.yaml --mode in   # 仅估算输入 Token
     python cli.py version                          # 显示版本号
@@ -326,7 +326,7 @@ def cmd_gateway(args):
 
     gateway_config = require_gateway_config(load_config(args.config))
     if args.workers != 1:
-        raise ValueError("AI-DataFlux 4.0 H1-H2 仅支持 gateway workers=1")
+        raise ValueError("AI-DataFlux 4.0 仅支持 gateway workers=1")
 
     run_server(
         config_path=args.config,
@@ -556,10 +556,17 @@ async def _run_worker(config_path: str) -> None:
             loop.add_signal_handler(signum, stop_event.set)
         except (NotImplementedError, RuntimeError):
             pass
-    loop_task = asyncio.create_task(service.run_loop())
+    loop_task = await service.start()
+    stop_task = asyncio.create_task(stop_event.wait())
     try:
-        await stop_event.wait()
+        done, _ = await asyncio.wait(
+            {loop_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if loop_task in done:
+            await loop_task
     finally:
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
         await service.stop()
         await asyncio.gather(loop_task, return_exceptions=True)
 
@@ -859,7 +866,7 @@ def cmd_gui(args):
         port=port,
         open_browser=open_browser,
         config_path=args.config,
-        supervise_worker=True,
+        supervise_worker=not getattr(args, "no_worker", False),
     )
     return 0
 
@@ -884,6 +891,23 @@ def main():
         - KeyboardInterrupt: 用户中断，返回 1
         - Exception: 打印错误信息和堆栈，返回 1
     """
+    # 原生库探测只在隔离子进程运行；冻结产物不支持 Python 的 -c。
+    if sys.argv[1:2] == ["--_dataflux-library-probe"]:
+        if len(sys.argv) != 3 or sys.argv[2] not in {
+            "polars",
+            "fastexcel",
+            "xlsxwriter",
+            "numpy",
+        }:
+            return EXIT_CONFIG_ERROR
+        try:
+            module = __import__(sys.argv[2])
+            if sys.argv[2] == "polars":
+                module.DataFrame({"x": [1]})
+            return EXIT_OK
+        except Exception:
+            return EXIT_RUNTIME_ERROR
+
     # 创建主解析器
     parser = argparse.ArgumentParser(
         prog="ai-dataflux",
@@ -1065,6 +1089,11 @@ def main():
         )
         p_gui.add_argument(
             "--no-browser", action="store_true", help="Don't open browser automatically"
+        )
+        p_gui.add_argument(
+            "--no-worker",
+            action="store_true",
+            help="Serve Control API without starting a second Job supervisor",
         )
         p_gui.set_defaults(func=cmd_gui)
 

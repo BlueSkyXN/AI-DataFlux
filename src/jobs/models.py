@@ -7,14 +7,24 @@ reconstruct them with the matching ``from_dict()`` helpers.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 import time
 from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
+JOB_STATE_SCHEMA_VERSION = 2
 SHARD_SCHEMA_VERSION = 2
 RECORD_SCHEMA_VERSION = 2
+
+
+def _require_schema_version(
+    data: Mapping[str, Any], kind: str, expected: int = SCHEMA_VERSION
+) -> int:
+    version = data.get("schema_version")
+    if type(version) is not int or version != expected:
+        raise ValueError(f"{kind} schema_version must be {expected}")
+    return version
 
 
 class JobStatus(str, Enum):
@@ -82,7 +92,7 @@ class JobRequest:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "JobRequest":
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=_require_schema_version(data, "job request"),
             job_id=str(data["job_id"]),
             mode=str(data["mode"]),
             config_path=str(data["config_path"]),
@@ -163,7 +173,9 @@ class JobState:
     started_at: float | None = None
     finished_at: float | None = None
     last_error: str | None = None
-    schema_version: int = SCHEMA_VERSION
+    checkpoints: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    command_receipts: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    schema_version: int = JOB_STATE_SCHEMA_VERSION
 
     @classmethod
     def initial(cls, request: JobRequest) -> "JobState":
@@ -183,15 +195,40 @@ class JobState:
         return self.status in TERMINAL_JOB_STATUSES
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
+        data = {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name not in {"checkpoints", "command_receipts"}
+        }
+        data["counts"] = self.counts.to_dict()
+        data["resource"] = self.resource.to_dict()
         data["status"] = self.status.value
+        return data
+
+    def to_storage_dict(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data["checkpoints"] = dict(self.checkpoints)
+        data["command_receipts"] = dict(self.command_receipts)
         return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "JobState":
+        version = _require_schema_version(data, "job state", JOB_STATE_SCHEMA_VERSION)
+        revision = data.get("revision")
+        if type(revision) is not int or revision < 0:
+            raise ValueError("job state revision must be a non-negative integer")
+        checkpoints = data.get("checkpoints")
+        if not isinstance(checkpoints, dict):
+            raise ValueError("job state checkpoints must be an object")
+        for shard_id, payload in checkpoints.items():
+            shard = ShardState.from_dict(payload)
+            if shard.shard_id != shard_id or shard.job_id != data["job_id"]:
+                raise ValueError("checkpoint identity does not match job state")
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
-            revision=int(data["revision"]),
+            schema_version=version,
+            revision=revision,
+            checkpoints=checkpoints,
+            command_receipts=dict(data.get("command_receipts") or {}),
             job_id=str(data["job_id"]),
             mode=str(data["mode"]),
             config_path=str(data["config_path"]),
@@ -267,7 +304,7 @@ class JobLease:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "JobLease":
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=_require_schema_version(data, "job lease"),
             job_id=str(data["job_id"]),
             owner_id=str(data["owner_id"]),
             acquired_at=float(data["acquired_at"]),
@@ -296,7 +333,7 @@ class JobCommand:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "JobCommand":
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=_require_schema_version(data, "job command"),
             command_id=str(data["command_id"]),
             job_id=str(data["job_id"]),
             type=str(data["type"]),
@@ -328,7 +365,7 @@ class CommandReceipt:
     def from_dict(cls, data: Mapping[str, Any]) -> "CommandReceipt":
         raw_status = data.get("resulting_status")
         return cls(
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=_require_schema_version(data, "command receipt"),
             command_id=str(data["command_id"]),
             job_id=str(data["job_id"]),
             accepted=bool(data["accepted"]),

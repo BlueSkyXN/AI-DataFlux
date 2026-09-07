@@ -9,6 +9,7 @@ import yaml
 
 from src.control.job_service import JobService
 from src.jobs import JobCommand, JobStatus, ResourceSnapshot
+from src.jobs import SupervisorConflictError
 
 
 def _config(tmp_path):
@@ -107,10 +108,9 @@ def test_durable_cancel_command_reaches_separate_worker(tmp_path):
     cancelling = control_service.cancel(state.job_id)
     command = control_service.repository.list_commands(state.job_id)[-1]
     assert cancelling.status == JobStatus.CANCELLING
-    assert (
-        control_service.repository.get_command_receipt(state.job_id, command.command_id)
-        is None
-    )
+    assert control_service.repository.get_command_receipt(
+        state.job_id, command.command_id
+    ).accepted
 
     worker_service._consume_commands()
     receipt = worker_service.repository.get_command_receipt(
@@ -208,3 +208,163 @@ async def test_run_loop_admits_and_releases_job_with_injected_worker(
 
     assert service.repository.get_state(state.job_id).status == JobStatus.COMPLETED
     assert state.job_id not in service.scheduler.active_job_ids
+
+
+@pytest.mark.asyncio
+async def test_supervisor_ownership_is_distinct_from_control_mutations(tmp_path):
+    path = _config(tmp_path)
+    first, second = JobService(str(path)), JobService(str(path))
+    loop = await first.start()
+    try:
+        with pytest.raises(SupervisorConflictError):
+            await second.start()
+        state = second.submit(root_id="project", relative_path="config.yaml")
+        assert second.cancel(state.job_id).status == JobStatus.CANCELLED
+    finally:
+        await first.stop()
+        await loop
+    replacement = JobService(str(path))
+    loop = await replacement.start()
+    await replacement.stop()
+    await loop
+
+
+@pytest.mark.asyncio
+async def test_supervisor_shutdown_interrupts_instead_of_user_cancelling(
+    tmp_path, monkeypatch
+):
+    service = JobService(str(_config(tmp_path)))
+    state = service.submit(root_id="project", relative_path="config.yaml")
+    started = asyncio.Event()
+
+    async def runner(*_args):
+        started.set()
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr("src.control.job_service.run_processing_job", runner)
+    monkeypatch.setattr(
+        service.scheduler.probe,
+        "sample",
+        lambda **_: ResourceSnapshot(
+            sampled_at=time.time(), status="normal", pressure=False
+        ),
+    )
+    loop = await service.start()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+    finally:
+        await service.stop()
+        await loop
+    assert service.repository.get_state(state.job_id).status == JobStatus.INTERRUPTED
+    assert service.repository.get_lease(state.job_id) is None
+
+
+@pytest.mark.asyncio
+async def test_accepted_cancel_converges_after_supervisor_crash(tmp_path):
+    path = _config(tmp_path)
+    first = JobService(str(path))
+    state = first.submit(root_id="project", relative_path="config.yaml")
+    first.repository.transition(state.job_id, JobStatus.RUNNING)
+    first.cancel(state.job_id)
+    recovered = JobService(str(path))
+    await recovered.recover()
+    assert recovered.repository.get_state(state.job_id).status == JobStatus.CANCELLED
+    assert state.job_id not in recovered.scheduler.queued_job_ids
+
+
+def test_cancel_state_and_receipt_share_one_recovery_commit(tmp_path, monkeypatch):
+    import src.jobs.repository as module
+
+    service = JobService(str(_config(tmp_path)))
+    state = service.submit(root_id="project", relative_path="config.yaml")
+    original = module.atomic_write_json
+
+    def write(path, payload):
+        if path == service.repository.state_path(state.job_id):
+            raise OSError("command state fault")
+        original(path, payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "atomic_write_json", write)
+        with pytest.raises(OSError, match="command state fault"):
+            service.cancel(state.job_id)
+    command = service.repository.list_commands(state.job_id)[0]
+    assert service.repository.get_state(state.job_id).status == JobStatus.QUEUED
+    assert (
+        service.repository.get_command_receipt(state.job_id, command.command_id) is None
+    )
+    service._consume_commands()
+    assert service.repository.get_state(state.job_id).status == JobStatus.CANCELLED
+    assert service.repository.get_command_receipt(
+        state.job_id, command.command_id
+    ).accepted
+
+
+@pytest.mark.asyncio
+async def test_resumed_config_hash_remains_valid_during_crash_recovery(tmp_path):
+    path = _config(tmp_path)
+    service = JobService(str(path))
+    state = service.submit(root_id="project", relative_path="config.yaml")
+    service.repository.transition(state.job_id, JobStatus.FAILED)
+    config = yaml.safe_load(path.read_text())
+    config["job"]["prompt"]["template"] = "new {record_json}"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    service.resume(state.job_id)
+    service.repository.transition(state.job_id, JobStatus.INTERRUPTED)
+    recovered = JobService(str(path))
+    await recovered.recover()
+    assert recovered.repository.get_state(state.job_id).status == JobStatus.QUEUED
+
+
+def test_rejected_command_does_not_change_terminal_finish_time(tmp_path):
+    service = JobService(str(_config(tmp_path)))
+    state = service.submit(root_id="project", relative_path="config.yaml")
+    completed = service.repository.transition(state.job_id, JobStatus.COMPLETED)
+    with pytest.raises(ValueError, match="不能取消"):
+        service.cancel(state.job_id)
+    actual = service.repository.get_state(state.job_id)
+    assert actual.status == JobStatus.COMPLETED
+    assert actual.finished_at == completed.finished_at
+
+
+@pytest.mark.asyncio
+async def test_running_supervisor_retries_recovery_when_old_lease_expires(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from src.jobs import atomic_write_json
+
+    service = JobService(str(_config(tmp_path)))
+    state = service.submit(root_id="project", relative_path="config.yaml")
+    service.repository.transition(state.job_id, JobStatus.RUNNING)
+    lease = service.repository.acquire_lease(state.job_id, "old-supervisor")
+    started = asyncio.Event()
+
+    async def runner(*args):
+        started.set()
+        return JobStatus.COMPLETED
+
+    monkeypatch.setattr("src.control.job_service.run_processing_job", runner)
+    monkeypatch.setattr(
+        service.scheduler.probe,
+        "sample",
+        lambda **_: ResourceSnapshot(
+            sampled_at=time.time(), status="normal", pressure=False
+        ),
+    )
+    loop = await service.start()
+    try:
+        assert not started.is_set()
+        atomic_write_json(
+            service.repository.lease_path(state.job_id),
+            replace(lease, heartbeat_at=0).to_dict(),
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+        for _ in range(20):
+            if service.repository.get_state(state.job_id).status == JobStatus.COMPLETED:
+                break
+            await asyncio.sleep(0.01)
+        assert service.repository.get_state(state.job_id).status == JobStatus.COMPLETED
+    finally:
+        await service.stop()
+        await loop

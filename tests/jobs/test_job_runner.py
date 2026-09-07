@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -65,6 +67,7 @@ async def test_job_runner_reconciles_pending_commit_before_scanning(
 
     class FakeProcessor:
         def __init__(self, _path):
+            self.task_pool = SimpleNamespace(aclose=AsyncMock())
             self.task_manager = SimpleNamespace(
                 total_processed_successfully=0,
                 max_retries_exceeded_count=0,
@@ -133,6 +136,7 @@ async def test_changed_config_requires_explicit_accepted_resume_hash(
 
     class EmptyProcessor:
         def __init__(self, _path):
+            self.task_pool = SimpleNamespace(aclose=AsyncMock())
             self.task_manager = SimpleNamespace(
                 total_processed_successfully=0,
                 max_retries_exceeded_count=0,
@@ -189,3 +193,42 @@ def test_terminal_status_priority(
         )
         == expected
     )
+
+
+@pytest.mark.asyncio
+async def test_processor_initialization_does_not_block_control_loop(
+    tmp_path, monkeypatch
+):
+    repository, request, _ = _repository_with_job(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    closed = AsyncMock()
+
+    class SlowProcessor:
+        def __init__(self, _path):
+            entered.set()
+            assert release.wait(timeout=2)
+            self.task_pool = SimpleNamespace(aclose=closed)
+
+    monkeypatch.setattr(job_runner, "UniversalAIProcessor", SlowProcessor)
+    task = asyncio.create_task(
+        job_runner.run_processing_job(
+            request.job_id, request, repository, lambda: 1, asyncio.Event()
+        )
+    )
+    try:
+        for _ in range(50):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        closed.assert_awaited_once()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

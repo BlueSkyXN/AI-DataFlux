@@ -54,38 +54,40 @@ async def run_processing_job(
             {"reason": "config_missing", "config_path": str(config_path)},
         )
     current_hash = execution_config_hash(load_config(config_path), config_path)
-    accepted_hashes = {request.config_sha256}
-    for command in repository.list_commands(job_id):
-        if command.type != "resume":
-            continue
-        receipt = repository.get_command_receipt(job_id, command.command_id)
-        if receipt is None or not receipt.accepted:
-            continue
-        accepted_hash = command.payload.get("accepted_config_sha256")
-        if isinstance(accepted_hash, str):
-            accepted_hashes.add(accepted_hash)
-    if current_hash not in accepted_hashes:
+    if current_hash != repository.effective_config_hash(job_id):
         return JobRunResult(
             JobStatus.BLOCKED,
             {"reason": "config_changed", "config_path": str(config_path)},
         )
 
     tracker = JobRecordTracker(repository, job_id)
-    processor = UniversalAIProcessor(str(config_path))
+    pending_commits = tracker.pending_prepared_results()
+    initialization = asyncio.create_task(
+        asyncio.to_thread(UniversalAIProcessor, str(config_path))
+    )
+    try:
+        processor = await asyncio.shield(initialization)
+    except asyncio.CancelledError:
+        # 线程不能被安全强杀：等待构造结束并释放 adapter，不遗留后台连接。
+        processor = await initialization
+        await processor.task_pool.aclose()
+        raise
     processor.configure_job_control(
         cancel_event=cancel_event,
         target_concurrency_provider=target_concurrency_provider,
         job_tracker=tracker,
     )
-    pending_commits = tracker.pending_prepared_results()
-    if pending_commits:
-        repository.append_event(
-            job_id,
-            "checkpoint_reconciliation_started",
-            payload={"record_count": len(pending_commits)},
-        )
-        await processor.reconcile_checkpoint_results(pending_commits)
-    completed = await processor.process_shard_async_continuous()
+    try:
+        if pending_commits:
+            repository.append_event(
+                job_id,
+                "checkpoint_reconciliation_started",
+                payload={"record_count": len(pending_commits)},
+            )
+            await processor.reconcile_checkpoint_results(pending_commits)
+        completed = await processor.process_shard_async_continuous()
+    finally:
+        await processor.task_pool.aclose()
     manager = processor.task_manager
     checkpoint_counts = tracker.counts()
     persisted = checkpoint_counts.persisted

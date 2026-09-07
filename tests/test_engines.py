@@ -45,6 +45,24 @@
 
 import pytest
 
+
+def test_frozen_library_probe_uses_allowlisted_binary_entry(monkeypatch):
+    from types import SimpleNamespace
+    import src.data.engines as engines
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(engines.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(engines.subprocess, "run", run)
+    assert engines._safe_check_library("import numpy", "numpy", timeout=2)
+    assert calls[0][0] == [engines.sys.executable, "--_dataflux-library-probe", "numpy"]
+    assert calls[0][1]["timeout"] == 2
+
+
 pd = pytest.importorskip("pandas")
 
 

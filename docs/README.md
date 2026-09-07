@@ -6,6 +6,7 @@
 
 - [V4_EXECUTION_CONTRACT.md](./V4_EXECUTION_CONTRACT.md) - 4.0 clean break 的版本边界、运行语义、锁与恢复合同、Hardening 切片和 Promotion 门禁
 - [BOOTSTRAP_ACCEPTANCE.md](./BOOTSTRAP_ACCEPTANCE.md) - Bootstrap 模块的接受、修订、替换或删除状态，以及对应 commit 和验证证据
+- [V4_LOCAL_VALIDATION.md](./V4_LOCAL_VALIDATION.md) - 当前工作区的 H2/H3、本地 GUI/CLI/API 联调、打包阻塞与剩余交付
 
 > 冻结的 Bootstrap commit 仍保留 `3.2.0-dev` 历史身份；当前 Integration 源码为 `4.0.0-dev`。治理文档中的接受状态以对应 commit 和验证证据为准，不等同于 Release、部署或业务 UAT。
 

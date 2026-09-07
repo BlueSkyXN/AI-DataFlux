@@ -142,8 +142,11 @@ def _safe_check_library(import_code: str, lib_name: str, timeout: int = 30) -> b
         bool: 库是否可用（导入成功）
     """
     try:
+        command = [sys.executable, "-c", import_code]
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
+            command = [sys.executable, "--_dataflux-library-probe", lib_name.lower()]
         result = subprocess.run(
-            [sys.executable, "-c", import_code],
+            command,
             capture_output=True,
             timeout=timeout,
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 from typing import Any, Iterable, Mapping
 
@@ -31,12 +30,15 @@ class JobRecordTracker:
         self.repository = repository
         self.job_id = job_id
         self.shard_id = shard_id
+        self._load_committed_state()
+
+    def _load_committed_state(self) -> None:
         self._records: dict[str, RecordCheckpoint] = {}
         self._record_shards: dict[str, str] = {}
         self._shards: dict[str, ShardState] = {}
         self._next_scan_shard = 1
 
-        for shard in repository.list_shards(job_id):
+        for shard in self.repository.list_shards(self.job_id):
             self._shards[shard.shard_id] = shard
             if shard.shard_id.startswith("scan-"):
                 try:
@@ -430,16 +432,15 @@ class JobRecordTracker:
             counts=self._counts_for(records),
             records=records,
         )
-        self.repository.save_shard(shard)
+        try:
+            self.repository.save_shard(shard)
+        except BaseException:
+            self._load_committed_state()
+            raise
         self._shards[shard_id] = shard
 
     def _publish_counts(self) -> JobCounts:
-        counts = self.counts()
-        self.repository.update_state(
-            self.job_id,
-            lambda state: replace(state, counts=counts),
-        )
-        return counts
+        return self.repository.get_state(self.job_id).counts
 
     @staticmethod
     def _counts_for(records: tuple[RecordCheckpoint, ...]) -> dict[str, int]:

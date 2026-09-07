@@ -40,6 +40,17 @@ from src import __version__
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_internal_library_probe_is_allowlisted_and_exits():
+    for name, expected in (("numpy", 0), ("os", 2)):
+        result = subprocess.run(
+            [sys.executable, "cli.py", "--_dataflux-library-probe", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == expected
+
+
 class TestCLI:
     """CLI 命令测试"""
 
@@ -172,6 +183,7 @@ class TestCLI:
         assert result.returncode == 0
         assert "--port" in result.stdout
         assert "--no-browser" in result.stdout
+        assert "--no-worker" in result.stdout
 
     def test_process_validate(self, sample_config_file):
         """测试配置验证"""

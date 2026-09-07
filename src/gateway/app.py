@@ -84,6 +84,9 @@ from typing import AsyncGenerator, AsyncIterable, Awaitable, Callable, Union
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src import __version__
 from src.config import (
@@ -93,7 +96,7 @@ from src.config import (
     resolve_access_token,
 )
 
-from .service import FluxApiService, GatewayAPIError
+from .service import FluxApiService, GatewayAPIError, UpstreamStream
 from .schemas import (
     ChatCompletionRequest,
     HealthResponse,
@@ -244,6 +247,39 @@ def _register_routes(app: FastAPI) -> None:
         app: FastAPI 应用实例
     """
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, error: RequestValidationError):
+        locations = [
+            ".".join(str(part) for part in item["loc"] if part != "body")
+            for item in error.errors()
+        ]
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "Invalid request fields: " + ", ".join(locations),
+                    "type": "invalid_request_error",
+                    "code": "invalid_request",
+                    "param": locations[0] if locations else None,
+                }
+            },
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_request: Request, error: StarletteHTTPException):
+        return JSONResponse(
+            status_code=error.status_code,
+            headers=error.headers,
+            content={
+                "error": {
+                    "message": str(error.detail),
+                    "type": "invalid_request_error",
+                    "code": "http_error",
+                    "param": None,
+                }
+            },
+        )
+
     @app.middleware("http")
     async def check_service_availability(request: Request, call_next):
         """
@@ -255,7 +291,14 @@ def _register_routes(app: FastAPI) -> None:
         if _service is None:
             return JSONResponse(
                 status_code=503,
-                content={"error": "Service not initialized"},
+                content={
+                    "error": {
+                        "message": "Service not initialized",
+                        "type": "server_error",
+                        "code": "service_unavailable",
+                        "param": None,
+                    }
+                },
             )
         if request.url.path.startswith(("/v1/", "/admin/")):
             token = _extract_incoming_bearer_token(request)
@@ -306,6 +349,11 @@ def _register_routes(app: FastAPI) -> None:
             if isinstance(result, AsyncIterable):
                 return StreamingResponse(
                     content=result,
+                    background=(
+                        BackgroundTask(result.aclose)
+                        if isinstance(result, UpstreamStream)
+                        else None
+                    ),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -347,6 +395,11 @@ def _register_routes(app: FastAPI) -> None:
             if isinstance(result, AsyncIterable):
                 return StreamingResponse(
                     content=result,
+                    background=(
+                        BackgroundTask(result.aclose)
+                        if isinstance(result, UpstreamStream)
+                        else None
+                    ),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -515,17 +568,17 @@ def run_server(
         config_path: 配置文件路径（YAML 格式）
         host: 监听地址（默认 0.0.0.0 接受所有来源）
         port: 监听端口（默认 8787）
-        workers: 工作进程数（默认 1，生产环境可增加）
+        workers: 当前固定为 1，Responses affinity 不跨进程共享
         reload: 是否启用热重载（开发模式使用）
 
     注意:
-        - workers > 1 时不能使用 reload=True
-        - 生产环境建议使用 gunicorn + uvicorn workers
+        - workers > 1 会被明确拒绝
+        - reload 会重建 affinity，旧 previous_response_id 可能被明确拒绝
     """
     root_config = load_config(config_path)
     require_gateway_config(root_config)
     if workers != 1:
-        raise ValueError("AI-DataFlux 4.0 H1-H2 仅支持 gateway workers=1")
+        raise ValueError("AI-DataFlux 4.0 仅支持 gateway workers=1")
 
     merged_config = root_config
     access_token = resolve_access_token(

@@ -275,7 +275,7 @@ async def test_responses_payload_and_response_are_forwarded_without_chat_transla
 
 
 @pytest.mark.asyncio
-async def test_previous_response_id_routes_only_to_native_capable_model(tmp_path):
+async def test_previous_response_id_uses_recorded_native_route(tmp_path):
     config_path = _config(
         tmp_path,
         [
@@ -290,10 +290,11 @@ async def test_previous_response_id_routes_only_to_native_capable_model(tmp_path
         config_path,
         [_FakeResponse(payload={"id": "resp_next", "object": "response"})],
     )
+    service.affinity.remember("resp_previous", "stateful")
 
     result = await service.responses(
         ResponsesRequest(
-            model="plain",
+            model="auto",
             input="continue",
             previous_response_id="resp_previous",
         )
@@ -354,7 +355,7 @@ def test_capability_routing_uses_each_models_canonical_list(tmp_path):
     service = FluxApiService(str(config_path))
 
     selected = service.get_available_model(
-        requested_model_name="plain",
+        requested_model_name="auto",
         required_capabilities={"chat_completions", "tools"},
     )
 
@@ -551,7 +552,7 @@ def test_no_capable_model_returns_standard_openai_error(tmp_path):
     assert response.status_code == 400
     assert response.json() == {
         "error": {
-            "message": "No available model supports the required capabilities: chat_completions, tools",
+            "message": "Selected routes do not support the required capabilities",
             "type": "invalid_request_error",
             "param": "model",
             "code": "unsupported_capability",
@@ -610,7 +611,7 @@ async def test_failover_before_response_start_for_retryable_statuses(tmp_path, s
 
     result = await service.chat_completion(
         ChatCompletionRequest(
-            model="first",
+            model="auto",
             messages=[{"role": "user", "content": "hello"}],
         )
     )
@@ -632,7 +633,7 @@ async def test_failover_before_response_start_for_connection_error(tmp_path):
 
     result = await service.chat_completion(
         ChatCompletionRequest(
-            model="first",
+            model="auto",
             messages=[{"role": "user", "content": "hello"}],
         )
     )
@@ -675,6 +676,190 @@ async def test_non_retryable_4xx_does_not_fail_over(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [429, 503, "connect", "capability", "disabled"])
+async def test_strict_route_never_uses_other_models(tmp_path, failure):
+    first = _model("first")
+    if failure == "capability":
+        first["capabilities"] = ["responses"]
+    if failure == "disabled":
+        first["weight"] = 0
+    service, session = _service_with_session(
+        _config(tmp_path, [first, _model("other")]),
+        [
+            (
+                aiohttp.ClientConnectionError()
+                if failure == "connect"
+                else _FakeResponse(
+                    status=failure if isinstance(failure, int) else 200,
+                    payload={"error": {"message": "failed"}},
+                )
+            )
+        ],
+    )
+    with pytest.raises(GatewayAPIError):
+        await service.chat_completion(ChatCompletionRequest(model="first", messages=[]))
+    assert len(session.calls) == (0 if failure in {"capability", "disabled"} else 1)
+    assert all(call["json"]["model"] == "upstream-first" for call in session.calls)
+
+
+@pytest.mark.asyncio
+async def test_fallback_group_honors_order_boundary_and_attempt_budget(tmp_path):
+    path = _config(tmp_path, [_model("first"), _model("second"), _model("outside")])
+    config = yaml.safe_load(path.read_text())
+    config["gateway"]["fallback_groups"] = {"primary": ["second", "first"]}
+    config["gateway"]["retry"] = {"max_attempts_per_request": 2}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    service, session = _service_with_session(
+        path,
+        [
+            _FakeResponse(status=503, payload={"error": {"message": "retry"}}),
+            _FakeResponse(payload={"id": "success"}),
+        ],
+    )
+    result = await service.chat_completion(
+        ChatCompletionRequest(model="auto", messages=[], fallback_group="primary")
+    )
+    assert result["id"] == "success"
+    assert [call["json"]["model"] for call in session.calls] == [
+        "upstream-second",
+        "upstream-first",
+    ]
+    assert all("fallback_group" not in call["json"] for call in session.calls)
+    service.max_attempts = 1
+    service.dispatcher.mark_model_success("second")
+    session.outcomes = [
+        _FakeResponse(status=503, payload={"error": {"message": "stop"}})
+    ]
+    with pytest.raises(GatewayAPIError):
+        await service.chat_completion(
+            ChatCompletionRequest(model="auto", messages=[], fallback_group="primary")
+        )
+    assert len(session.calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model,group", [("auto", "missing"), ("first", "primary"), ("auto", [])]
+)
+async def test_invalid_fallback_is_rejected_before_upstream(tmp_path, model, group):
+    service, session = _service_with_session(_config(tmp_path, [_model("first")]), [])
+    service.fallback_groups = {"primary": ["first"]}
+    with pytest.raises(GatewayAPIError) as error:
+        await service.chat_completion(
+            ChatCompletionRequest(model=model, messages=[], fallback_group=group)
+        )
+    assert error.value.error["code"] == "invalid_fallback_group"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_affinity_records_response_and_rejects_conflicting_route(tmp_path):
+    service, session = _service_with_session(
+        _config(tmp_path, [_model("first"), _model("second")]),
+        [
+            _FakeResponse(payload={"id": "resp_origin", "object": "response"}),
+            _FakeResponse(payload={"id": "resp_next", "object": "response"}),
+        ],
+    )
+    await service.responses(ResponsesRequest(model="first", input="hello"))
+    with pytest.raises(GatewayAPIError) as error:
+        await service.responses(
+            ResponsesRequest(
+                model="second", input="continue", previous_response_id="resp_origin"
+            )
+        )
+    assert error.value.error["code"] == "response_affinity_conflict"
+    await service.responses(
+        ResponsesRequest(
+            model="auto", input="continue", previous_response_id="resp_origin"
+        )
+    )
+    assert [call["json"]["model"] for call in session.calls] == [
+        "upstream-first",
+        "upstream-first",
+    ]
+
+
+def test_affinity_ttl_capacity_and_collision_fail_closed():
+    from src.gateway.affinity import ResponseAffinity
+
+    now = [10.0]
+    affinity = ResponseAffinity(5, 2, clock=lambda: now[0])
+    affinity.remember("a", "first")
+    affinity.remember("b", "first")
+    affinity.remember("c", "second")
+    assert affinity.get("a") is None
+    assert affinity.get("b") == "first"
+    with pytest.raises(ValueError):
+        affinity.remember("b", "second")
+    assert affinity.get("b") is None
+    now[0] = 15
+    assert affinity.get("c") is None
+
+
+@pytest.mark.asyncio
+async def test_stream_records_affinity_from_split_response_event(tmp_path):
+    chunks = [
+        b'event: response.created\r\ndata: {"type":"response.created",',
+        b'"response":{"id":"resp_stream"}}\r\n\r',
+        b'\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_stream"}}\n\n',
+    ]
+    response = _FakeResponse(chunks=chunks)
+    service, session = _service_with_session(
+        _config(tmp_path, [_model("first")]), [response]
+    )
+    stream = await service.responses(
+        ResponsesRequest(model="first", input="hello", stream=True)
+    )
+    assert b"".join([chunk async for chunk in stream]) == b"".join(chunks)
+    assert service.affinity.get("resp_stream") == "first"
+    assert response.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat", "responses"])
+async def test_truncated_stream_returns_protocol_error_and_closes(tmp_path, endpoint):
+    response = _FakeResponse(chunks=[b'data: {"delta":"partial"}\n\n'])
+    service, session = _service_with_session(
+        _config(tmp_path, [_model("first")]), [response]
+    )
+    if endpoint == "chat":
+        stream = await service.chat_completion(
+            ChatCompletionRequest(model="first", messages=[], stream=True)
+        )
+    else:
+        stream = await service.responses(
+            ResponsesRequest(model="first", input="hello", stream=True)
+        )
+    output = b"".join([chunk async for chunk in stream])
+    assert b"upstream_stream_error" in output
+    assert (b"event: error" in output) == (endpoint == "responses")
+    assert response.closed and len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unconsumed_stream_can_close_upstream(tmp_path):
+    response = _FakeResponse(chunks=[b"data: [DONE]\n\n"])
+    service, _ = _service_with_session(_config(tmp_path, [_model("first")]), [response])
+    stream = await service.responses(
+        ResponsesRequest(model="first", input="hello", stream=True)
+    )
+    await stream.aclose()
+    assert response.closed
+
+
+def test_invalid_request_uses_openai_error_without_echoing_payload(tmp_path):
+    app = create_app(
+        str(_config(tmp_path, [_model("first")])), incoming_token_checker=lambda _: True
+    )
+    with TestClient(app) as client:
+        response = client.post("/v1/responses", json={"input": "private-data"})
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "model"
+    assert "private-data" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_stream_failure_after_response_start_does_not_fail_over(tmp_path):
     config_path = _config(tmp_path, [_model("first"), _model("second")])
     service, session = _service_with_session(
@@ -697,7 +882,8 @@ async def test_stream_failure_after_response_start_does_not_fail_over(tmp_path):
         )
     )
 
-    with pytest.raises(aiohttp.ClientPayloadError):
-        _ = [chunk async for chunk in stream]
+    chunks = [chunk async for chunk in stream]
+    assert b"upstream_stream_error" in chunks[-1]
+    assert chunks[0] == b'data: {"delta":"started"}\n\n'
 
     assert len(session.calls) == 1

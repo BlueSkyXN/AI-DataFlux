@@ -36,6 +36,12 @@ AI-DataFlux Control Server
     - .server: 控制面板服务器实现
 """
 
-from .server import run_control_server
+
+def run_control_server(*args, **kwargs):
+    """延迟加载 GUI，CLI-only 的 Job/Worker 不依赖被排除的 server 模块。"""
+    from .server import run_control_server as run
+
+    return run(*args, **kwargs)
+
 
 __all__ = ["run_control_server"]

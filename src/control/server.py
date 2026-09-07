@@ -138,7 +138,7 @@ from src.config import (
     resolve_workspace_roots,
     validate_config,
 )
-from src.jobs import JobNotFoundError
+from src.jobs import JobNotFoundError, RevisionConflictError, LeaseConflictError
 from src.models.errors import ConfigError
 
 from .config_api import (
@@ -592,7 +592,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     job_loop_task: asyncio.Task | None = None
     if getattr(app.state, "supervise_worker", True):
         job_service = _get_or_create_job_service(app)
-        job_loop_task = asyncio.create_task(job_service.run_loop())
+        job_loop_task = await job_service.start()
         app.state.job_loop_task = job_loop_task
 
     # 打开浏览器 (等待端口就绪，避免偶现 Connection Refused)
@@ -998,7 +998,7 @@ def create_control_app(
             return job_service().cancel(job_id).to_dict()
         except JobNotFoundError as exc:
             raise ControlAPIError(404, "job_not_found", "Job not found") from exc
-        except ValueError as exc:
+        except (ValueError, RevisionConflictError, LeaseConflictError) as exc:
             raise ControlAPIError(409, "job_conflict", str(exc)) from exc
 
     @app.post("/api/v1/jobs/{job_id}/resume")
@@ -1007,7 +1007,7 @@ def create_control_app(
             return job_service().resume(job_id).to_dict()
         except JobNotFoundError as exc:
             raise ControlAPIError(404, "job_not_found", "Job not found") from exc
-        except ValueError as exc:
+        except (ValueError, RevisionConflictError, LeaseConflictError) as exc:
             raise ControlAPIError(409, "job_conflict", str(exc)) from exc
 
     @app.get("/api/v1/jobs/{job_id}/events")

@@ -18,6 +18,7 @@ from src.config import (
     resolve_workspace_roots,
 )
 from src.core.job_runner import run_processing_job
+from src.config.security import redact_sensitive_text
 from src.data import declared_adapter_capabilities
 from src.jobs import (
     CommandReceipt,
@@ -30,6 +31,7 @@ from src.jobs import (
     ResourcePolicy,
     ResourceProbe,
     ResourceScheduler,
+    RevisionConflictError,
 )
 
 MAX_JOB_MAX_IN_FLIGHT = 10_000
@@ -90,6 +92,8 @@ class JobService:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._stop_event = asyncio.Event()
+        self._started = asyncio.Event()
+        self._shutdown_task: asyncio.Task | None = None
         self._last_snapshot = self.scheduler.probe.sample()
 
     def resolve_path(self, root_id: str, relative_path: str) -> Path:
@@ -143,12 +147,25 @@ class JobService:
 
     def resource_status(self) -> dict[str, Any]:
         snapshot = self._last_snapshot
+        active = list(self.scheduler.active_job_ids)
+        queued = list(self.scheduler.queued_job_ids)
+        if not self._started.is_set():
+            snapshot = self.scheduler.probe.sample()
+            states = self.list_states()
+            active = [
+                state.job_id
+                for state in states
+                if state.status in {JobStatus.RUNNING, JobStatus.CANCELLING}
+            ]
+            queued = [
+                state.job_id for state in states if state.status == JobStatus.QUEUED
+            ]
         return {
             **asdict(snapshot),
             "resource_control": snapshot.status,
             "max_active_jobs": self.scheduler.max_active_jobs,
-            "active_jobs": list(self.scheduler.active_job_ids),
-            "queued_jobs": list(self.scheduler.queued_job_ids),
+            "active_jobs": active,
+            "queued_jobs": queued,
         }
 
     def list_events(
@@ -165,32 +182,10 @@ class JobService:
         return [event.to_dict() for event in events], next_seq
 
     def cancel(self, job_id: str) -> JobState:
-        state = self.repository.get_state(job_id)
         command = JobCommand(command_id=str(uuid4()), job_id=job_id, type="cancel")
-        self.repository.add_command(command)
-        if state.status == JobStatus.QUEUED:
-            self.scheduler.remove_queued(job_id)
-            updated = self.repository.transition(job_id, JobStatus.CANCELLED)
-            self.repository.save_command_receipt(
-                CommandReceipt(
-                    command_id=command.command_id,
-                    job_id=job_id,
-                    accepted=True,
-                    message=updated.status.value,
-                    resulting_status=updated.status,
-                )
-            )
-        elif state.status in {JobStatus.RUNNING, JobStatus.CANCELLING}:
-            updated = (
-                self.repository.transition(job_id, JobStatus.CANCELLING)
-                if state.status == JobStatus.RUNNING
-                else state
-            )
-            local_event = self._cancel_events.get(job_id)
-            if local_event is not None:
-                local_event.set()
-        else:
-            raise ValueError(f"Job 当前状态不能取消: {state.status.value}")
+        updated, receipt = self._apply_command(command)
+        if not receipt.accepted:
+            raise ValueError(f"Job 当前状态不能取消: {updated.status.value}")
         return updated
 
     def resume(self, job_id: str) -> JobState:
@@ -202,7 +197,7 @@ class JobService:
         }:
             raise ValueError(f"Job 当前状态不能恢复: {state.status.value}")
         request = self.repository.get_request(job_id)
-        max_in_flight = _validated_max_in_flight(dict(request.options), 1)
+        _validated_max_in_flight(dict(request.options), 1)
         if not Path(request.config_path).is_file():
             raise ValueError("Job config 不存在")
         current_config = load_config(request.config_path)
@@ -213,27 +208,62 @@ class JobService:
             type="resume",
             payload={"accepted_config_sha256": current_hash},
         )
-        self.repository.add_command(command)
-        updated = self.repository.transition(job_id, JobStatus.QUEUED)
-        self.scheduler.enqueue(
-            job_id,
-            created_at=state.created_at,
-            max_in_flight=max_in_flight,
-        )
-        self.repository.save_command_receipt(
-            CommandReceipt(
-                command_id=command.command_id,
-                job_id=job_id,
-                accepted=True,
-                message=updated.status.value,
-                resulting_status=updated.status,
-            )
-        )
+        updated, receipt = self._apply_command(command)
+        if not receipt.accepted:
+            raise ValueError(receipt.message)
         return updated
+
+    def _apply_command(self, command: JobCommand) -> tuple[JobState, CommandReceipt]:
+        state = self.repository.get_state(command.job_id)
+        target = None
+        message = "unsupported_command"
+        if command.type == "cancel":
+            if state.status == JobStatus.QUEUED:
+                target = JobStatus.CANCELLED
+            elif state.status in {JobStatus.RUNNING, JobStatus.CANCELLING}:
+                target = JobStatus.CANCELLING
+            message = target.value if target else "job_not_cancellable"
+        elif command.type == "resume":
+            message = "job_not_resumable"
+            if state.status in {
+                JobStatus.FAILED,
+                JobStatus.BLOCKED,
+                JobStatus.INTERRUPTED,
+            }:
+                request = self.repository.get_request(command.job_id)
+                config = load_config(request.config_path)
+                if execution_config_hash(
+                    config, request.config_path
+                ) == command.payload.get("accepted_config_sha256"):
+                    target, message = JobStatus.QUEUED, "queued"
+                else:
+                    message = "resume_config_changed"
+        updated, receipt = self.repository.apply_command(
+            command, target=target, expected_revision=state.revision, message=message
+        )
+        if receipt.accepted:
+            if updated.status == JobStatus.QUEUED:
+                request = self.repository.get_request(command.job_id)
+                self.scheduler.enqueue(
+                    command.job_id,
+                    created_at=updated.created_at,
+                    max_in_flight=_validated_max_in_flight(dict(request.options), 1),
+                )
+            else:
+                self.scheduler.remove_queued(command.job_id)
+                if updated.status == JobStatus.CANCELLING:
+                    self._cancel_events.setdefault(
+                        command.job_id, asyncio.Event()
+                    ).set()
+        return updated, receipt
 
     async def recover(self) -> None:
         for state in self.list_states():
             request = self.repository.get_request(state.job_id)
+            if state.status != JobStatus.QUEUED:
+                self.scheduler.remove_queued(state.job_id)
+            if state.job_id in self._tasks:
+                continue
             if state.is_terminal or state.status == JobStatus.BLOCKED:
                 continue
             try:
@@ -261,6 +291,11 @@ class JobService:
             lease = self.repository.get_lease(state.job_id)
             if lease is not None and not lease.is_stale():
                 continue
+            if state.status == JobStatus.CANCELLING:
+                self.repository.transition(
+                    state.job_id, JobStatus.CANCELLED, expected_revision=state.revision
+                )
+                continue
             resumable = False
             if Path(request.config_path).is_file():
                 try:
@@ -274,7 +309,7 @@ class JobService:
                         capabilities.resumable
                         and capabilities.idempotent_write
                         and execution_config_hash(root_config, request.config_path)
-                        == request.config_sha256
+                        == self.repository.effective_config_hash(state.job_id)
                     )
                 except Exception:
                     logging.warning(
@@ -293,11 +328,37 @@ class JobService:
                     max_in_flight=max_in_flight,
                 )
 
+    async def start(self) -> asyncio.Task:
+        task = asyncio.create_task(self.run_loop())
+        ready = asyncio.create_task(self._started.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {task, ready}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if task in done:
+                await task
+            return task
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
+
     async def run_loop(self) -> None:
-        await self.recover()
+        with self.repository.supervisor_lock():
+            try:
+                await self.recover()
+                self._started.set()
+                await self._run_owned_loop()
+            finally:
+                await self.stop()
+
+    async def _run_owned_loop(self) -> None:
         interval = self.scheduler.probe.policy.sample_interval_seconds
         while not self._stop_event.is_set():
-            self._discover_queued_jobs()
+            await self.recover()
             self._consume_commands()
             decision = self.scheduler.tick()
             self._last_snapshot = decision.snapshot
@@ -356,6 +417,7 @@ class JobService:
 
         for state in self.list_states():
             if state.status != JobStatus.QUEUED:
+                self.scheduler.remove_queued(state.job_id)
                 continue
             request = self.repository.get_request(state.job_id)
             try:
@@ -378,6 +440,8 @@ class JobService:
         """Apply durable commands so standalone Control and Worker cooperate."""
 
         for state in self.list_states():
+            if state.status == JobStatus.CANCELLING:
+                self._cancel_events.setdefault(state.job_id, asyncio.Event()).set()
             for command in self.repository.list_commands(state.job_id):
                 if (
                     self.repository.get_command_receipt(
@@ -386,40 +450,10 @@ class JobService:
                     is not None
                 ):
                     continue
-                accepted = False
-                message = "unsupported_command"
-                resulting_status = state.status
-                if command.type == "cancel":
-                    current = self.repository.get_state(state.job_id)
-                    if current.status == JobStatus.QUEUED:
-                        self.scheduler.remove_queued(state.job_id)
-                        current = self.repository.transition(
-                            state.job_id, JobStatus.CANCELLED
-                        )
-                        accepted = True
-                    elif current.status in {
-                        JobStatus.RUNNING,
-                        JobStatus.CANCELLING,
-                    }:
-                        if current.status == JobStatus.RUNNING:
-                            current = self.repository.transition(
-                                state.job_id, JobStatus.CANCELLING
-                            )
-                        self._cancel_events.setdefault(
-                            state.job_id, asyncio.Event()
-                        ).set()
-                        accepted = True
-                    resulting_status = current.status
-                    message = resulting_status.value
-                self.repository.save_command_receipt(
-                    CommandReceipt(
-                        command_id=command.command_id,
-                        job_id=state.job_id,
-                        accepted=accepted,
-                        message=message,
-                        resulting_status=resulting_status,
-                    )
-                )
+                try:
+                    self._apply_command(command)
+                except RevisionConflictError:
+                    continue  # 外部 Control 更新了 revision，下轮重新检查。
 
     def _release_job(self, job_id: str, task: asyncio.Task) -> None:
         if not task.cancelled():
@@ -429,17 +463,27 @@ class JobService:
                 logging.exception("Background Job %s failed", job_id)
             else:
                 if error is not None:
-                    logging.error("Background Job %s failed: %s", job_id, error)
+                    logging.error(
+                        "Background Job %s failed: %s",
+                        job_id,
+                        redact_sensitive_text(error),
+                    )
         self.scheduler.release(job_id)
         self._tasks.pop(job_id, None)
         self._cancel_events.pop(job_id, None)
 
     async def stop(self) -> None:
         self._stop_event.set()
-        for event in self._cancel_events.values():
-            event.set()
-        if self._tasks:
-            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._stop_jobs())
+        await asyncio.shield(self._shutdown_task)
+
+    async def _stop_jobs(self) -> None:
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stream_events(
         self, job_id: str, *, after_seq: int = 0

@@ -224,12 +224,17 @@ data: {"seq":12,"type":"status_changed",...}
 
 4.0 CLI 暴露 `worker`、`config validate` 和 `job` 命令。Job 命令不带 `--server` 时直接操作本地 Repository；带 `--server` 时通过 Control API 执行，token 读取顺序为 `DATAFLUX_TOKEN` → 本地 `runtime.auth.token`。
 
+Supervisor ownership 与 Repository mutation 分离：同一 Repository 的第二个 active Supervisor 在启动时明确失败，但不阻止 Control/CLI 提交 Job 或 command。cancel/resume 的并发 revision 或 lease 冲突返回 409；状态与 command receipt 以同一个 state 快照提交。公开 Job JSON 的 state schema 为 2，不暴露内部 checkpoints/command receipts。详见 [JOBS.md](./JOBS.md)。
+
 ```bash
 # 严格配置校验
 python cli.py config validate -c config.yaml --json
 
 # 单独运行后台 Worker
 python cli.py worker -c config.yaml --json
+
+# 另一个终端启动 Control/GUI，不争抢同一 Repository 的 Supervisor ownership
+python cli.py gui -c config.yaml --no-worker --no-browser
 
 # 本地 Repository
 python cli.py job submit -c config.yaml --json

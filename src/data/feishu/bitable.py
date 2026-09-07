@@ -687,6 +687,9 @@ class FeishuBitableTaskPool(BaseTaskPool):
         self._logger.info("关闭飞书多维表格任务池 ...")
         run_async(self.client.close())
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     # ==================== 工具方法 ====================
 
     @staticmethod

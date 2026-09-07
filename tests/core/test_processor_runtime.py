@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -87,6 +88,35 @@ def _processor_config(tmp_path, *, routing: bool = False):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selection,model,group",
+    [
+        ({"mode": "auto"}, "auto", None),
+        ({"mode": "strict", "route_id": "chosen"}, "chosen", None),
+        ({"mode": "fallback_group", "group": "primary"}, "auto", "primary"),
+    ],
+)
+async def test_canonical_model_selection_reaches_gateway_payload(
+    tmp_path, selection, model, group
+):
+    path, _ = _processor_config(tmp_path, routing=True)
+    config = yaml.safe_load(path.read_text())
+    config["job"]["model_selection"] = selection
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    processor = UniversalAIProcessor(str(path))
+    processor.client.call = AsyncMock(return_value='{"answer":"ok"}')
+    try:
+        outcome = await processor._process_one_record(
+            object(), "a", {"input": "hello", "category": "special"}
+        )
+        assert isinstance(outcome, TaskSuccess)
+        assert processor.client.call.call_args.kwargs["model"] == model
+        assert processor.client.call.call_args.kwargs.get("fallback_group") == group
+    finally:
+        await processor.task_pool.aclose()
+
+
+@pytest.mark.asyncio
 async def test_processor_initializes_and_persists_successful_csv(tmp_path):
     config_path, csv_path = _processor_config(tmp_path)
     processor = UniversalAIProcessor(str(config_path))
@@ -114,6 +144,37 @@ async def test_processor_initializes_and_persists_successful_csv(tmp_path):
     assert [shard.shard_id for shard in shards] == ["scan-000001"]
     assert shards[0].records[0].record_id == 0
     assert shards[0].records[0].status == RecordStatus.PERSISTED
+
+
+@pytest.mark.asyncio
+async def test_cancelling_processor_drains_tasks_from_later_scan_waves(tmp_path):
+    path, csv_path = _processor_config(tmp_path)
+    csv_path.write_text("input,result\nfirst,\nsecond,\n", encoding="utf-8")
+    processor = UniversalAIProcessor(str(path))
+    started, drained = asyncio.Event(), asyncio.Event()
+
+    async def process_one(_session, record_id, _data):
+        if record_id == 0:
+            return TaskSuccess(PreparedResult.create(record_id, {"answer": "done"}))
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            drained.set()
+
+    processor._process_one_record = process_one
+    task = asyncio.create_task(processor.process_shard_async_continuous())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert drained.is_set()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await processor.task_pool.aclose()
 
 
 @pytest.mark.asyncio

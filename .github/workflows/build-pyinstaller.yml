@@ -33,6 +33,7 @@ on:
       - 'config-example.yaml'
       - 'web/**'
       - '.github/scripts/smoke_control.py'
+      - '.github/scripts/smoke_workflow.py'
       - '.github/workflows/build-pyinstaller.yml'
   pull_request:
     paths:
@@ -41,6 +42,7 @@ on:
       - 'config-example.yaml'
       - 'web/**'
       - '.github/scripts/smoke_control.py'
+      - '.github/scripts/smoke_workflow.py'
       - '.github/workflows/build-pyinstaller.yml'
   workflow_dispatch:                       # 支持手动触发
     inputs:
@@ -274,6 +276,16 @@ jobs:
               exit 1
             }
           }
+
+      - name: Smoke packaged processing workflow
+        if: matrix.build_type == 'full'
+        timeout-minutes: 3
+        run: python .github/scripts/smoke_workflow.py --binary "dist/${{ matrix.artifact_name }}"
+
+      - name: Smoke packaged workflow with separate worker
+        if: matrix.build_type == 'full'
+        timeout-minutes: 3
+        run: python .github/scripts/smoke_workflow.py --binary "dist/${{ matrix.artifact_name }}" --separate-worker
 
       - name: Upload artifact               # 上传到 GitHub Artifacts，保留30天
         uses: actions/upload-artifact@v4

@@ -103,51 +103,27 @@
 """
 
 import logging
+from importlib.util import find_spec
 from typing import Any
 
 from .base import BaseTaskPool
 
 # ==================== 可用性检测标志 ====================
-# 通过尝试导入来检测各依赖库是否可用
+# 工厂导入只探测包是否存在；原生驱动在选用对应 adapter 时才导入。
 
-MYSQL_AVAILABLE = False
-POSTGRESQL_AVAILABLE = False
-SQLITE_AVAILABLE = True  # SQLite 是 Python 标准库，始终可用
-EXCEL_ENABLED = False
-FEISHU_AVAILABLE = False
 
-# 检测 MySQL 连接器
-try:
-    import mysql.connector  # noqa: F401
+def _has_module(name: str) -> bool:
+    try:
+        return find_spec(name) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
 
-    MYSQL_AVAILABLE = True
-except ImportError:
-    pass
 
-# 检测 PostgreSQL 连接器
-try:
-    import psycopg2  # noqa: F401
-
-    POSTGRESQL_AVAILABLE = True
-except ImportError:
-    pass
-
-# 检测 Excel 依赖（pandas + openpyxl）
-try:
-    import pandas  # noqa: F401
-    import openpyxl  # noqa: F401
-
-    EXCEL_ENABLED = True
-except ImportError:
-    pass
-
-# 检测飞书依赖（aiohttp）
-try:
-    import aiohttp  # noqa: F401
-
-    FEISHU_AVAILABLE = True
-except ImportError:
-    pass
+MYSQL_AVAILABLE = _has_module("mysql.connector")
+POSTGRESQL_AVAILABLE = _has_module("psycopg2")
+SQLITE_AVAILABLE = True
+EXCEL_ENABLED = _has_module("pandas") and _has_module("openpyxl")
+FEISHU_AVAILABLE = _has_module("aiohttp")
 
 
 def _normalize_nonempty_str(value: Any) -> str | None:

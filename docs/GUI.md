@@ -4,6 +4,8 @@ AI-DataFlux 提供本地 Web GUI，用于选择受控 workspace、编辑 canonic
 
 > 当前活动源码版本是 `4.0.0-dev`。页面和 API 路由已接线不等于打包、Release、部署或业务 UAT 已完成。
 
+提示词页面已提供 canonical `job.model_selection` 的 auto、strict 和 fallback_group 选择；切换模式会替换整个 selection 对象，避免残留不兼容字段。组成员在原始 YAML 的 `gateway.fallback_groups` 中编辑。真实本地 GUI 保存/提交/CSV 回读证据见 [V4_LOCAL_VALIDATION.md](./V4_LOCAL_VALIDATION.md)。
+
 ## 功能概述
 
 控制面板提供以下核心功能：

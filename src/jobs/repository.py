@@ -9,16 +9,25 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
+import tempfile
 import time
 from typing import Any, Callable, Iterator, Mapping
 from uuid import UUID, uuid4
 
-from .io import append_jsonl, atomic_write_json, iter_file_size, read_json
+from .io import (
+    _fsync_directory,
+    append_jsonl,
+    atomic_write_json,
+    iter_file_size,
+    read_json,
+)
 from .io import read_jsonl_tolerant, repair_jsonl_tail
 from .models import (
     ACTIVE_JOB_STATUSES,
@@ -30,6 +39,8 @@ from .models import (
     JobRequest,
     JobState,
     JobStatus,
+    JobCounts,
+    RecordStatus,
     PruneCandidate,
     PrunePreview,
     PruneResult,
@@ -72,6 +83,10 @@ class RevisionConflictError(JobRepositoryError):
 
 class LeaseConflictError(JobRepositoryError):
     """Raised when a fresh lease is already owned by another worker."""
+
+
+class SupervisorConflictError(JobRepositoryError):
+    """同一个 Repository 只能有一个 active supervisor。"""
 
 
 class ImmutableRecordError(JobRepositoryError):
@@ -129,40 +144,50 @@ def _exclusive_file_lock(
     path: Path,
     *,
     timeout_seconds: float = 5.0,
-    stale_after_seconds: float = 60.0,
 ) -> Iterator[None]:
-    """Portable inter-process lock using exclusive file creation."""
+    """短时 mutation 锁：由操作系统释放，不按文件年龄抢占或删除锁文件。"""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout_seconds
-    while True:
-        try:
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            try:
-                age = utc_timestamp() - path.stat().st_mtime
-                if age >= stale_after_seconds:
-                    path.unlink()
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out acquiring repository lock: {path}")
-            time.sleep(0.01)
-            continue
-        try:
-            os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
-        finally:
-            os.close(descriptor)
-        break
-
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        yield
-    finally:
+        if sys.platform == "win32":
+            import msvcrt
+
+            def acquire() -> None:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+            def release() -> None:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+        else:
+            import fcntl
+
+            def acquire() -> None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release() -> None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+        while True:
+            try:
+                acquire()
+                break
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out acquiring repository lock: {path}"
+                    ) from error
+                time.sleep(0.01)
         try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+            yield
+        finally:
+            release()
+    finally:
+        os.close(descriptor)
 
 
 class FileJobRepository:
@@ -171,6 +196,33 @@ class FileJobRepository:
     def __init__(self, root: Path | str = Path(".dataflux/jobs")):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._writer_owner: str | None = None
+
+    @contextmanager
+    def supervisor_lock(self) -> Iterator[None]:
+        lock = _exclusive_file_lock(self.root / ".supervisor.lock", timeout_seconds=0)
+        try:
+            lock.__enter__()
+        except TimeoutError as error:
+            raise SupervisorConflictError(
+                "another supervisor owns this repository"
+            ) from error
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+
+    def for_worker(self, owner_id: str) -> "FileJobRepository":
+        repository = FileJobRepository(self.root)
+        repository._writer_owner = owner_id
+        return repository
+
+    def _check_writer(self, job_id: str) -> None:
+        if self._writer_owner is None:
+            return
+        lease = self.get_lease(job_id)
+        if lease is None or lease.owner_id != self._writer_owner or lease.is_stale():
+            raise LeaseConflictError("worker no longer owns a fresh job lease")
 
     def job_dir(self, job_id: str) -> Path:
         self._validate_job_id(job_id)
@@ -192,7 +244,10 @@ class FileJobRepository:
         return self.job_dir(job_id) / "shards"
 
     def prepared_dir(self, job_id: str) -> Path:
-        return self.job_dir(job_id) / "prepared"
+        path = self.job_dir(job_id) / "prepared"
+        if path.is_symlink():
+            raise JobRepositoryError("prepared directory must not be a symlink")
+        return path
 
     def commands_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "commands"
@@ -215,8 +270,8 @@ class FileJobRepository:
             raise JobNotFoundError(job_id)
         return directory
 
-    def _job_lock(self, job_id: str) -> Path:
-        return self.job_dir(job_id) / ".repository.lock"
+    def _mutation_lock(self) -> Path:
+        return self.root / ".repository.lock"
 
     def new_request(
         self,
@@ -251,37 +306,58 @@ class FileJobRepository:
         """Create the complete Job directory and initial queued state."""
 
         self._validate_job_id(request.job_id)
+        JobRequest.from_dict(request.to_dict())
         _assert_non_secret_options(request.options)
         directory = self.job_dir(request.job_id)
-        try:
-            directory.mkdir(parents=False, exist_ok=False)
-        except FileExistsError as error:
-            raise ImmutableRecordError(
-                f"job already exists: {request.job_id}"
-            ) from error
-
-        try:
-            self.shards_dir(request.job_id).mkdir()
-            self.prepared_dir(request.job_id).mkdir()
-            self.commands_dir(request.job_id).mkdir()
-            atomic_write_json(self.request_path(request.job_id), request.to_dict())
-            state = JobState.initial(request)
-            atomic_write_json(self.state_path(request.job_id), state.to_dict())
-            self.append_event(
-                request.job_id, "job_created", payload={"mode": request.mode}
+        with _exclusive_file_lock(self._mutation_lock()):
+            if directory.exists() or directory.is_symlink():
+                raise ImmutableRecordError(f"job already exists: {request.job_id}")
+            staging = Path(
+                tempfile.mkdtemp(prefix=f".creating-{request.job_id}-", dir=self.root)
             )
-            return state
-        except BaseException:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
+            try:
+                for name in ("shards", "prepared", "commands"):
+                    (staging / name).mkdir()
+                atomic_write_json(staging / "request.json", request.to_dict())
+                state = JobState.initial(request)
+                atomic_write_json(staging / "state.json", state.to_storage_dict())
+                append_jsonl(
+                    staging / "events.jsonl",
+                    JobEvent(
+                        seq=1,
+                        ts=utc_timestamp(),
+                        type="job_created",
+                        job_id=request.job_id,
+                        payload={"mode": request.mode},
+                    ).to_dict(),
+                )
+                _fsync_directory(staging)
+                os.replace(staging, directory)
+                _fsync_directory(self.root)
+                return state
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
 
     def get_request(self, job_id: str) -> JobRequest:
         self._require_job(job_id)
-        return JobRequest.from_dict(read_json(self.request_path(job_id)))
+        request = JobRequest.from_dict(read_json(self.request_path(job_id)))
+        if request.job_id != job_id:
+            raise JobRepositoryError("job request identity does not match directory")
+        return request
 
     def get_state(self, job_id: str) -> JobState:
         self._require_job(job_id)
-        return JobState.from_dict(read_json(self.state_path(job_id)))
+        state = JobState.from_dict(read_json(self.state_path(job_id)))
+        request = self.get_request(job_id)
+        self._validate_state_identity(state, request)
+        return state
+
+    @staticmethod
+    def _validate_state_identity(state: JobState, request: JobRequest) -> None:
+        for name in ("job_id", "mode", "config_path", "config_sha256", "created_at"):
+            if getattr(state, name) != getattr(request, name):
+                raise JobRepositoryError(f"job state {name} does not match request")
 
     def save_state(
         self,
@@ -291,22 +367,13 @@ class FileJobRepository:
     ) -> JobState:
         """Persist state with optimistic revision checking and atomic replace."""
 
-        self._require_job(state.job_id)
-        with _exclusive_file_lock(self._job_lock(state.job_id)):
-            current = self.get_state(state.job_id)
-            if expected_revision is not None and current.revision != expected_revision:
-                raise RevisionConflictError(
-                    f"expected revision {expected_revision}, found {current.revision}"
-                )
-            if state.job_id != current.job_id:
-                raise ValueError("job state identity cannot change")
-            persisted = replace(
-                state,
-                revision=current.revision + 1,
-                updated_at=utc_timestamp(),
-            )
-            atomic_write_json(self.state_path(state.job_id), persisted.to_dict())
-            return persisted
+        return self.update_state(
+            state.job_id,
+            lambda current: state,
+            expected_revision=(
+                state.revision if expected_revision is None else expected_revision
+            ),
+        )
 
     def update_state(
         self,
@@ -318,21 +385,33 @@ class FileJobRepository:
         """Apply a pure state transform under the repository lock."""
 
         self._require_job(job_id)
-        with _exclusive_file_lock(self._job_lock(job_id)):
+        if expected_revision is not None and (
+            type(expected_revision) is not int or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        with _exclusive_file_lock(self._mutation_lock()):
             current = self.get_state(job_id)
+            self._check_writer(job_id)
             if expected_revision is not None and current.revision != expected_revision:
                 raise RevisionConflictError(
                     f"expected revision {expected_revision}, found {current.revision}"
                 )
+            revision = current.revision
             candidate = updater(current)
             if candidate.job_id != job_id:
                 raise ValueError("job state identity cannot change")
+            JobState.from_dict(candidate.to_storage_dict())
+            if candidate.revision != revision:
+                raise RevisionConflictError(
+                    "job state revision cannot change in updater"
+                )
+            self._validate_state_identity(candidate, self.get_request(job_id))
             persisted = replace(
                 candidate,
-                revision=current.revision + 1,
+                revision=revision + 1,
                 updated_at=utc_timestamp(),
             )
-            atomic_write_json(self.state_path(job_id), persisted.to_dict())
+            atomic_write_json(self.state_path(job_id), persisted.to_storage_dict())
             return persisted
 
     def transition(
@@ -348,17 +427,23 @@ class FileJobRepository:
         now = utc_timestamp()
 
         def apply(current: JobState) -> JobState:
+            target = status
+            if current.status == JobStatus.CANCELLING:
+                if status in TERMINAL_JOB_STATUSES:
+                    target = JobStatus.CANCELLED
+                elif status == JobStatus.INTERRUPTED:
+                    target = JobStatus.CANCELLING
             started_at = current.started_at
             finished_at = current.finished_at
-            if status == JobStatus.RUNNING and started_at is None:
+            if target == JobStatus.RUNNING and started_at is None:
                 started_at = now
-            if status in TERMINAL_JOB_STATUSES:
+            if target in TERMINAL_JOB_STATUSES:
                 finished_at = now
-            elif status in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.INTERRUPTED}:
+            elif target in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.INTERRUPTED}:
                 finished_at = None
             return replace(
                 current,
-                status=status,
+                status=target,
                 started_at=started_at,
                 finished_at=finished_at,
                 last_error=last_error,
@@ -368,7 +453,7 @@ class FileJobRepository:
         self.append_event(
             job_id,
             "status_changed",
-            payload={"status": status.value, "revision": state.revision},
+            payload={"status": state.status.value, "revision": state.revision},
         )
         return state
 
@@ -383,8 +468,9 @@ class FileJobRepository:
         ts: float | None = None,
     ) -> JobEvent:
         self._require_job(job_id)
-        lock_path = self.job_dir(job_id) / ".events.lock"
-        with _exclusive_file_lock(lock_path):
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._require_job(job_id)
+            self._check_writer(job_id)
             repair_jsonl_tail(self.events_path(job_id))
             existing = self.list_events(job_id)
             seq = existing[-1].seq + 1 if existing else 1
@@ -425,7 +511,7 @@ class FileJobRepository:
     ) -> JobLease:
         self._require_job(job_id)
         current_time = utc_timestamp() if now is None else now
-        with _exclusive_file_lock(self._job_lock(job_id)):
+        with _exclusive_file_lock(self._mutation_lock()):
             existing = self.get_lease(job_id)
             if (
                 existing is not None
@@ -451,14 +537,55 @@ class FileJobRepository:
             atomic_write_json(self.lease_path(job_id), lease.to_dict())
             return lease
 
+    def claim_job(
+        self, job_id: str, owner_id: str, *, heartbeat_interval_seconds: float = 5.0
+    ) -> JobState:
+        """在同一 mutation 锁内校验队列状态、claim lease 并提交 running。"""
+        with _exclusive_file_lock(self._mutation_lock()):
+            state = self.get_state(job_id)
+            if state.is_terminal:
+                raise ValueError(f"job is already terminal: {state.status.value}")
+            if state.status != JobStatus.QUEUED:
+                raise LeaseConflictError(f"job is not queued: {state.status.value}")
+            existing = self.get_lease(job_id)
+            if existing is not None and not existing.is_stale():
+                raise LeaseConflictError("job has an active claim")
+            now = utc_timestamp()
+            lease = JobLease(
+                job_id=job_id,
+                owner_id=owner_id,
+                acquired_at=now,
+                heartbeat_at=now,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                stale_after_seconds=max(
+                    DEFAULT_LEASE_STALE_SECONDS, heartbeat_interval_seconds * 3
+                ),
+            )
+            atomic_write_json(self.lease_path(job_id), lease.to_dict())
+            running = replace(
+                state,
+                revision=state.revision + 1,
+                status=JobStatus.RUNNING,
+                started_at=state.started_at or now,
+                finished_at=None,
+                last_error=None,
+                updated_at=now,
+            )
+            atomic_write_json(self.state_path(job_id), running.to_storage_dict())
+            return running
+
     def heartbeat_lease(
         self, job_id: str, owner_id: str, *, now: float | None = None
     ) -> JobLease:
         self._require_job(job_id)
         current_time = utc_timestamp() if now is None else now
-        with _exclusive_file_lock(self._job_lock(job_id)):
+        with _exclusive_file_lock(self._mutation_lock()):
             existing = self.get_lease(job_id)
-            if existing is None or existing.owner_id != owner_id:
+            if (
+                existing is None
+                or existing.owner_id != owner_id
+                or existing.is_stale(current_time)
+            ):
                 raise LeaseConflictError(f"worker {owner_id} does not own job {job_id}")
             lease = replace(existing, heartbeat_at=current_time)
             atomic_write_json(self.lease_path(job_id), lease.to_dict())
@@ -466,7 +593,7 @@ class FileJobRepository:
 
     def release_lease(self, job_id: str, owner_id: str) -> None:
         self._require_job(job_id)
-        with _exclusive_file_lock(self._job_lock(job_id)):
+        with _exclusive_file_lock(self._mutation_lock()):
             existing = self.get_lease(job_id)
             if existing is None:
                 return
@@ -478,10 +605,54 @@ class FileJobRepository:
         self._require_job(shard.job_id)
         if not shard.shard_id or any(char in shard.shard_id for char in "/\\"):
             raise ValueError("shard_id must be a simple file name")
-        atomic_write_json(
-            self.shards_dir(shard.job_id) / f"{shard.shard_id}.json",
-            shard.to_dict(),
-        )
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._require_job(shard.job_id)
+            self._check_writer(shard.job_id)
+            state = self.get_state(shard.job_id)
+            checkpoints = {**state.checkpoints, shard.shard_id: shard.to_dict()}
+            records = [
+                record
+                for payload in checkpoints.values()
+                for record in ShardState.from_dict(payload).records
+            ]
+            keys = [json.dumps(record.record_id, sort_keys=True) for record in records]
+            if len(set(keys)) != len(keys):
+                raise JobRepositoryError("duplicate record in job checkpoints")
+            counts = JobCounts(
+                discovered=len(records),
+                pending=sum(
+                    record.status == RecordStatus.PENDING for record in records
+                ),
+                in_flight=sum(
+                    record.status == RecordStatus.IN_FLIGHT for record in records
+                ),
+                ai_complete=sum(record.prepared_ref is not None for record in records),
+                persisted=sum(
+                    record.status == RecordStatus.PERSISTED for record in records
+                ),
+                unresolved_writes=sum(
+                    record.status == RecordStatus.UNRESOLVED_WRITE for record in records
+                ),
+                failed=sum(record.status == RecordStatus.FAILED for record in records),
+                cancelled=state.counts.cancelled,
+                retries=sum(sum(record.retry_counts.values()) for record in records),
+            )
+            candidate = replace(
+                state,
+                checkpoints=checkpoints,
+                counts=counts,
+                revision=state.revision + 1,
+                updated_at=utc_timestamp(),
+            )
+            JobState.from_dict(candidate.to_storage_dict())
+            # shard 文件只作诊断副本；state 的原子替换才建立恢复提交点。
+            atomic_write_json(
+                self.shards_dir(shard.job_id) / f"{shard.shard_id}.json",
+                shard.to_dict(),
+            )
+            atomic_write_json(
+                self.state_path(shard.job_id), candidate.to_storage_dict()
+            )
 
     def save_prepared_result(
         self,
@@ -496,7 +667,9 @@ class FileJobRepository:
             raise ValueError("prepared result commit_id does not match blob path")
         path = self.prepared_result_path(job_id, commit_id)
         reference = f"prepared/{commit_id}.json"
-        with _exclusive_file_lock(self._job_lock(job_id)):
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._require_job(job_id)
+            self._check_writer(job_id)
             if path.exists() or path.is_symlink():
                 if path.is_symlink() or not path.is_file():
                     raise ImmutableRecordError(
@@ -535,25 +708,50 @@ class FileJobRepository:
         return read_json(path)
 
     def get_shard(self, job_id: str, shard_id: str) -> ShardState:
-        self._require_job(job_id)
-        return ShardState.from_dict(
-            read_json(self.shards_dir(job_id) / f"{shard_id}.json")
-        )
+        state = self.get_state(job_id)
+        if shard_id not in state.checkpoints:
+            raise FileNotFoundError(f"no committed checkpoint: {shard_id}")
+        return ShardState.from_dict(state.checkpoints[shard_id])
 
     def list_shards(self, job_id: str) -> list[ShardState]:
-        self._require_job(job_id)
+        state = self.get_state(job_id)
         return [
-            ShardState.from_dict(read_json(path))
-            for path in sorted(self.shards_dir(job_id).glob("*.json"))
-            if not path.is_symlink()
+            ShardState.from_dict(state.checkpoints[key])
+            for key in sorted(state.checkpoints)
         ]
+
+    def prune_orphan_prepared(
+        self, job_id: str, *, confirm: bool = False
+    ) -> tuple[str, ...]:
+        """只选择 state 未引用的 blob；默认预览，显式确认后才删除。"""
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._check_writer(job_id)
+            referenced = {
+                record.prepared_ref
+                for shard in self.list_shards(job_id)
+                for record in shard.records
+                if record.prepared_ref is not None
+            }
+            candidates = tuple(
+                path
+                for path in sorted(self.prepared_dir(job_id).glob("*.json"))
+                if not path.is_symlink()
+                and path.is_file()
+                and f"prepared/{path.name}" not in referenced
+            )
+            if confirm:
+                for path in candidates:
+                    path.unlink()
+                _fsync_directory(self.prepared_dir(job_id))
+            return tuple(f"prepared/{path.name}" for path in candidates)
 
     def add_command(self, command: JobCommand) -> None:
         self._require_job(command.job_id)
         if not command.command_id or any(char in command.command_id for char in "/\\"):
             raise ValueError("command_id must be a simple file name")
         path = self.commands_dir(command.job_id) / f"{command.command_id}.json"
-        with _exclusive_file_lock(self._job_lock(command.job_id)):
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._require_job(command.job_id)
             if path.exists():
                 raise ImmutableRecordError(
                     f"command already exists: {command.command_id}"
@@ -573,22 +771,108 @@ class FileJobRepository:
 
     def save_command_receipt(self, receipt: CommandReceipt) -> None:
         self._require_job(receipt.job_id)
+        if not receipt.command_id or any(char in receipt.command_id for char in "/\\"):
+            raise ValueError("command_id must be a simple file name")
         path = self.commands_dir(receipt.job_id) / f"{receipt.command_id}.receipt.json"
-        with _exclusive_file_lock(self._job_lock(receipt.job_id)):
-            if path.exists():
+        with _exclusive_file_lock(self._mutation_lock()):
+            self._require_job(receipt.job_id)
+            state = self.get_state(receipt.job_id)
+            if receipt.command_id in state.command_receipts:
                 raise ImmutableRecordError(
                     f"command receipt already exists: {receipt.command_id}"
                 )
             atomic_write_json(path, receipt.to_dict())
+            updated = replace(
+                state,
+                command_receipts={
+                    **state.command_receipts,
+                    receipt.command_id: receipt.to_dict(),
+                },
+                revision=state.revision + 1,
+                updated_at=utc_timestamp(),
+            )
+            atomic_write_json(
+                self.state_path(receipt.job_id), updated.to_storage_dict()
+            )
 
     def get_command_receipt(
         self, job_id: str, command_id: str
     ) -> CommandReceipt | None:
         self._require_job(job_id)
-        path = self.commands_dir(job_id) / f"{command_id}.receipt.json"
-        if not path.exists():
-            return None
-        return CommandReceipt.from_dict(read_json(path))
+        payload = self.get_state(job_id).command_receipts.get(command_id)
+        return CommandReceipt.from_dict(payload) if payload is not None else None
+
+    def apply_command(
+        self,
+        command: JobCommand,
+        *,
+        target: JobStatus | None,
+        expected_revision: int,
+        message: str,
+    ) -> tuple[JobState, CommandReceipt]:
+        """command 先落盘，状态与 receipt 在同一 state 快照中提交。"""
+        if not command.command_id or any(char in command.command_id for char in "/\\"):
+            raise ValueError("command_id must be a simple file name")
+        with _exclusive_file_lock(self._mutation_lock()):
+            state = self.get_state(command.job_id)
+            if command.command_id in state.command_receipts:
+                return state, CommandReceipt.from_dict(
+                    state.command_receipts[command.command_id]
+                )
+            if state.revision != expected_revision:
+                raise RevisionConflictError("job changed while preparing command")
+            if target == JobStatus.QUEUED:
+                lease = self.get_lease(command.job_id)
+                if lease is not None and not lease.is_stale():
+                    raise LeaseConflictError(
+                        "cannot resume while a worker owns the job"
+                    )
+            path = self.commands_dir(command.job_id) / f"{command.command_id}.json"
+            if path.exists():
+                if read_json(path) != command.to_dict():
+                    raise ImmutableRecordError("command id collision")
+            else:
+                atomic_write_json(path, command.to_dict())
+            status = target or state.status
+            receipt = CommandReceipt(
+                command.command_id,
+                command.job_id,
+                target is not None,
+                message=message,
+                resulting_status=status,
+            )
+            now = utc_timestamp()
+            updated = replace(
+                state,
+                status=status,
+                revision=state.revision + 1,
+                updated_at=now,
+                finished_at=(
+                    state.finished_at
+                    if target is None
+                    else now if status in TERMINAL_JOB_STATUSES else None
+                ),
+                last_error=None if target is not None else state.last_error,
+                command_receipts={
+                    **state.command_receipts,
+                    command.command_id: receipt.to_dict(),
+                },
+            )
+            atomic_write_json(
+                self.state_path(command.job_id), updated.to_storage_dict()
+            )
+            return updated, receipt
+
+    def effective_config_hash(self, job_id: str) -> str:
+        request = self.get_request(job_id)
+        for command in reversed(self.list_commands(job_id)):
+            receipt = self.get_command_receipt(job_id, command.command_id)
+            if command.type == "resume" and receipt is not None and receipt.accepted:
+                value = command.payload.get("accepted_config_sha256")
+                if not isinstance(value, str) or len(value) != 64:
+                    raise JobRepositoryError("accepted resume lacks config hash")
+                return value
+        return request.config_sha256
 
     def list_job_ids(self) -> list[str]:
         job_ids = [
@@ -697,7 +981,7 @@ class FileJobRepository:
             directory = self.job_dir(candidate.job_id)
             if not directory.is_dir() or directory.is_symlink():
                 continue
-            with _exclusive_file_lock(self._job_lock(candidate.job_id)):
+            with _exclusive_file_lock(self._mutation_lock()):
                 state = self.get_state(candidate.job_id)
                 if (
                     state.revision != candidate.revision

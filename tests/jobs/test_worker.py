@@ -36,7 +36,7 @@ async def test_worker_runs_injected_callable_and_persists_terminal_state(
         observed.update(
             job_id=job_id,
             request=actual_request,
-            repository=repo,
+            repository=repo.root,
             target=target_provider(),
             cancelled=cancel_event.is_set(),
         )
@@ -53,7 +53,7 @@ async def test_worker_runs_injected_callable_and_persists_terminal_state(
     assert observed == {
         "job_id": request.job_id,
         "request": request,
-        "repository": repository,
+        "repository": repository.root,
         "target": 3,
         "cancelled": False,
     }
@@ -176,3 +176,45 @@ async def test_worker_cancelled_task_becomes_interrupted(tmp_path: Path):
     with pytest.raises(asyncio.CancelledError):
         await JobWorker(repository, runner).run(request.job_id)
     assert repository.get_state(request.job_id).status == JobStatus.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loss_cancels_runner_without_overwriting_new_owner(tmp_path):
+    from src.jobs import LeaseConflictError
+
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = create_job(repository)
+    cancelled = asyncio.Event()
+
+    async def runner(job_id, _request, owned, *_args):
+        repository.release_lease(job_id, "old")
+        repository.acquire_lease(job_id, "new")
+        with pytest.raises(LeaseConflictError):
+            owned.transition(job_id, JobStatus.FAILED)
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.set()
+
+    worker = JobWorker(
+        repository, runner, worker_id="old", heartbeat_interval_seconds=0.01
+    )
+    with pytest.raises(LeaseConflictError):
+        await asyncio.wait_for(worker.run(request.job_id), timeout=2)
+    assert cancelled.is_set()
+    assert repository.get_state(request.job_id).status == JobStatus.RUNNING
+    assert repository.get_lease(request.job_id).owner_id == "new"
+
+
+@pytest.mark.asyncio
+async def test_claim_does_not_revive_cancelled_queue(tmp_path):
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = create_job(repository)
+    repository.transition(request.job_id, JobStatus.CANCELLED)
+
+    async def runner(*_args):
+        pytest.fail("cancelled job must never reach runner")
+
+    with pytest.raises(ValueError, match="terminal"):
+        await JobWorker(repository, runner).run(request.job_id)
+    assert repository.get_lease(request.job_id) is None

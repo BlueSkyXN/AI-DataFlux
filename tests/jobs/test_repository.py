@@ -226,8 +226,10 @@ def test_old_or_missing_shard_schema_is_rejected(
     }
     if schema_value is not None:
         payload["schema_version"] = schema_value
-    path = repository.shards_dir(created_job.job_id) / "legacy.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    path = repository.state_path(created_job.job_id)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["checkpoints"]["legacy"] = payload
+    path.write_text(json.dumps(state), encoding="utf-8")
 
     with pytest.raises(ValueError, match="shard schema_version"):
         repository.get_shard(created_job.job_id, "legacy")
@@ -253,8 +255,10 @@ def test_old_record_checkpoint_schema_is_rejected(
             }
         ],
     }
-    path = repository.shards_dir(created_job.job_id) / "legacy-record.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    path = repository.state_path(created_job.job_id)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["checkpoints"]["legacy-record"] = payload
+    path.write_text(json.dumps(state), encoding="utf-8")
 
     with pytest.raises(ValueError, match="record checkpoint schema_version"):
         repository.get_shard(created_job.job_id, "legacy-record")

@@ -75,16 +75,14 @@ class JobWorker:
         provider = target_concurrency_provider or (lambda: 1)
         cancellation = cancel_event or asyncio.Event()
         request = self.repository.get_request(job_id)
-        initial_state = self.repository.get_state(job_id)
-        if initial_state.status in TERMINAL_JOB_STATUSES:
-            raise ValueError(f"job is already terminal: {initial_state.status.value}")
-
-        self.repository.acquire_lease(
+        self.repository.claim_job(
             job_id,
             self.worker_id,
             heartbeat_interval_seconds=self.heartbeat_interval_seconds,
         )
+        owned = self.repository.for_worker(self.worker_id)
         heartbeat_task: asyncio.Task[None] | None = None
+        runner_task: asyncio.Future[Any] | None = None
         try:
             effective_target = max(1, int(provider()))
 
@@ -102,8 +100,8 @@ class JobWorker:
                     ),
                 )
 
-            self.repository.update_state(job_id, mark_running)
-            self.repository.append_event(
+            owned.update_state(job_id, mark_running)
+            owned.append_event(
                 job_id,
                 "worker_started",
                 payload={"worker_id": self.worker_id},
@@ -114,24 +112,28 @@ class JobWorker:
             raw_result = self.runner(
                 job_id,
                 request,
-                self.repository,
+                owned,
                 provider,
                 cancellation,
             )
             if not inspect.isawaitable(raw_result):
                 raise TypeError("runner must return an awaitable")
-            result = self._normalize_result(await raw_result)
-            if cancellation.is_set() and result.status not in {
-                JobStatus.CANCELLED,
-                JobStatus.FAILED,
-            }:
+            runner_task = asyncio.ensure_future(raw_result)
+            done, _ = await asyncio.wait(
+                {runner_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeat_task in done:
+                await heartbeat_task
+            result = self._normalize_result(await runner_task)
+            if cancellation.is_set():
                 result = JobRunResult(JobStatus.CANCELLED, result.summary)
             if result.status not in TERMINAL_JOB_STATUSES | {JobStatus.BLOCKED}:
                 raise ValueError(
                     f"runner returned invalid exit status: {result.status.value}"
                 )
-            self.repository.transition(job_id, result.status)
-            self.repository.append_event(
+            persisted = owned.transition(job_id, result.status)
+            result = JobRunResult(persisted.status, result.summary)
+            owned.append_event(
                 job_id,
                 "worker_finished",
                 payload={
@@ -141,23 +143,34 @@ class JobWorker:
             )
             return result
         except asyncio.CancelledError:
-            self.repository.transition(job_id, JobStatus.INTERRUPTED)
-            self.repository.append_event(
-                job_id,
-                "worker_interrupted",
-                payload={"worker_id": self.worker_id},
-            )
+            try:
+                owned.transition(job_id, JobStatus.INTERRUPTED)
+                owned.append_event(
+                    job_id, "worker_interrupted", payload={"worker_id": self.worker_id}
+                )
+            except LeaseConflictError:
+                pass
+            raise
+        except LeaseConflictError:
+            cancellation.set()
             raise
         except Exception as error:
             safe_error = redact_sensitive_text(error)
-            self.repository.transition(job_id, JobStatus.FAILED, last_error=safe_error)
-            self.repository.append_event(
+            owned.transition(
+                job_id,
+                JobStatus.CANCELLED if cancellation.is_set() else JobStatus.FAILED,
+                last_error=safe_error,
+            )
+            owned.append_event(
                 job_id,
                 "worker_failed",
                 payload={"error": safe_error, "worker_id": self.worker_id},
             )
             raise
         finally:
+            if runner_task is not None and not runner_task.done():
+                runner_task.cancel()
+                await asyncio.gather(runner_task, return_exceptions=True)
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 try:
@@ -172,7 +185,7 @@ class JobWorker:
                 cancellation.set()
 
     async def _heartbeat_loop(self, job_id: str, cancel_event: asyncio.Event) -> None:
-        while not cancel_event.is_set():
+        while True:
             await asyncio.sleep(self.heartbeat_interval_seconds)
             self.repository.heartbeat_lease(job_id, self.worker_id)
 

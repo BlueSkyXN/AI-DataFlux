@@ -8,7 +8,7 @@
 | Bootstrap tree | `cc6c9fffb7f929bd111c0e2c4fe1783b0306df1c` |
 | 冻结分支 | `codex/4.0-bootstrap` |
 | 活动研发线 | `codex/4.0-integration` |
-| 当前 Ledger 状态 | H1 本地可验收子项已更新；外部证据与 H2～H4 仍有 `UNREVIEWED` |
+| 当前 Ledger 状态 | H2/H3 工作区实现与本地回归通过，H4 真实本地联调通过但 binary smoke 阻断；尚无接受 SHA，外部证据及正式接受仍有 `UNREVIEWED` |
 
 本 Ledger 追踪 Bootstrap 中每个主要模块如何进入 AI-DataFlux 4.0。Bootstrap 的本地测试通过只说明它可以作为 extraction/baseline 起点，不构成模块验收。
 
@@ -45,13 +45,13 @@
 | `src/data/sqlite.py` | H1.3 | `REVISED_AND_ACCEPTED` | 使用真实 temp database 验证事务、rowcount、rollback、相同值、missing ID、commit 与 readback 合同 | `f6cba67fd4c8cd20f53a84ca5c49965f59188b22` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
 | `src/data/excel.py` 及 CSV 路径 | H1.4 | `REVISED_AND_ACCEPTED` | 原子写回、保留未返回输出列、磁盘 readback、reconciliation、receipt 与失败语义通过真实文件合同测试 | `b890799a9485318085217c901223da563730f9ef` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
 | `src/data/feishu/bitable.py`、`src/data/feishu/sheet.py` | H1.4 | `UNREVIEWED` | 分页、分块、限流、逐记录 receipt、确认不明和真实授权环境 UAT 均有证据 | — | mock contract 通过；没有测试应用/测试表，真实 UAT 未执行 |
-| `src/jobs/models.py`、`src/jobs/io.py` | H2.1 / H2.3 | `UNREVIEWED` | Repository schema 独立版本化；原子文件语义、PreparedResult 引用/hash、终态优先级和损坏处理符合合同 | — | — |
-| `src/jobs/repository.py` | H2.1 / H2.2 | `UNREVIEWED` | ownership/mutation 锁分离；revision CAS 在 mutation lock 内；并发创建和状态变更无丢失更新 | — | — |
-| `src/core/job_tracker.py` | H2.1 / H2.3 | `UNREVIEWED` | state/event/checkpoint 一致；`PENDING_COMMIT` 恢复点、orphan、hash 损坏和 reconciliation 可恢复 | — | — |
-| `src/core/job_runner.py`、`src/jobs/worker.py` | H2.2 / H2.3 / H2.4 | `UNREVIEWED` | claim/lease、stale recovery、cancel/resume、进程中断和重复执行边界通过故障注入 | — | — |
-| `src/jobs/scheduler.py`、`src/core/scheduler.py` | H2.5 | `UNREVIEWED` | FIFO/资源压力/并发 admission 可预测，无饥饿或超出已批准单机边界 | — | — |
-| `src/gateway/service.py` | H3.1 / H3.2 / H3.4 / H3.5 | `UNREVIEWED` | strict/auto/fallback、Chat/Responses 协议、SSE 生命周期和 error envelope 通过协议矩阵 | — | — |
-| `src/gateway/dispatcher.py`、`src/gateway/resolver.py` 及 affinity state | H3.1 / H3.3 | `UNREVIEWED` | capability 匹配、fallback group 边界、`previous_response_id` affinity、TTL/容量/并发和过期语义可验证 | — | — |
+| `src/jobs/models.py`、`src/jobs/io.py` | H2.1 / H2.3 | `UNREVIEWED` | Repository schema 独立版本化；原子文件语义、PreparedResult 引用/hash、终态优先级和损坏处理符合合同 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：state schema 2、revision、身份与恢复引用校验通过；缺接受 SHA |
+| `src/jobs/repository.py` | H2.1 / H2.2 | `UNREVIEWED` | ownership/mutation 锁分离；revision CAS 在 mutation lock 内；并发创建和状态变更无丢失更新 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：原子创建、锁分离、跨进程 CAS、claim/lease 通过；缺接受 SHA |
+| `src/core/job_tracker.py` | H2.1 / H2.3 | `UNREVIEWED` | state/event/checkpoint 一致；`PENDING_COMMIT` 恢复点、orphan、hash 损坏和 reconciliation 可恢复 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：checkpoint 真相、orphan、hash 与失败回滚测试通过；缺接受 SHA |
+| `src/core/job_runner.py`、`src/jobs/worker.py` | H2.2 / H2.3 / H2.4 | `UNREVIEWED` | claim/lease、stale recovery、cancel/resume、进程中断和重复执行边界通过故障注入 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)、[当前回归](./V4_LOCAL_VALIDATION.md)：lease 丢失、持续恢复、取消、初始化与资源清理测试通过；缺接受 SHA |
+| `src/jobs/scheduler.py`、`src/core/scheduler.py` | H2.5 | `UNREVIEWED` | FIFO/资源压力/并发 admission 可预测，无饥饿或超出已批准单机边界 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：FIFO、pressure、active limit、queue drain 通过；缺接受 SHA |
+| `src/gateway/service.py` | H3.1 / H3.2 / H3.4 / H3.5 | `UNREVIEWED` | strict/auto/fallback、Chat/Responses 协议、SSE 生命周期和 error envelope 通过协议矩阵 | — | [当前回归](./V4_LOCAL_VALIDATION.md)、`tests/test_gateway_protocols.py`；本地协议矩阵通过，缺接受 SHA 与真实 provider UAT |
+| `src/gateway/dispatcher.py`、`src/gateway/resolver.py` 及 affinity state | H3.1 / H3.3 | `UNREVIEWED` | capability 匹配、fallback group 边界、`previous_response_id` affinity、TTL/容量/并发和过期语义可验证 | — | [当前回归](./V4_LOCAL_VALIDATION.md)、`tests/test_gateway_protocols.py`；路由与 affinity 测试通过，缺接受 SHA |
 | `src/control/server.py`、`src/control/job_service.py`、`src/control/process_manager.py` | H4.2 | `UNREVIEWED` | local-only、token auth、path containment、ETag/revision、Job/command、进程生命周期和日志合同通过 | — | — |
 | `cli.py`、`main.py`、`gateway.py` | H4.1 / H4.2 | `UNREVIEWED` | v4 命令、机器可读 JSON、exit code、help、config 拒绝和 Control/Gateway 启动合同一致 | — | — |
 | `web/` | H4.3 | `UNREVIEWED` | canonical v4 表单/API 类型、关键状态、错误、响应式和实际 Control workflow 通过；无 3.x migration UI | — | — |
@@ -61,6 +61,8 @@
 | `legacy/` 及其他废弃 3.x 路径 | H1.0 / H4.1 | `UNREVIEWED` | 明确保留为非运行参考或删除；不得被 4.0 runtime、打包或用户流程隐式依赖 | — | — |
 
 ## 4. Promotion 阻断检查
+
+2026-09-08 本轮没有更改上述接受状态或伪造接受 SHA。H2.2～H2.5 的当前证据见 [H2 本地验证](./H2_LOCAL_VALIDATION.md)；H3、H4 源码、GUI/CLI/API 真实本地链路和打包结果见 [4.0 工作区验证](./V4_LOCAL_VALIDATION.md)。表中无接受 SHA 的模块仍不能进入 Promotion，即使其本地实现或测试已通过。
 
 Promotion commit 固定后，必须完成以下检查：
 

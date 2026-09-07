@@ -776,6 +776,9 @@ class FeishuSheetTaskPool(BaseTaskPool):
         self._logger.info("关闭飞书电子表格任务池 ...")
         run_async(self.client.close())
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     # ==================== Token 估算采样 ====================
 
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:

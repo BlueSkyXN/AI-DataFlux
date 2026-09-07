@@ -207,10 +207,10 @@ def test_get_available_model_filters_json_schema_capability(tmp_path):
     assert selected.id == "json"
 
 
-def test_get_available_model_falls_back_when_requested_model_lacks_json_schema(
+def test_strict_model_does_not_fall_back_when_it_lacks_json_schema(
     tmp_path,
 ):
-    """指定模型不支持 JSON 输出时，应尝试其他符合能力的模型"""
+    """指定模型不支持 JSON 输出时，必须拒绝，不能静默换模型。"""
     config_path = _write_gateway_config(
         tmp_path,
         [
@@ -225,8 +225,7 @@ def test_get_available_model_falls_back_when_requested_model_lacks_json_schema(
         requires_json_schema=True,
     )
 
-    assert selected is not None
-    assert selected.id == "json"
+    assert selected is None
 
 
 def test_get_available_model_returns_none_when_no_model_supports_json_schema(

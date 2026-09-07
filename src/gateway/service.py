@@ -93,6 +93,7 @@ FluxApiService 方法清单:
 
 import asyncio
 import logging
+import json
 import time
 from typing import Any, AsyncIterable, Union
 
@@ -103,6 +104,7 @@ from .dispatcher import ModelDispatcher, ModelConfig
 from .limiter import ModelRateLimiter
 from .resolver import RoundRobinResolver, build_ip_pools_from_channels
 from .session import SessionPool
+from .affinity import ResponseAffinity
 from .schemas import (
     ChatCompletionRequest,
     ResponsesRequest,
@@ -126,16 +128,39 @@ class GatewayAPIError(Exception):
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.error = upstream_error or {
+        self.error = {
             "message": message,
             "type": error_type,
             "param": param,
             "code": code,
+            **(upstream_error or {}),
         }
 
 
 class RetryableUpstreamError(GatewayAPIError):
     """仅表示响应开始前可安全切换到其他模型的错误。"""
+
+
+class UpstreamStream:
+    """即使流尚未开始迭代，也能关闭已经取得响应头的上游连接。"""
+
+    def __init__(self, stream: AsyncIterable[bytes], response: aiohttp.ClientResponse):
+        self.iterator = stream.__aiter__()
+        self.response = response
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        return await self.iterator.__anext__()
+
+    async def aclose(self) -> None:
+        try:
+            close = getattr(self.iterator, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            self.response.close()
 
 
 class FluxApiService:
@@ -179,6 +204,9 @@ class FluxApiService:
 
         # 加载配置文件
         self._load_config()
+        self.affinity = ResponseAffinity(**self.config["gateway_affinity"])
+        self.fallback_groups = self.config["fallback_groups"]
+        self.max_attempts = self.config["gateway_retry"]["max_attempts_per_request"]
 
         # 初始化同步组件
         self._init_models()  # 模型配置
@@ -368,92 +396,34 @@ class FluxApiService:
         """
         import random
 
-        exclude_set = set(exclude_models or [])
-        required = set(required_capabilities or set())
+        required = set(required_capabilities or ())
         if requires_json_schema:
             required.add("json_schema")
-        target_model_id: str | None = None
-        use_random_selection = True
-
-        # 1. 解析请求的模型名称
-        if requested_model_name:
-            resolved_id = self.resolve_model_id(requested_model_name)
-            if resolved_id:
-                target_model_id = resolved_id
-                use_random_selection = False
-            # 如果是 "auto" 或无法解析，则进行随机选择
-            elif requested_model_name.lower() not in [
-                "auto",
-                "any",
-                "default",
-                "*",
-                "",
-            ]:
-                logging.error(
-                    f"请求了未知的模型 '{requested_model_name}'，将尝试随机选择"
-                )
-
-        # 2. 如果指定了目标模型，检查其可用性
-        if target_model_id and not use_random_selection:
-            if target_model_id not in exclude_set:
-                model = self.dispatcher.get_model_config(target_model_id)
-                if model:
-                    # 检查调度器可用性和限流器
-                    is_available = self.dispatcher.is_model_available(target_model_id)
-                    can_process = self.rate_limiter.can_process(target_model_id)
-                    supports_request = model.supports(required)
-
-                    if is_available and can_process and supports_request:
-                        logging.debug(
-                            f"使用请求的可用模型: {model.name or target_model_id}"
-                        )
-                        return model
-                    else:
-                        # 指定模型不可用或被限流，转为随机选择
-                        logging.warning(
-                            f"请求的模型 [{model.name or target_model_id}] 当前不可用/受限。尝试随机选择"
-                        )
-                        if not supports_request:
-                            logging.warning(
-                                "模型 [%s] 缺少请求能力: %s",
-                                model.name or target_model_id,
-                                sorted(required - model.capabilities),
-                            )
-                        exclude_set.add(target_model_id)
-                        use_random_selection = True
-            else:
-                # 指定的模型在排除列表中，转为随机选择
-                logging.warning(
-                    f"请求的模型 [{target_model_id}] 在排除列表中。尝试随机选择"
-                )
-                use_random_selection = True
-
-        # 3. 执行加权随机选择 (如果需要)
-        if use_random_selection:
-            # 从所有模型中过滤出符合条件的模型
-            eligible_models = [
-                model
-                for model in self.models
-                if model.weight > 0  # 权重必须大于0
-                and model.id not in exclude_set  # 未被排除
-                and self.dispatcher.is_model_available(model.id)  # 调度器可用
-                and self.rate_limiter.can_process(model.id)  # 限流器允许
-                and model.supports(required)
+        candidates = self.models
+        if requested_model_name and requested_model_name.lower() not in {
+            "auto",
+            "any",
+            "default",
+            "*",
+        }:
+            target = self.resolve_model_id(requested_model_name)
+            candidates = [model for model in self.models if model.id == target]
+        eligible = [
+            model
+            for model in candidates
+            if model.weight > 0
+            and model.id not in (exclude_models or [])
+            and model.supports(required)
+            and self.dispatcher.is_model_available(model.id)
+            and self.rate_limiter.can_process(model.id)
+        ]
+        return (
+            random.choices(eligible, weights=[model.weight for model in eligible], k=1)[
+                0
             ]
-
-            if not eligible_models:
-                logging.warning(f"没有符合条件的可用模型 (已排除: {exclude_set})")
-                return None
-
-            # 使用加权随机算法选择模型
-            weights = [model.weight for model in eligible_models]
-            chosen_model = random.choices(eligible_models, weights=weights, k=1)[0]
-            logging.debug(
-                f"加权随机选择了模型: {chosen_model.name or chosen_model.id} (权重: {chosen_model.weight}/{sum(weights)})"
-            )
-            return chosen_model
-
-        return None
+            if eligible
+            else None
+        )
 
     async def chat_completion(
         self, request: ChatCompletionRequest
@@ -480,6 +450,17 @@ class FluxApiService:
         payload = self._build_upstream_payload_template(request, endpoint=endpoint)
         required_capabilities = self._required_capabilities(payload, endpoint=endpoint)
         requested_model = request.model.strip()
+        group = payload.pop("fallback_group", None)
+        auto = requested_model.lower() in {"auto", "any", "default", "*", ""}
+        if group is not None and (
+            not isinstance(group, str) or group not in self.fallback_groups or not auto
+        ):
+            raise GatewayAPIError(
+                "fallback_group requires model=auto and a configured group",
+                status_code=400,
+                code="invalid_fallback_group",
+                param="fallback_group",
+            )
         if requested_model.lower() not in {"auto", "any", "default", "*", ""}:
             if self.resolve_model_id(requested_model) is None:
                 raise GatewayAPIError(
@@ -489,13 +470,86 @@ class FluxApiService:
                     param="model",
                 )
 
-        max_retries = min(len(self.models), 3)
-        for _attempt in range(max_retries):
-            model = self.get_available_model(
-                requested_model_name=requested_model,
-                exclude_models=list(tried_models),
-                required_capabilities=required_capabilities,
+        pinned = None
+        previous = (
+            payload.get("previous_response_id") if endpoint == "responses" else None
+        )
+        if previous is not None:
+            if not isinstance(previous, str) or not previous:
+                raise GatewayAPIError(
+                    "previous_response_id must be a non-empty string",
+                    status_code=400,
+                    code="invalid_previous_response_id",
+                    param="previous_response_id",
+                )
+            pinned = self.affinity.get(previous)
+            if pinned is None:
+                raise GatewayAPIError(
+                    "Response affinity is missing, expired or ambiguous",
+                    status_code=409,
+                    code="response_affinity_lost",
+                    param="previous_response_id",
+                )
+            if (not auto and self.resolve_model_id(requested_model) != pinned) or (
+                group and pinned not in self.fallback_groups[group]
+            ):
+                raise GatewayAPIError(
+                    "Requested route conflicts with response affinity",
+                    status_code=409,
+                    code="response_affinity_conflict",
+                    param="model",
+                )
+        route_ids = (
+            [pinned]
+            if pinned
+            else (
+                list(self.fallback_groups[group])
+                if group
+                else (
+                    [self.resolve_model_id(requested_model)]
+                    if not auto
+                    else [model.id for model in self.models]
+                )
             )
+        )
+        capable_models = [
+            model
+            for model in self.models
+            if model.id in route_ids
+            and model.weight > 0
+            and model.supports(required_capabilities)
+        ]
+        if not capable_models:
+            raise GatewayAPIError(
+                "Selected routes do not support the required capabilities",
+                status_code=400,
+                code="unsupported_capability",
+                param="model",
+            )
+        max_retries = min(len(route_ids), self.max_attempts)
+        for _attempt in range(max_retries):
+            if group and not pinned:
+                model = next(
+                    (
+                        candidate
+                        for route_id in route_ids
+                        if (
+                            candidate := self.get_available_model(
+                                route_id,
+                                list(tried_models),
+                                required_capabilities=required_capabilities,
+                            )
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+            else:
+                model = self.get_available_model(
+                    pinned or requested_model,
+                    list(tried_models),
+                    required_capabilities=required_capabilities,
+                )
             if not model:
                 break
             tried_models.add(model.id)
@@ -509,6 +563,8 @@ class FluxApiService:
                 )
                 if isinstance(response, AsyncIterable):
                     return response
+                if endpoint == "responses" and isinstance(response, dict):
+                    self._remember_response(response, model.id)
                 elapsed = time.time() - request_started_at
                 self.dispatcher.update_model_metrics(model.id, elapsed, True)
                 self.dispatcher.mark_model_success(model.id)
@@ -542,6 +598,16 @@ class FluxApiService:
             code="model_unavailable",
             param="model",
         )
+
+    def _remember_response(self, response: dict[str, Any], route_id: str) -> None:
+        response_id = response.get("id")
+        if isinstance(response_id, str) and response_id:
+            try:
+                self.affinity.remember(response_id, route_id)
+            except ValueError as error:
+                raise GatewayAPIError(
+                    str(error), status_code=409, code="response_affinity_ambiguous"
+                ) from error
 
     async def _call_model_api(
         self,
@@ -597,8 +663,10 @@ class FluxApiService:
         peer_ip = self._extract_peer_ip(resp, model)
         self._log_upstream_response(model, endpoint, resp.status, peer_ip)
         if not 200 <= resp.status < 300:
-            error = await self._upstream_error(resp)
-            resp.close()
+            try:
+                error = await self._upstream_error(resp)
+            finally:
+                resp.close()
             if resp.status in RETRYABLE_UPSTREAM_STATUSES:
                 raise RetryableUpstreamError(
                     error.get("message", "Retryable upstream error"),
@@ -612,7 +680,10 @@ class FluxApiService:
             )
 
         if stream:
-            return self._proxy_sse_response(resp, model, start_time)
+            return UpstreamStream(
+                self._proxy_sse_response(resp, model, start_time, endpoint=endpoint),
+                resp,
+            )
 
         try:
             # 上游 JSON 是公共响应；不重建 choices，不丢弃 tool_calls/
@@ -826,20 +897,94 @@ class FluxApiService:
         response: aiohttp.ClientResponse,
         model: ModelConfig,
         start_time: float,
+        *,
+        endpoint: str = "chat_completions",
     ) -> AsyncIterable[bytes]:
-        """逐字节块转发上游 SSE；响应开始后不再 failover 或注入事件。"""
+        """正常字节原样转发；异常流发出可识别错误，不切换后端。"""
         completed = False
         yielded = False
+        failed = False
+        buffer = b""
+        sequence = -1
         try:
             async for chunk in response.content.iter_any():
                 if not chunk:
                     continue
+                buffer = (buffer + chunk).replace(b"\r\n", b"\n")
+                while b"\n\n" in buffer:
+                    frame, buffer = buffer.split(b"\n\n", 1)
+                    data = b"\n".join(
+                        line[5:].lstrip(b" ")
+                        for line in frame.split(b"\n")
+                        if line.startswith(b"data:")
+                    )
+                    if not data:
+                        continue
+                    if data == b"[DONE]":
+                        completed = True
+                        continue
+                    event = json.loads(data)
+                    if not isinstance(event, dict):
+                        raise ValueError("SSE data must be an object")
+                    if type(event.get("sequence_number")) is int:
+                        sequence = max(sequence, event["sequence_number"])
+                    event_type = event.get("type", "")
+                    if endpoint == "responses" and isinstance(
+                        event.get("response"), dict
+                    ):
+                        self._remember_response(event["response"], model.id)
+                    if event_type in {
+                        "response.completed",
+                        "response.failed",
+                        "response.incomplete",
+                        "response.cancelled",
+                    }:
+                        completed = True
+                    if (
+                        event_type
+                        in {"error", "response.failed", "response.incomplete"}
+                        or "error" in event
+                    ):
+                        failed = True
+                        completed = True
+                if len(buffer) > 1024 * 1024:
+                    raise ValueError("SSE frame exceeds buffer limit")
                 yielded = True
                 yield chunk
-            completed = True
+            if not completed:
+                raise ValueError("upstream stream ended before terminal event")
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            OSError,
+            ValueError,
+            GatewayAPIError,
+        ):
+            failed = True
+            error = {
+                "message": "Upstream stream interrupted or invalid",
+                "type": "server_error",
+                "code": "upstream_stream_error",
+                "param": None,
+            }
+            if endpoint == "responses":
+                event = {**error, "type": "error", "sequence_number": sequence + 1}
+                yield (
+                    ("\n\n" if buffer else "")
+                    + "event: error\ndata: "
+                    + json.dumps(event)
+                    + "\n\n"
+                ).encode()
+            else:
+                yield (
+                    ("\n\n" if buffer else "")
+                    + "data: "
+                    + json.dumps({"error": error})
+                    + "\n\n"
+                ).encode()
         finally:
             elapsed = time.time() - start_time
-            success = completed and yielded
+            success = completed and yielded and not failed
             self.dispatcher.update_model_metrics(model.id, elapsed, success)
             if success:
                 self.dispatcher.mark_model_success(model.id)

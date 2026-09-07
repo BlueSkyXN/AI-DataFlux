@@ -15,6 +15,8 @@ import NumberInput from '../shared/NumberInput';
 import ToggleSwitch from '../shared/ToggleSwitch';
 import TextareaField from '../shared/TextareaField';
 import StringListEditor from '../shared/StringListEditor';
+import SelectDropdown from '../shared/SelectDropdown';
+import TextInput from '../shared/TextInput';
 
 /**
  * 提示词配置组件
@@ -29,9 +31,29 @@ export default function PromptSection({ updateConfig, getConfig, language }: Sec
   const temperatureOverride = (getConfig(['job', 'prompt', 'temperature_override']) as boolean) ?? true;
   const systemPrompt = (getConfig(['job', 'prompt', 'system_prompt']) as string) ?? '';
   const template = (getConfig(['job', 'prompt', 'template']) as string) ?? '';
+  const selection = (getConfig(['job', 'model_selection']) as { mode: string; route_id?: string; group?: string }) ?? { mode: 'auto' };
+  const zh = language === 'zh';
 
   return (
     <div className="space-y-4">
+      <SectionCard title={zh ? '模型选择' : 'Model selection'}
+        description={zh ? 'strict 只使用指定 route；fallback_group 只按已配置组的顺序切换。' : 'Strict stays on one route; fallback follows only the configured group order.'}>
+        <FormField label={zh ? '路由模式' : 'Routing mode'}>
+          <SelectDropdown ariaLabel="Routing mode" value={selection.mode}
+            options={['auto', 'strict', 'fallback_group'].map((mode) => ({ value: mode, label: mode }))}
+            onChange={(mode) => updateConfig(['job', 'model_selection'], mode === 'strict'
+              ? { mode, route_id: '' } : mode === 'fallback_group' ? { mode, group: '' } : { mode })} />
+        </FormField>
+        {selection.mode === 'strict' && <FormField label="Route ID" required>
+          <TextInput value={selection.route_id ?? ''} placeholder="route-a" monospace
+            onChange={(route_id) => updateConfig(['job', 'model_selection'], { mode: 'strict', route_id })} />
+        </FormField>}
+        {selection.mode === 'fallback_group' && <FormField label="Fallback group" required
+          description={zh ? '填写 gateway.fallback_groups 中的组名，可在 YAML 视图编辑组成员。' : 'Use a group from gateway.fallback_groups; edit its members in the YAML view.'}>
+          <TextInput value={selection.group ?? ''} placeholder="primary" monospace
+            onChange={(group) => updateConfig(['job', 'model_selection'], { mode: 'fallback_group', group })} />
+        </FormField>}
+      </SectionCard>
       {/* Basic Settings */}
       {/* 基本设置：必填字段、温度、开关选项 */}
       <SectionCard title={t.cfgPromptSettings}>

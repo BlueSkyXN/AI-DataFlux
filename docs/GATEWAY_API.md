@@ -19,9 +19,9 @@ Gateway 对外提供 OpenAI-compatible Chat Completions 和 Responses 代理。�
 
 - Chat 只硬性校验 `model` 和 `messages`。
 - Responses 只硬性校验 `model` 和 `input`。
-- 其余已知或未知字段、嵌套字段和显式 `null` 保持不变，只将对外 model alias 替换为所选上游物理 model ID。
+- 其余已知或未知字段、嵌套字段和显式 `null` 保持不变，只将对外 model alias 替换为所选上游物理 model ID。网关专用字段 `fallback_group` 用于选择路由组，转发前移除。
 - 非流式 JSON 响应不重建，应保留多 `choices`、`tool_calls`、`logprobs`、usage 扩展和 Responses `output`。
-- SSE 以上游字节块原样转发，不注入 keepalive、不补 `[DONE]`、不改写 event 名称。
+- 正常 SSE 以上游字节块原样转发，不注入 keepalive、不补 `[DONE]`、不改写正常 event 名称；流中失败或缺少终止事件时发出明确协议错误并关闭上游，不切换后端。
 
 ## Canonical capability
 
@@ -39,7 +39,17 @@ route 的 `capabilities` 必须是非空列表，且只能使用：
 | `json_schema` | 严格 `json_schema` 输出；`json_object` 不等同于该能力 |
 | `previous_response_id` | Responses 请求使用 `previous_response_id` |
 
-指定 model 暂时不可用或缺少能力时，网关可在其他满足全部 capability 的模型中选择；不允许为了可用性丢弃请求特性。
+显式 model 使用 strict routing：暂时不可用、被禁用或缺少能力时明确失败，不能切换到其他模型。`auto` 只从能力匹配的可用 route 中加权选择。使用 `{"model":"auto","fallback_group":"primary",...}` 时只按照已配置组的 route 顺序尝试，不能逃逸到组外；同时指定显式 model 和 group 会被拒绝。
+
+批处理 `job.model_selection` 直接接入此协议：strict 发送 `route_id`，auto 发送 `auto`，fallback_group 发送 `auto` 与 `group`。规则 profile 不覆盖模型选择。
+
+### Responses affinity
+
+- key 是上游 Responses `id`，value 是具体 route ID（包含 channel、上游模型与 credential 的选择）；非流式响应及 SSE 的 `response` 对象会建立映射。
+- 映射保存在单 Gateway 进程内，无 await 的缓存更新使同一事件循环内的查找/插入不可交错；重启不恢复映射。
+- `gateway.affinity.ttl_seconds` 默认 3600，按插入时刻固定过期；`max_entries` 默认 10000，超出容量时淘汰最早插入的条目。
+- `previous_response_id` 必须命中映射。缺失、过期、被淘汰或 ID 跨 route 冲突时返回 409 `response_affinity_lost`；显式 model/group 与已绑定 route 冲突时返回 409 `response_affinity_conflict`。不能随机选择其他后端。
+- 后端返回跨 route 重复 ID 时标记该 key 为歧义并拒绝该响应；不会覆盖成新的归属。当前运行入口限制 `workers=1`，不声明多进程共享 affinity。
 
 ## Channel 配置
 
@@ -81,7 +91,13 @@ failover 只能发生在尚未向客户端开始响应时，且仅限：
 - HTTP `429`；
 - 明确可重试的 `500/502/503/504`。
 
+尝试上限由 `gateway.retry.max_attempts_per_request` 控制（默认 3），且不重复尝试本请求已经失败的 route。strict 和 affinity 请求最多使用原 route；只有 auto 或显式 group 可以切换。
+
 非重试型 `4xx`、成功响应头之后的 body/JSON 错误、或已向客户端发送任何 SSE 数据后的中断，都不能切换模型。
+
+Chat 流错误发送 `data: {"error":{...}}`，Responses 流错误发送 `event: error` 与 `type=error`、`sequence_number`；错误码为 `upstream_stream_error`。客户端取消不伪造成功或补终止事件，连接在生成器退出或未消费流的显式 close 中释放。SSE 不完整帧的缓冲上限为 1 MiB。
+
+请求 schema 校验失败返回 400 OpenAI error object，不回显请求输入；非流式上游错误保留其扩展字段，并补齐标准 `message/type/param/code` 键。
 
 没有任何模型具备所需能力时，返回 OpenAI error object：HTTP `400`、`type=invalid_request_error`、`code=unsupported_capability`、`param=model`。存在合适模型但当前全部不可用时返回 HTTP `503` 和 `code=model_unavailable`。
 
