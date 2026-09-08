@@ -167,7 +167,7 @@ matrix:
   os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
 ```
 
-每次推送 SemVer tag（支持 `3.2.0` 和 `v3.2.0` 两种形式），或 main 分支的相关源码、依赖、前端或 workflow 发生变更时，PyInstaller workflow 会产出 8 个 artifact（4 平台 × 2 版本）；Nuitka workflow 另产出 4 个 Full artifact。候选版本发布核对应读取回合计 12 个产物及 checksum。只有 SemVer tag 构建会进入 GitHub Release 任务。
+每次推送 SemVer tag（支持 `3.2.0` 和 `v3.2.0` 两种形式），或 main 分支的相关源码、依赖、前端或 workflow 发生变更时，PyInstaller workflow 会构建 8 个 artifact（4 平台 × 2 版本）。Nuitka 编译耗时较长，现仅接受 `workflow_dispatch` 手动触发；push、PR、tag 均不会自动启动它。手动构建仍保留原有 4 个平台，不降低 smoke 门槛。完整发布若需要合计 12 个产物，须另行手动完成 Nuitka 验证；研发 CI 不默认触发 Nuitka。分支上的手动构建不会执行 GitHub Release 任务。
 
 ## 常见问题
 

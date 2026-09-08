@@ -2,10 +2,7 @@
 # Nuitka 构建工作流 — 将 Python 编译为原生机器码
 #
 # 触发条件:
-#   - 推送 SemVer 标签时（如 3.2.0 或 v3.2.0，创建 Release）
-#   - 推送到主分支且修改了源码/依赖/前端文件
-#   - Pull Request 修改了相关文件
-#   - 手动触发（可指定版本号）
+#   - 仅手动触发；push、Pull Request 和 tag 均不自动启动耗时编译
 #
 # 构建产物:
 #   - Linux (amd64/arm64)、macOS (arm64)、Windows (amd64) 单文件可执行程序
@@ -18,34 +15,6 @@
 name: Build with Nuitka
 
 on:
-  push:
-    tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'          # 兼容 v3.2.0 形式
-      - '[0-9]*.[0-9]*.[0-9]*'           # 兼容历史 3.2.0 形式
-    branches:
-      - main
-      - master
-      - dev
-    paths:                                 # 仅在相关文件变更时触发
-      - 'src/**'
-      - 'cli.py'
-      - 'main.py'
-      - 'gateway.py'
-      - 'requirements.txt'
-      - 'config-example.yaml'
-      - 'web/**'
-      - '.github/scripts/smoke_control.py'
-      - '.github/scripts/smoke_workflow.py'
-      - '.github/workflows/build-nuitka.yml'
-  pull_request:
-    paths:
-      - 'src/**'
-      - '*.py'
-      - 'config-example.yaml'
-      - 'web/**'
-      - '.github/scripts/smoke_control.py'
-      - '.github/scripts/smoke_workflow.py'
-      - '.github/workflows/build-nuitka.yml'
   workflow_dispatch:                       # 支持手动触发
     inputs:
       version:
@@ -55,6 +24,7 @@ on:
 
 # 全局环境变量
 env:
+  PYTHONUTF8: '1'
   APP_NAME: AI-DataFlux
   PYTHON_VERSION: '3.11'
   NODE_VERSION: '20'

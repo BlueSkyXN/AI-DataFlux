@@ -90,7 +90,7 @@ class TestCLI:
         assert f"AI-DataFlux v{__version__}" in build_docs
 
     def test_release_workflow_version_tags(self):
-        """测试 Release workflow 同时支持数字版和 v 前缀 SemVer tag"""
+        """PyInstaller 保留 tag 触发；Nuitka 只能手动启动。"""
         expected_tags = {
             "v[0-9]*.[0-9]*.[0-9]*",
             "[0-9]*.[0-9]*.[0-9]*",
@@ -104,7 +104,10 @@ class TestCLI:
                 Loader=yaml.BaseLoader,
             )
 
-            assert set(workflow["on"]["push"]["tags"]) == expected_tags
+            if workflow_name == "build-nuitka.yml":
+                assert set(workflow["on"]) == {"workflow_dispatch"}
+            else:
+                assert set(workflow["on"]["push"]["tags"]) == expected_tags
             assert workflow["jobs"]["release"]["if"] == (
                 "startsWith(github.ref, 'refs/tags/')"
             )

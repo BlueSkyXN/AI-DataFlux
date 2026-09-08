@@ -643,12 +643,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
                 ]
                 where_clause = self._build_unprocessed_condition()
 
-                query = sql.SQL("""
+                query = sql.SQL(
+                    """
                     SELECT {}
                     FROM {}.{}
                     WHERE id BETWEEN %s AND %s AND {}
                     ORDER BY id ASC
-                """).format(
+                """
+                ).format(
                     sql.SQL(", ").join(columns_identifiers),
                     sql.Identifier(self.schema_name),
                     sql.Identifier(self.table_name),
@@ -1194,12 +1196,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.columns_to_extract]
             where_clause = self._build_unprocessed_condition()
 
-            query = sql.SQL("""
+            query = sql.SQL(
+                """
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """).format(
+            """
+            ).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),
@@ -1241,12 +1245,14 @@ class PostgreSQLTaskPool(BaseTaskPool):
             cols_identifiers = [sql.Identifier(c) for c in self.write_colnames]
             where_clause = self._build_processed_condition()
 
-            query = sql.SQL("""
+            query = sql.SQL(
+                """
                 SELECT {}
                 FROM {}.{}
                 WHERE {}
                 LIMIT %s
-            """).format(
+            """
+            ).format(
                 sql.SQL(", ").join(cols_identifiers),
                 sql.Identifier(self.schema_name),
                 sql.Identifier(self.table_name),
