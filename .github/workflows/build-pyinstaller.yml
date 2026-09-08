@@ -276,6 +276,8 @@ jobs:
               Write-Error "CLI-only artifact unexpectedly exposes gui"
               exit 1
             }
+            # gui 被明确拒绝是预期结果，不能把该非零退出码带到整个 step。
+            exit 0
           }
 
       - name: Smoke packaged processing workflow

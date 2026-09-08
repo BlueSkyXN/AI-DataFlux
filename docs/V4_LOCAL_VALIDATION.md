@@ -21,6 +21,8 @@
 
 该轮 Windows 测试实际暴露文件 flush 差异：临时文件必须以可写句柄执行 fsync，且不能用 POSIX 目录句柄流程处理 Windows。后续修复使用 `r+b` 刷新文件，在支持的平台同步父目录；不支持目录 fsync 的 Windows 仍要求文件 fsync、原子替换及磁盘 readback，不声明目录断电持久性。强制注入的替换后同步错误仍返回 `INDETERMINATE`。另修复了跨平台测试夹具对 `SIGKILL` 的错误依赖，保留真实 Windows taskkill 进程树清理。此次定向回归为 `77 passed`，后续远端结果须以修复提交的 CI 为准。
 
+`0337fff756cd8f798357a0c27b74f765128ac89b` 的 [Test 全矩阵](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34184984325) 已整体 success，包含 Windows。随后根据 PyInstaller 日志修正 Windows CLI-only 负向 GUI 检查的退出码处理，并让 Windows CLI 在进程内配置 UTF-8 输出（不修改控制台代码页）；对应 CLI 定向测试 `19 passed`。最终产物和最终提交测试仍由后续云端 Test / PyInstaller 运行确认。
+
 ## 历史状态：c34f503 之前的本地验证
 
 2026-09-08，`codex/4.0-integration`，基线 HEAD 为 `3d377e1011a29c8d07d59730973e1e8a79ef2469`。H2～H3 的新增实现及 H4 本地产品联调已推进，改动尚未提交；基线 SHA 不是本次修改的接受 SHA。

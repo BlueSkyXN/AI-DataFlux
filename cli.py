@@ -891,6 +891,15 @@ def main():
         - KeyboardInterrupt: 用户中断，返回 1
         - Exception: 打印错误信息和堆栈，返回 1
     """
+    # 冻结 Windows 产物不一定读取 PYTHONUTF8；仅配置本进程输出，不改控制台代码页。
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                try:
+                    reconfigure(encoding="utf-8", errors="backslashreplace")
+                except (OSError, ValueError):
+                    pass
     # 原生库探测只在隔离子进程运行；冻结产物不支持 Python 的 -c。
     if sys.argv[1:2] == ["--_dataflux-library-probe"]:
         if len(sys.argv) != 3 or sys.argv[2] not in {

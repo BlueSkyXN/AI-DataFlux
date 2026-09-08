@@ -51,6 +51,21 @@ def test_internal_library_probe_is_allowlisted_and_exits():
         assert result.returncode == expected
 
 
+def test_windows_cli_redirected_json_uses_utf8(monkeypatch):
+    import io
+    import cli
+
+    output = io.BytesIO()
+    stream = io.TextIOWrapper(output, encoding="cp1252")
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.sys, "stdout", stream)
+    monkeypatch.setattr(cli.sys, "argv", ["cli.py", "version"])
+    assert cli.main() == 0
+    cli._write_json({"message": "中文结果"})
+    stream.flush()
+    assert "中文结果" in output.getvalue().decode("utf-8")
+
+
 class TestCLI:
     """CLI 命令测试"""
 
