@@ -295,9 +295,10 @@ class TestCSVTaskPool:
             engine_type="pandas",
         )
         try:
-            with mock.patch(
-                "src.data.excel.os.fsync",
-                side_effect=[None, OSError("directory fsync failed")],
+            with mock.patch.object(
+                pool,
+                "_fsync_parent_directory",
+                side_effect=OSError("directory fsync failed"),
             ):
                 receipt = pool.update_task_results(
                     "directory-fsync",

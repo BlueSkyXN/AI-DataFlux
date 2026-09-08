@@ -7,6 +7,29 @@ import pytest
 from src.data.feishu.bitable import FeishuBitableTaskPool
 from src.data.feishu.sheet import FeishuSheetTaskPool
 from src.data.excel import ExcelTaskPool
+from pathlib import Path
+
+
+def test_atomic_file_flush_uses_writable_descriptor(tmp_path, monkeypatch):
+    source, output = tmp_path / "input.csv", tmp_path / "output.csv"
+    source.write_text("input,output\nA,\n", encoding="utf-8")
+    pool = ExcelTaskPool(source, output, ["input"], {"answer": "output"})
+    original_open = Path.open
+
+    def open_for_flush(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        if ".tmp" in path.name and "b" in mode and not handle.writable():
+            handle.close()
+            raise OSError("Windows fsync requires a writable file descriptor")
+        return handle
+
+    monkeypatch.setattr(Path, "open", open_for_flush)
+    try:
+        assert pool.update_task_results(
+            "write", {0: {"answer": "done"}}
+        ).committed_ids == (0,)
+    finally:
+        pool.close()
 
 
 @pytest.mark.parametrize(

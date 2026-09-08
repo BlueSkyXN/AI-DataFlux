@@ -19,10 +19,29 @@ def test_smoke_cleanup_signals_children_even_after_bootloader_exits(monkeypatch)
     )
     stop = module["stop_process"]
     monkeypatch.setitem(stop.__globals__, "os", fake_os)
+    fake_signal = SimpleNamespace(SIGTERM=15, SIGKILL=9)
+    monkeypatch.setitem(stop.__globals__, "signal", fake_signal)
     process = SimpleNamespace(pid=1234, wait=lambda timeout: 0)
     stop(process)
-    signal = module["signal"]
-    assert signals == [(1234, signal.SIGTERM), (1234, signal.SIGKILL)]
+    assert signals == [(1234, fake_signal.SIGTERM), (1234, fake_signal.SIGKILL)]
+
+
+def test_smoke_cleanup_uses_taskkill_tree_on_windows(monkeypatch):
+    from types import SimpleNamespace
+
+    root = Path(__file__).resolve().parents[2]
+    stop = runpy.run_path(str(root / ".github/scripts/smoke_workflow.py"))[
+        "stop_process"
+    ]
+    calls = []
+    monkeypatch.setitem(stop.__globals__, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setitem(
+        stop.__globals__,
+        "subprocess",
+        SimpleNamespace(run=lambda args, **kwargs: calls.append(args)),
+    )
+    stop(SimpleNamespace(pid=1234, poll=lambda: None, wait=lambda timeout: 0))
+    assert calls == [["taskkill", "/PID", "1234", "/T", "/F"]]
 
 
 @pytest.mark.integration

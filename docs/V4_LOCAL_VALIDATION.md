@@ -17,6 +17,10 @@
 
 本轮本地验证：非 integration `649 passed, 1 skipped, 13 deselected`；integration `11 passed, 2 skipped`（真实 MySQL/PostgreSQL 等待 CI 容器）。coverage line/branch 为 `80.82% / 67.78%`，jobs/core-runner/gateway line 为 `93.53% / 89.76% / 89.40%`，门槛全部通过；Ruff、Black 25.11.0、mypy（66 files）、actionlint、diff whitespace 检查通过。没有在本机运行 npm build、PyInstaller 或 Nuitka。
 
+`1fcccb194b9b1c0ff9cb6cc321c2c5e70e314fbe` 已推送并仅触发 [Test](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34184266583) 与 [PyInstaller](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34184265716)，没有触发 Nuitka。Test 的质量、前端、审计、覆盖率与集成任务通过；[真实数据库 job](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34184266583/job/101929344022) 中 MySQL/PostgreSQL 合同测试均为 PASSED，集成为 `13 passed`，不是 skipped。
+
+该轮 Windows 测试实际暴露文件 flush 差异：临时文件必须以可写句柄执行 fsync，且不能用 POSIX 目录句柄流程处理 Windows。后续修复使用 `r+b` 刷新文件，在支持的平台同步父目录；不支持目录 fsync 的 Windows 仍要求文件 fsync、原子替换及磁盘 readback，不声明目录断电持久性。强制注入的替换后同步错误仍返回 `INDETERMINATE`。另修复了跨平台测试夹具对 `SIGKILL` 的错误依赖，保留真实 Windows taskkill 进程树清理。此次定向回归为 `77 passed`，后续远端结果须以修复提交的 CI 为准。
+
 ## 历史状态：c34f503 之前的本地验证
 
 2026-09-08，`codex/4.0-integration`，基线 HEAD 为 `3d377e1011a29c8d07d59730973e1e8a79ef2469`。H2～H3 的新增实现及 H4 本地产品联调已推进，改动尚未提交；基线 SHA 不是本次修改的接受 SHA。

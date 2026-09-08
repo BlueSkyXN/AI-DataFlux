@@ -141,6 +141,7 @@ Excel 数据源任务池实现模块
 import asyncio
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -1122,15 +1123,12 @@ class ExcelTaskPool(BaseTaskPool):
                 self.engine.write_csv(df, temp_path)
             else:
                 self.engine.write_excel(df, temp_path)
-            with temp_path.open("rb") as handle:
+            # Windows 的 fsync/_commit 要求可写句柄。
+            with temp_path.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp_path, destination)
             replaced = True
-            directory_fd = os.open(str(destination.parent), os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._fsync_parent_directory(destination.parent)
         except AtomicFileWriteError:
             raise
         except Exception as exc:
@@ -1141,6 +1139,17 @@ class ExcelTaskPool(BaseTaskPool):
         finally:
             if temp_path.exists():
                 temp_path.unlink()
+
+    @staticmethod
+    def _fsync_parent_directory(directory: Path) -> None:
+        # Windows 不支持用 os.open/fsync 同步目录；文件已在替换前完成 fsync。
+        if sys.platform == "win32":
+            return
+        descriptor = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     # ==================== Token 估算采样 ====================
 
