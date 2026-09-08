@@ -44,6 +44,36 @@ from src.data.contracts import CommitDisposition
 from src.data.sqlite import SQLiteTaskPool, SQLiteConnectionManager
 
 
+def test_two_database_pools_keep_reads_writes_and_close_isolated(tmp_path):
+    paths = [tmp_path / f"{name}.db" for name in ("a", "b")]
+    for name, path in zip(("A", "B"), paths):
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE tasks (id INTEGER PRIMARY KEY, input TEXT, output TEXT)"
+            )
+            connection.execute("INSERT INTO tasks VALUES (1, ?, NULL)", (name,))
+    pools = [
+        SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"}) for path in paths
+    ]
+    try:
+        assert pools[0].reload_task_data(1) == {"input": "A"}
+        assert pools[1].reload_task_data(1) == {"input": "B"}
+        receipt = pools[0].update_task_results("a-write", {1: {"answer": "answer-A"}})
+        assert receipt.committed_ids == (1,)
+        connection_b = SQLiteConnectionManager.get_connection(str(paths[1]))
+        pools[0].close()
+        assert connection_b.execute("SELECT input FROM tasks").fetchone()[0] == "B"
+        for path, expected in zip(paths, ("answer-A", None)):
+            with sqlite3.connect(path) as connection:
+                assert (
+                    connection.execute("SELECT output FROM tasks").fetchone()[0]
+                    == expected
+                )
+    finally:
+        for pool in pools:
+            pool.close()
+
+
 class TestSQLiteConnectionManager:
     """SQLite 连接管理器测试"""
 
@@ -52,25 +82,29 @@ class TestSQLiteConnectionManager:
         SQLiteConnectionManager.set_db_path("/test/path.db")
         assert SQLiteConnectionManager._db_path == "/test/path.db"
 
-    def test_get_connection_without_path_raises(self):
+    def test_get_connection_without_path_raises(self, monkeypatch):
         """测试未设置路径时获取连接抛出异常"""
         # 重置状态
-        SQLiteConnectionManager._db_path = None
-        SQLiteConnectionManager._thread_local = type("local", (), {"conn": None})()
+        monkeypatch.setattr(SQLiteConnectionManager, "_db_path", None)
 
         with pytest.raises(ValueError, match="数据库路径未设置"):
             SQLiteConnectionManager.get_connection()
 
-    def test_close_connection(self):
+    def test_close_connection(self, monkeypatch):
         """测试关闭连接"""
         # 模拟已存在连接
         mock_conn = MagicMock()
-        SQLiteConnectionManager._thread_local.conn = mock_conn
+        monkeypatch.setattr(
+            SQLiteConnectionManager._thread_local,
+            "connections",
+            {"test": mock_conn},
+            raising=False,
+        )
 
         SQLiteConnectionManager.close_connection()
 
         mock_conn.close.assert_called_once()
-        assert SQLiteConnectionManager._thread_local.conn is None
+        assert SQLiteConnectionManager._thread_local.connections == {}
 
 
 class TestSQLiteTaskPool:
@@ -84,7 +118,8 @@ class TestSQLiteTaskPool:
         cursor = conn.cursor()
 
         # 创建测试表
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE tasks (
                 id INTEGER PRIMARY KEY,
                 input_text TEXT,
@@ -92,7 +127,8 @@ class TestSQLiteTaskPool:
                 output_result TEXT,
                 output_summary TEXT
             )
-        """)
+        """
+        )
 
         # 插入测试数据
         test_data = [
@@ -379,14 +415,16 @@ class TestSQLiteTaskPoolWithRequireAny:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE tasks (
                 id INTEGER PRIMARY KEY,
                 input_text TEXT,
                 context TEXT,
                 output_result TEXT
             )
-        """)
+        """
+        )
 
         test_data = [
             (1, "有文本", "", None),  # 只有 input_text

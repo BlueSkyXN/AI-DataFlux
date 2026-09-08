@@ -171,10 +171,10 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class SQLiteConnectionManager:
     """
-    SQLite 连接管理器（线程级单例）
+    SQLite 连接管理器（线程与规范化数据库路径双重隔离）
 
     SQLite 连接不能在线程间共享，因此每个线程需要独立的连接。
-    使用 threading.local() 存储线程级连接，确保线程安全。
+    使用 threading.local() 中的路径字典缓存连接，切换数据库不关闭其他库连接。
 
     WAL 模式:
         Write-Ahead Logging 模式允许并发读取，提升性能:
@@ -183,8 +183,8 @@ class SQLiteConnectionManager:
         - 写操作仍然是串行的
 
     Attributes:
-        _thread_local: 线程本地存储，保存连接实例
-        _db_path: 数据库文件路径（类级别，所有实例共享）
+        _thread_local: 线程本地存储，保存按路径区分的连接
+        _db_path: 仅供直接调用管理器使用的默认路径；任务池不读写这个默认值
         _lock: 设置路径时的线程锁
 
     使用模式:
@@ -247,18 +247,11 @@ class SQLiteConnectionManager:
                 "数据库路径未设置，请先调用 set_db_path() 或传入 db_path 参数"
             )
 
-        # 如果已存在连接但路径不同，先关闭旧连接避免跨库复用与文件锁
-        existing_conn = getattr(cls._thread_local, "conn", None)
-        existing_db_path = getattr(cls._thread_local, "db_path", None)
-        if existing_conn is not None and existing_db_path != path_to_use:
-            logging.debug(
-                "检测到 SQLite 连接路径切换，关闭旧连接: "
-                f"{existing_db_path} -> {path_to_use}"
-            )
-            cls.close_connection()
-
-        # 检查是否需要创建新连接
-        if not hasattr(cls._thread_local, "conn") or cls._thread_local.conn is None:
+        path_to_use = str(Path(path_to_use).resolve())
+        if not hasattr(cls._thread_local, "connections"):
+            cls._thread_local.connections = {}
+        connections = cls._thread_local.connections
+        if path_to_use not in connections:
             logging.debug(f"为线程 {threading.current_thread().name} 创建 SQLite 连接")
             conn = sqlite3.connect(
                 path_to_use,
@@ -273,35 +266,38 @@ class SQLiteConnectionManager:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
 
-            cls._thread_local.conn = conn
-            cls._thread_local.db_path = path_to_use
+            connections[path_to_use] = conn
 
-        return cls._thread_local.conn
+        return connections[path_to_use]
 
     @classmethod
-    def close_connection(cls) -> None:
+    def close_connection(cls, db_path: str | None = None) -> None:
         """
         关闭当前线程的连接
 
         在线程结束前调用，释放数据库资源。
         关闭后可以重新获取连接（会创建新连接）。
         """
-        if hasattr(cls._thread_local, "conn") and cls._thread_local.conn:
+        connections = getattr(cls._thread_local, "connections", {})
+        paths = (
+            [str(Path(db_path).resolve())] if db_path is not None else list(connections)
+        )
+        for path in paths:
+            connection = connections.pop(path, None)
+            if connection is None:
+                continue
             try:
                 # WAL 模式下先做 checkpoint，减少 Windows 下文件锁残留概率
                 try:
-                    cls._thread_local.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
-                cls._thread_local.conn.close()
+                connection.close()
                 logging.debug(
                     f"线程 {threading.current_thread().name} 的 SQLite 连接已关闭"
                 )
             except Exception as e:
                 logging.warning(f"关闭 SQLite 连接时出错: {e}")
-            finally:
-                cls._thread_local.conn = None
-                cls._thread_local.db_path = None
 
 
 class SQLiteTaskPool(BaseTaskPool):
@@ -343,7 +339,7 @@ class SQLiteTaskPool(BaseTaskPool):
             1. 验证数据库文件存在
             2. 初始化基类
             3. 配置查询和写入列
-            4. 设置全局数据库路径
+            4. 将实例路径规范化；所有操作显式使用该路径
             5. 验证目标表存在
             6. 初始化分片状态
 
@@ -363,7 +359,7 @@ class SQLiteTaskPool(BaseTaskPool):
         """
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
 
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path).resolve()
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite 数据库文件不存在: {self.db_path}")
 
@@ -378,9 +374,6 @@ class SQLiteTaskPool(BaseTaskPool):
             "columns_to_write",
         )
         self.select_columns = list(set(["id"] + self.columns_to_extract))
-
-        # 设置全局数据库路径
-        SQLiteConnectionManager.set_db_path(str(self.db_path))
 
         # 验证数据库和表
         self._validate_table()
@@ -440,7 +433,7 @@ class SQLiteTaskPool(BaseTaskPool):
         Returns:
             int: 未处理任务数量；查询失败时抛出异常
         """
-        conn = SQLiteConnectionManager.get_connection()
+        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
         cursor = conn.cursor()
         try:
             where_clause = self._build_unprocessed_condition()
@@ -464,7 +457,7 @@ class SQLiteTaskPool(BaseTaskPool):
         Returns:
             int: 已处理任务数量；查询失败时抛出异常
         """
-        conn = SQLiteConnectionManager.get_connection()
+        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
         cursor = conn.cursor()
         try:
             where_clause = self._build_processed_condition()
@@ -488,7 +481,7 @@ class SQLiteTaskPool(BaseTaskPool):
             表为空或查询失败返回 (0, 0)
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             sql = (
@@ -526,7 +519,7 @@ class SQLiteTaskPool(BaseTaskPool):
         shard_tasks: list[tuple[Any, dict[str, Any]]] = []
 
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             # 构建查询
@@ -606,7 +599,7 @@ class SQLiteTaskPool(BaseTaskPool):
             raise ValueError("invalid SQLite cursor")
 
         def read_page() -> TaskBatch:
-            connection = SQLiteConnectionManager.get_connection()
+            connection = SQLiteConnectionManager.get_connection(str(self.db_path))
             db_cursor = connection.cursor()
             try:
                 columns = ", ".join(f"[{col}]" for col in self.select_columns)
@@ -694,7 +687,7 @@ class SQLiteTaskPool(BaseTaskPool):
                 atomic=True,
             )
 
-        conn = SQLiteConnectionManager.get_connection()
+        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
         cursor = conn.cursor()
         statement_failure: WritebackItem | None = None
         try:
@@ -787,7 +780,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
-        conn = SQLiteConnectionManager.get_connection()
+        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
         cursor = conn.cursor()
         items: list[WritebackItem] = []
         try:
@@ -864,7 +857,7 @@ class SQLiteTaskPool(BaseTaskPool):
             dict[str, Any] | None: 输入数据字典，记录不存在返回 None
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             cols_str = ", ".join(f"[{c}]" for c in self.columns_to_extract)
@@ -891,7 +884,7 @@ class SQLiteTaskPool(BaseTaskPool):
         释放数据库资源。其他线程的连接不受影响。
         """
         logging.info("关闭 SQLite 连接...")
-        SQLiteConnectionManager.close_connection()
+        SQLiteConnectionManager.close_connection(str(self.db_path))
 
     # ==================== 内部方法 ====================
 
@@ -955,7 +948,7 @@ class SQLiteTaskPool(BaseTaskPool):
             采样数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             if not self.columns_to_extract:
@@ -998,7 +991,7 @@ class SQLiteTaskPool(BaseTaskPool):
             采样数据列表 [{column: value, ...}, ...]，包含输出列
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             if not self.write_colnames:
@@ -1041,7 +1034,7 @@ class SQLiteTaskPool(BaseTaskPool):
             所有行的数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             if not columns:
@@ -1079,7 +1072,7 @@ class SQLiteTaskPool(BaseTaskPool):
             已处理行的数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection()
+            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             if not columns:
