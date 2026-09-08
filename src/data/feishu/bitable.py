@@ -6,7 +6,7 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 
 核心设计（对应云端表格与本地文件的差异）:
     1. 快照读取 —— 初始化时一次性拉取全部记录到内存，后续操作基于快照
-    2. ID 映射表 —— 连续整数 task_id ↔ 字符串 record_id 的稳定映射
+    2. 记录身份 —— 任务、checkpoint 和写回使用原生字符串 record_id
     3. 写入控制 —— 批量更新上限 1000 条/次，自动分块
     4. 部分失败追溯 —— 每条记录的写入状态独立跟踪
     5. Token 自动刷新 —— 由 FeishuClient 透明处理
@@ -15,8 +15,8 @@ AI-DataFlux 的数据源进行批量 AI 处理。
     与数据库数据源不同，Bitable 的 record_id 是字符串（如 recXXXXXX），
     不是连续数字。因此：
     - get_id_boundaries() 返回 (0, total_records - 1)
-    - 使用连续整数 task_id 做分片，通过映射表查找 record_id
-    - initialize_shard() 按 task_id 范围从快照中加载
+    - 整数仅用于当前快照的分片位置，不作为可恢复任务 ID
+    - initialize_shard() 按位置范围加载，交给处理器的是原生 record_id
 
 类清单:
     FeishuBitableTaskPool(BaseTaskPool)
@@ -24,8 +24,8 @@ AI-DataFlux 的数据源进行批量 AI 处理。
 
 关键变量:
     _snapshot       — list[dict]: 内存快照，元素为 {"record_id": str, "fields": dict}
-    _id_map         — dict[int, str]: task_id → record_id 正向映射
-    _reverse_map    — dict[str, int]: record_id → task_id 反向映射
+    _id_map         — dict[int, str]: 快照位置 → record_id
+    _reverse_map    — dict[str, int]: record_id → 当前快照位置
     _snapshot_loaded — bool: 快照是否已加载（双重检查锁保护）
 
 方法清单:
@@ -204,6 +204,14 @@ class FeishuBitableTaskPool(BaseTaskPool):
 
         for idx, rec in enumerate(records):
             record_id = rec.get("record_id", "")
+            if (
+                not isinstance(record_id, str)
+                or not record_id
+                or record_id in self._reverse_map
+            ):
+                raise ValueError(
+                    "Bitable snapshot contains missing or duplicate record_id"
+                )
             self._id_map[idx] = record_id
             self._reverse_map[record_id] = idx
 
@@ -300,7 +308,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
         """
         self._load_snapshot_sync()
 
-        shard_tasks: list[tuple[int, dict[str, Any]]] = []
+        shard_tasks: list[tuple[str, dict[str, Any]]] = []
 
         for task_id in range(min_id, min(max_id + 1, len(self._snapshot))):
             rec = self._snapshot[task_id]
@@ -311,7 +319,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
                     col: self._convert_field_value(fields.get(col, ""))
                     for col in self.columns_to_extract
                 }
-                shard_tasks.append((task_id, record_dict))
+                shard_tasks.append((self._id_map[task_id], record_dict))
 
         with self.lock:
             self.tasks = shard_tasks
@@ -326,7 +334,7 @@ class FeishuBitableTaskPool(BaseTaskPool):
         )
         return len(shard_tasks)
 
-    def get_task_batch(self, batch_size: int) -> list[tuple[int, dict[str, Any]]]:
+    def get_task_batch(self, batch_size: int) -> list[tuple[Any, dict[str, Any]]]:
         """从内存队列获取一批任务"""
         with self.lock:
             batch = self.tasks[:batch_size]
@@ -342,10 +350,18 @@ class FeishuBitableTaskPool(BaseTaskPool):
             full_scan=True,
         )
 
+    async def recovery_identity(self) -> dict[str, Any]:
+        return {
+            "kind": "feishu_bitable",
+            "app_token": self.app_token,
+            "table_id": self.table_id,
+            "record_identity": "native_record_id",
+        }
+
     def update_task_results(
         self,
         batch_id: str,
-        results: dict[int, dict[str, Any]],
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """
         批量写回任务结果到飞书多维表格
@@ -359,10 +375,11 @@ class FeishuBitableTaskPool(BaseTaskPool):
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=False)
 
+        self._load_snapshot_sync()
         # 构建待更新记录
         update_records: list[dict[str, Any]] = []
-        task_ids_by_record: dict[str, int] = {}
-        outcomes: dict[int, WritebackItem] = {}
+        task_ids_by_record: dict[str, str] = {}
+        outcomes: dict[Any, WritebackItem] = {}
         for task_id, row_result in results.items():
             if "_error" in row_result:
                 outcomes[task_id] = WritebackItem(
@@ -374,7 +391,11 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 )
                 continue
 
-            record_id = self._id_map.get(task_id)
+            record_id = (
+                task_id
+                if isinstance(task_id, str) and task_id in self._reverse_map
+                else None
+            )
             if not record_id:
                 outcomes[task_id] = WritebackItem(
                     record_id=task_id,
@@ -545,12 +566,13 @@ class FeishuBitableTaskPool(BaseTaskPool):
     def reconcile_task_results(
         self,
         batch_id: str,
-        results: dict[int, dict[str, Any]],
+        results: dict[Any, dict[str, Any]],
     ) -> WritebackReceipt:
         """从 Bitable 重新读取远端字段并逐记录核对。"""
 
-        outcomes: dict[int, WritebackItem] = {}
-        expected: dict[int, tuple[str, dict[str, Any]]] = {}
+        self._load_snapshot_sync()
+        outcomes: dict[Any, WritebackItem] = {}
+        expected: dict[Any, tuple[str, dict[str, Any]]] = {}
         for task_id, row_result in results.items():
             if "_error" in row_result:
                 outcomes[task_id] = WritebackItem(
@@ -561,7 +583,11 @@ class FeishuBitableTaskPool(BaseTaskPool):
                     False,
                 )
                 continue
-            record_id = self._id_map.get(task_id)
+            record_id = (
+                task_id
+                if isinstance(task_id, str) and task_id in self._reverse_map
+                else None
+            )
             if not record_id:
                 outcomes[task_id] = WritebackItem(
                     task_id,
@@ -642,8 +668,9 @@ class FeishuBitableTaskPool(BaseTaskPool):
                 task_id,
                 CommitDisposition.COMMITTED,
             )
-            if 0 <= task_id < len(self._snapshot):
-                snapshot_fields = self._snapshot[task_id].setdefault("fields", {})
+            index = self._reverse_map.get(task_id)
+            if index is not None:
+                snapshot_fields = self._snapshot[index].setdefault("fields", {})
                 if isinstance(snapshot_fields, dict):
                     snapshot_fields.update(actual_fields)
 
@@ -652,8 +679,8 @@ class FeishuBitableTaskPool(BaseTaskPool):
     @staticmethod
     def _receipt(
         batch_id: str,
-        results: dict[int, dict[str, Any]],
-        outcomes: dict[int, WritebackItem],
+        results: dict[Any, dict[str, Any]],
+        outcomes: dict[Any, WritebackItem],
     ) -> WritebackReceipt:
         return WritebackReceipt(
             batch_id=batch_id,
@@ -671,10 +698,12 @@ class FeishuBitableTaskPool(BaseTaskPool):
             pass
         return cls._convert_field_value(expected) == cls._convert_field_value(actual)
 
-    def reload_task_data(self, task_id: int) -> dict[str, Any] | None:
+    def reload_task_data(self, task_id: Any) -> dict[str, Any] | None:
         """重新从快照加载任务数据"""
-        if 0 <= task_id < len(self._snapshot):
-            fields = self._get_fields(self._snapshot[task_id])
+        self._load_snapshot_sync()
+        index = self._reverse_map.get(task_id)
+        if index is not None:
+            fields = self._get_fields(self._snapshot[index])
             return {
                 col: self._convert_field_value(fields.get(col, ""))
                 for col in self.columns_to_extract

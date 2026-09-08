@@ -72,12 +72,27 @@ async def run_processing_job(
         processor = await initialization
         await processor.task_pool.aclose()
         raise
-    processor.configure_job_control(
-        cancel_event=cancel_event,
-        target_concurrency_provider=target_concurrency_provider,
-        job_tracker=tracker,
-    )
     try:
+        state = repository.get_state(job_id)
+        try:
+            identity = await processor.task_pool.recovery_identity()
+            if state.source_identity is not None and state.source_identity != identity:
+                raise ValueError("source_identity_changed")
+            if identity is not None and state.source_identity is None:
+                if state.checkpoints:
+                    raise ValueError("source_identity_missing_for_resume")
+                repository.update_state(
+                    job_id, lambda value: replace(value, source_identity=identity)
+                )
+            if state.checkpoints:
+                await processor.task_pool.prepare_resume(tracker.persisted_results())
+        except (ValueError, TimeoutError) as error:
+            return JobRunResult(JobStatus.BLOCKED, {"reason": str(error)})
+        processor.configure_job_control(
+            cancel_event=cancel_event,
+            target_concurrency_provider=target_concurrency_provider,
+            job_tracker=tracker,
+        )
         if pending_commits:
             repository.append_event(
                 job_id,

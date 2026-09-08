@@ -98,10 +98,13 @@
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
+from collections.abc import Iterable
 
 from .contracts import (
     AdapterCapabilities,
@@ -112,6 +115,17 @@ from .contracts import (
     WritebackReceipt,
     validate_writeback_receipt,
 )
+
+
+def snapshot_fingerprint(rows: Iterable[list[str]]) -> str:
+    """对有序输入生成摘要；输出值不应作为位置身份的一部分。"""
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 class BaseTaskPool(ABC):
@@ -151,6 +165,7 @@ class BaseTaskPool(ABC):
         self.require_all_input_fields = require_all_input_fields
         self.tasks: list[tuple[Any, dict[str, Any]]] = []
         self.lock = threading.Lock()
+        self._scan_offset = 0
 
     # ==================== 抽象方法（子类必须实现） ====================
 
@@ -346,6 +361,13 @@ class BaseTaskPool(ABC):
 
     # ==================== v4 async adapter contract ====================
 
+    async def recovery_identity(self) -> dict[str, Any] | None:
+        """有位置身份约束的数据源提供可持久化的恢复前提。"""
+        return None
+
+    async def prepare_resume(self, committed: dict[Any, dict[str, Any]]) -> None:
+        """在重放/扫描前恢复工作数据，不能丢掉已确认写回的结果。"""
+
     @property
     def capabilities(self) -> AdapterCapabilities:
         """Return conservative recovery guarantees for legacy task pools."""
@@ -362,23 +384,23 @@ class BaseTaskPool(ABC):
     async def scan(self, cursor: Any | None, limit: int) -> TaskBatch:
         """Read a page through an opaque cursor without exposing shard math.
 
-        Existing task pools keep their optimized shard loaders.  This default
-        bridge is intentionally one-page and is overridden by adapters that
-        support native keyset/page cursors.
+        内存快照队列使用已消费条数作为单调游标，不能用固定布尔值代替进度。
         """
 
         if limit <= 0:
             raise ValueError("limit must be greater than 0")
         if cursor is None:
+            self._scan_offset = 0
             min_id, max_id = await asyncio.to_thread(self.get_id_boundaries)
             if min_id is None or max_id is None:
                 return TaskBatch(records=(), next_cursor=None)
             await asyncio.to_thread(self.initialize_shard, 0, min_id, max_id)
-        elif cursor != {"legacy_queue": True}:
-            raise ValueError("invalid legacy datasource cursor")
+        elif cursor != {"queue_offset": self._scan_offset}:
+            raise ValueError("invalid datasource queue cursor")
         records = await asyncio.to_thread(self.get_task_batch, limit)
+        self._scan_offset += len(records)
         remaining = await asyncio.to_thread(self.has_tasks)
-        next_cursor = {"legacy_queue": True} if remaining else None
+        next_cursor = {"queue_offset": self._scan_offset} if remaining else None
         return TaskBatch(
             records=tuple(
                 TaskRecord(record_id=rid, data=data) for rid, data in records

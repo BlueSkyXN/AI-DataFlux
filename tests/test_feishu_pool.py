@@ -83,7 +83,7 @@ class TestFeishuFactoryIntegration:
 
         config = {
             "datasource": {"type": "feishu_bitable"},
-            "feishu": {
+            "feishu_bitable": {
                 "app_id": "cli_test",
                 # 缺少 app_secret, app_token, table_id
             },
@@ -102,7 +102,7 @@ class TestFeishuFactoryIntegration:
 
         config = {
             "datasource": {"type": "feishu_sheet"},
-            "feishu": {
+            "feishu_sheet": {
                 "app_id": "cli_test",
                 "app_secret": "secret",
                 # 缺少 spreadsheet_token, sheet_id
@@ -123,7 +123,7 @@ class TestFeishuFactoryIntegration:
 
         config = {
             "datasource": {"type": "feishu_bitable"},
-            "feishu": {
+            "feishu_bitable": {
                 "app_id": "cli_test",
                 "app_secret": "secret",
                 "app_token": "basc_test",
@@ -147,7 +147,7 @@ class TestFeishuFactoryIntegration:
 
         config = {
             "datasource": {"type": "feishu_sheet"},
-            "feishu": {
+            "feishu_sheet": {
                 "app_id": "cli_test",
                 "app_secret": "secret",
                 "spreadsheet_token": "shtcn_test",
@@ -375,13 +375,13 @@ class TestFeishuBitableTaskPool:
 
         # 验证任务数据
         task_id, data = batch[0]
-        assert task_id == 0
+        assert task_id == "recAAABBB001"
         assert data["question"] == "什么是 AI？"
         assert data["context"] == "人工智能概述"
 
     def test_reload_task_data(self, bitable_pool):
         """测试重新加载任务数据"""
-        data = bitable_pool.reload_task_data(0)
+        data = bitable_pool.reload_task_data("recAAABBB001")
         assert data is not None
         assert data["question"] == "什么是 AI？"
 
@@ -441,7 +441,7 @@ class TestFeishuBitableTaskPool:
 
         # 模拟写回结果
         results = {
-            0: {"answer": "AI 是人工智能", "category": "tech"},
+            "recAAABBB001": {"answer": "AI 是人工智能", "category": "tech"},
         }
 
         # Mock client 的 bitable_batch_update 方法
@@ -455,7 +455,7 @@ class TestFeishuBitableTaskPool:
         ):
             receipt = bitable_pool.update_task_results("bitable-success", results)
 
-        assert receipt.committed_ids == (0,)
+        assert receipt.committed_ids == ("recAAABBB001",)
         # 验证快照已更新
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "AI 是人工智能"
         assert bitable_pool._snapshot[0]["fields"]["ai_category"] == "tech"
@@ -519,14 +519,14 @@ class TestFeishuBitableTaskPool:
         ):
             receipt = bitable_pool.update_task_results(
                 "bitable-network-failure",
-                {0: {"answer": "AI 是人工智能", "category": "tech"}},
+                {"recAAABBB001": {"answer": "AI 是人工智能", "category": "tech"}},
             )
 
         # 写回失败后快照应保持未更新
         from src.data.contracts import CommitDisposition
 
         assert receipt.committed_ids == ()
-        assert receipt.items[0].record_id == 0
+        assert receipt.items[0].record_id == "recAAABBB001"
         assert receipt.items[0].disposition == CommitDisposition.INDETERMINATE
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == ""
         assert bitable_pool.get_total_task_count() == 2
@@ -554,15 +554,15 @@ class TestFeishuBitableTaskPool:
             receipt = bitable_pool.update_task_results(
                 "bitable-partial",
                 {
-                    0: {"answer": "first", "category": "ok"},
-                    1: {"answer": "second", "category": "retry"},
+                    "recAAABBB001": {"answer": "first", "category": "ok"},
+                    "recAAABBB002": {"answer": "second", "category": "retry"},
                 },
             )
 
         from src.data.contracts import CommitDisposition
 
-        assert receipt.committed_ids == (0,)
-        assert receipt.items[1].record_id == 1
+        assert receipt.committed_ids == ("recAAABBB001",)
+        assert receipt.items[1].record_id == "recAAABBB002"
         assert receipt.items[1].disposition == CommitDisposition.INDETERMINATE
         assert bitable_pool._snapshot[0]["fields"]["ai_answer"] == "first"
         assert bitable_pool._snapshot[1]["fields"]["ai_answer"] == ""
@@ -579,7 +579,7 @@ class TestFeishuBitableTaskPool:
         ):
             receipt = bitable_pool.update_task_results(
                 "bitable-rejected",
-                {0: {"answer": "not-written"}},
+                {"recAAABBB001": {"answer": "not-written"}},
             )
 
         assert receipt.items[0].disposition == CommitDisposition.REJECTED
@@ -600,7 +600,7 @@ class TestFeishuBitableTaskPool:
                 }
             ]
 
-        results = {0: {"answer": "AI 是人工智能", "category": "tech"}}
+        results = {"recAAABBB001": {"answer": "AI 是人工智能", "category": "tech"}}
         with mock.patch.object(
             bitable_pool.client,
             "bitable_list_records",
@@ -610,7 +610,7 @@ class TestFeishuBitableTaskPool:
                 "bitable-reconcile",
                 results,
             )
-        assert committed.committed_ids == (0,)
+        assert committed.committed_ids == ("recAAABBB001",)
 
         async def mismatched(_app_token, _table_id, **_kwargs):
             return [

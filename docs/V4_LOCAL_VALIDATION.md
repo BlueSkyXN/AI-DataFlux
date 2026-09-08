@@ -1,6 +1,23 @@
 # AI-DataFlux 4.0 工作区验证与剩余交付项
 
-## 状态
+## 当前正确性修复轮（2026-09-08）
+
+本轮以已推送的 `c34f503ba64379b4b8a901a6f282c273e355a981` 为基线，修复评审复现的问题；以下历史小节描述此前的本地快照，不代表当前仍未提交或所有单文件产物都不可运行。
+
+- SQLite 所有任务池操作显式绑定规范化数据库路径，连接按线程/路径缓存，关闭某库不关闭其他库。
+- CSV/Excel 恢复验证输入身份及已确认输出，加载有效输出继续处理；输出缺失、被修改、输入重排或旧 checkpoint 缺少身份时阻止恢复。同一规范化输出路径只允许一个 active writer。
+- Bitable 的扫描、重试、PreparedResult 和写回使用原生 `record_id`；文件/Sheet 保存并校验有序输入摘要。内存队列游标改为单调消费进度，两个飞书适配器均覆盖两页以上数据。
+- 飞书工厂读取与 canonical 编译结果一致的 `feishu_bitable` / `feishu_sheet` 节，不重新引入旧配置别名。
+- Test 工作流统一安装开发/测试依赖（含 TestClient 所需的 httpx/httpx2），所有工作流显式启用 Python UTF-8 模式；格式检查与 CI 一致使用 Black 25.11.0。
+- Nuitka 仅保留 `workflow_dispatch`，不会因 push、PR 或 tag 自动构建。本轮不在本机进行前端或二进制构建，也不默认触发云端 Nuitka；构建验证交给云端 PyInstaller。
+
+基线远端证据：Test 因 TestClient 依赖和格式门禁失败；PyInstaller 的 Linux x64/ARM64、macOS ARM64 共 6 个 Full/CLI job 通过，Windows 两个 job 因编码错误失败。macOS Full 的合并/独立 Worker 两种实际处理链路均 PASS。Nuitka 最终失败（Unix 产物 smoke、Windows 审计）；这些失败不会被改成通过或从历史记录中删除。
+
+本轮定向测试覆盖 SQLite 交错读写/关闭、CSV/Excel 重启后只处理剩余记录、输出完整性与身份变化拒绝、Bitable 重排后重放原生 ID、两种飞书适配器分页边界以及同目标写入互斥。原有接受 SHA 不能替代这些组合场景的回归证据；正式接受仍需当前提交的 CI 与专用环境 UAT。
+
+本轮本地验证：非 integration `649 passed, 1 skipped, 13 deselected`；integration `11 passed, 2 skipped`（真实 MySQL/PostgreSQL 等待 CI 容器）。coverage line/branch 为 `80.82% / 67.78%`，jobs/core-runner/gateway line 为 `93.53% / 89.76% / 89.40%`，门槛全部通过；Ruff、Black 25.11.0、mypy（66 files）、actionlint、diff whitespace 检查通过。没有在本机运行 npm build、PyInstaller 或 Nuitka。
+
+## 历史状态：c34f503 之前的本地验证
 
 2026-09-08，`codex/4.0-integration`，基线 HEAD 为 `3d377e1011a29c8d07d59730973e1e8a79ef2469`。H2～H3 的新增实现及 H4 本地产品联调已推进，改动尚未提交；基线 SHA 不是本次修改的接受 SHA。
 

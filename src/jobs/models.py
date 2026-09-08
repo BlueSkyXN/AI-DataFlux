@@ -175,6 +175,7 @@ class JobState:
     last_error: str | None = None
     checkpoints: Mapping[str, Any] = field(default_factory=dict, repr=False)
     command_receipts: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    source_identity: Mapping[str, Any] | None = field(default=None, repr=False)
     schema_version: int = JOB_STATE_SCHEMA_VERSION
 
     @classmethod
@@ -198,7 +199,7 @@ class JobState:
         data = {
             item.name: getattr(self, item.name)
             for item in fields(self)
-            if item.name not in {"checkpoints", "command_receipts"}
+            if item.name not in {"checkpoints", "command_receipts", "source_identity"}
         }
         data["counts"] = self.counts.to_dict()
         data["resource"] = self.resource.to_dict()
@@ -209,6 +210,9 @@ class JobState:
         data = self.to_dict()
         data["checkpoints"] = dict(self.checkpoints)
         data["command_receipts"] = dict(self.command_receipts)
+        data["source_identity"] = (
+            dict(self.source_identity) if self.source_identity is not None else None
+        )
         return data
 
     @classmethod
@@ -218,6 +222,9 @@ class JobState:
         if type(revision) is not int or revision < 0:
             raise ValueError("job state revision must be a non-negative integer")
         checkpoints = data.get("checkpoints")
+        identity = data.get("source_identity")
+        if identity is not None and not isinstance(identity, dict):
+            raise ValueError("job source_identity must be an object")
         if not isinstance(checkpoints, dict):
             raise ValueError("job state checkpoints must be an object")
         for shard_id, payload in checkpoints.items():
@@ -228,6 +235,7 @@ class JobState:
             schema_version=version,
             revision=revision,
             checkpoints=checkpoints,
+            source_identity=identity,
             command_receipts=dict(data.get("command_receipts") or {}),
             job_id=str(data["job_id"]),
             mode=str(data["mode"]),

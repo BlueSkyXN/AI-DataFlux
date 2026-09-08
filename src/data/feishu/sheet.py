@@ -79,7 +79,7 @@ import logging
 import threading
 from typing import Any
 
-from ..base import BaseTaskPool
+from ..base import BaseTaskPool, snapshot_fingerprint
 from ..contracts import (
     AdapterCapabilities,
     CommitDisposition,
@@ -275,6 +275,24 @@ class FeishuSheetTaskPool(BaseTaskPool):
         if val is None:
             return ""
         return str(val)
+
+    async def recovery_identity(self) -> dict[str, Any]:
+        await self._load_snapshot()
+        columns = [
+            name
+            for name in self._header_row
+            if name not in self.write_colnames or name in self.columns_to_extract
+        ]
+        rows = [self._header_row] + [
+            [self._get_cell(row, column) for column in columns]
+            for row in self._data_rows
+        ]
+        return {
+            "kind": "feishu_sheet",
+            "spreadsheet_token": self.spreadsheet_token,
+            "sheet_id": self.sheet_id,
+            "input_sha256": snapshot_fingerprint(rows),
+        }
 
     def _is_unprocessed(self, row: list[Any]) -> bool:
         """判断行是否未处理"""

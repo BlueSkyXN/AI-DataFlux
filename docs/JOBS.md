@@ -110,6 +110,11 @@ Runner 每扫描一个 datasource cursor page，会先在 `state.json.checkpoint
 
 ### claim、取消与恢复
 
+- 文件和飞书任务首次扫描前将 `source_identity` 写入 state；公开 Job JSON 不暴露该内部字段。文件/Sheet 的摘要覆盖有序输入，不包含独立输出列的值，因此自身写回不改变输入身份。恢复时插行、重排或输入变化将进入 `blocked`；有旧 checkpoint 却缺少身份元数据时不猜测、不自动迁移。
+- Bitable 扫描、checkpoint、PreparedResult 和写回统一使用原生 `record_id`；整数只用于当前内存快照的分片位置。队列游标携带已消费条数，第二页仍有数据时也必须前进。
+- CSV/Excel 恢复先核对已有输出的输入身份和已确认结果，再以输出文件重建工作表。已确认输出丢失或被修改会阻止恢复，不会跳过旧记录后把它们覆盖为空。
+- 文件任务在扫描/恢复前取得规范化输出路径的排他锁，直到关闭任务池才释放。不同 Repository 中的同目标任务也不能同时写入；冲突明确失败/阻止启动，不让两个旧 DataFrame 相互覆盖。锁文件保留不代表锁仍被持有。
+- Sheet 没有原生稳定行 ID；当前恢复要求输入顺序及内容保持一致。运行期间也应保持输入结构不变，不宣称对并发人工插行提供事务隔离。
 - claim 在 mutation 锁内检查 `queued` 和现有 lease，再持久化 lease/running 状态。Worker 使用绑定 owner 的 Repository 写入口；lease 失效或被接管后拒绝修改 state、checkpoint、blob 或 event，并取消旧 runner。
 - Supervisor 正常关闭或任务被中断，保留 `interrupted` 供恢复，不伪装成用户取消。用户已接受取消的状态保留 `cancelling`，恢复时完成取消收敛。
 - command 文件先落盘，状态与 command receipt 在同一个 state 快照提交；中断留下的未确认 command 可以重放，不能仅凭诊断 receipt 文件跳过执行。

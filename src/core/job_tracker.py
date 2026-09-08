@@ -270,10 +270,18 @@ class JobRecordTracker:
 
     def pending_prepared_results(self) -> dict[Any, PreparedResult]:
         """Load only checkpoint-referenced blobs; orphan blobs stay inert."""
+        return self._prepared_results(RecordStatus.PENDING_COMMIT)
 
+    def persisted_results(self) -> dict[Any, dict[str, Any]]:
+        return {
+            key: dict(value.values)
+            for key, value in self._prepared_results(RecordStatus.PERSISTED).items()
+        }
+
+    def _prepared_results(self, status: RecordStatus) -> dict[Any, PreparedResult]:
         prepared_results: dict[Any, PreparedResult] = {}
         for checkpoint in self._records.values():
-            if checkpoint.status != RecordStatus.PENDING_COMMIT:
+            if checkpoint.status != status:
                 continue
             if not (
                 checkpoint.prepared_ref
@@ -281,7 +289,7 @@ class JobRecordTracker:
                 and checkpoint.commit_id
             ):
                 raise JobRepositoryError(
-                    f"pending commit record lacks prepared reference: {checkpoint.record_id!r}"
+                    f"record lacks prepared reference: {checkpoint.record_id!r}"
                 )
             payload = self.repository.load_prepared_result(
                 self.job_id,

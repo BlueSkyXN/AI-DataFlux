@@ -145,9 +145,11 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from contextlib import AbstractContextManager
 from typing import Any, cast
 
-from .base import BaseTaskPool
+from .base import BaseTaskPool, snapshot_fingerprint
+from ..utils.file_lock import exclusive_file_lock
 from .contracts import (
     AdapterCapabilities,
     CommitDisposition,
@@ -279,8 +281,8 @@ class ExcelTaskPool(BaseTaskPool):
             )
         """
         # 验证输入文件
-        self.input_path = Path(input_path)
-        self.output_path = Path(output_path)
+        self.input_path = Path(input_path).resolve()
+        self.output_path = Path(output_path).resolve()
 
         if not self.input_path.exists():
             raise FileNotFoundError(f"Excel 输入文件不存在: {self.input_path}")
@@ -322,6 +324,14 @@ class ExcelTaskPool(BaseTaskPool):
         self.save_interval = save_interval
         self.last_save_time = time.time()
         self._writeback_lock = threading.Lock()
+        self._owner_guard = threading.Lock()
+        self._output_owner: AbstractContextManager | None = None
+        self._identity_columns = [
+            column
+            for column in self.engine.get_column_names(self.df)
+            if column not in self.columns_to_write.values()
+            or column in self.columns_to_extract
+        ]
 
         # 分片状态
         self.current_shard_id = -1
@@ -573,6 +583,7 @@ class ExcelTaskPool(BaseTaskPool):
             raise ValueError("invalid Excel/CSV cursor")
 
         def read_page() -> TaskBatch:
+            self._ensure_output_owner()
             min_idx, max_idx = self.get_id_boundaries()
             if max_idx < min_idx:
                 return TaskBatch(records=(), next_cursor=None)
@@ -606,6 +617,67 @@ class ExcelTaskPool(BaseTaskPool):
 
         return await asyncio.to_thread(read_page)
 
+    def _ensure_output_owner(self) -> None:
+        with self._owner_guard:
+            if self._output_owner is None:
+                self.output_path.parent.mkdir(parents=True, exist_ok=True)
+                owner = exclusive_file_lock(
+                    self.output_path.with_name(
+                        f".{self.output_path.name}.dataflux.lock"
+                    ),
+                    timeout_seconds=0,
+                )
+                owner.__enter__()
+                self._output_owner = owner
+
+    def _input_fingerprint(self, df: Any) -> str:
+        if any(
+            column not in self.engine.get_column_names(df)
+            for column in self._identity_columns
+        ):
+            raise ValueError("file_input_columns_changed")
+
+        def rows():
+            yield self._identity_columns
+            for _, row in self.engine.iter_rows(df, self._identity_columns):
+                yield [
+                    self.engine.to_string(row.get(column, ""))
+                    for column in self._identity_columns
+                ]
+
+        return snapshot_fingerprint(rows())
+
+    async def recovery_identity(self) -> dict[str, Any]:
+        def identity():
+            self._ensure_output_owner()
+            return {
+                "kind": "file",
+                "input_path": str(self.input_path),
+                "output_path": str(self.output_path),
+                "input_sha256": self._input_fingerprint(self.df),
+            }
+
+        return await asyncio.to_thread(identity)
+
+    async def prepare_resume(self, committed: dict[Any, dict[str, Any]]) -> None:
+        def restore():
+            self._ensure_output_owner()
+            if not self.output_path.exists():
+                if committed:
+                    raise ValueError("committed_output_missing")
+                return
+            output = self._read_output_file()
+            if self._input_fingerprint(output) != self._input_fingerprint(self.df):
+                raise ValueError("output_input_identity_changed")
+            if committed:
+                receipt = self.reconcile_task_results("resume-output-check", committed)
+                if set(receipt.committed_ids) != set(committed):
+                    raise ValueError("committed_output_changed")
+            self.df = output
+            self._validate_and_prepare_columns()
+
+        await asyncio.to_thread(restore)
+
     def update_task_results(
         self,
         batch_id: str,
@@ -614,6 +686,7 @@ class ExcelTaskPool(BaseTaskPool):
         """写入结果，并仅在磁盘回读完全匹配后确认提交。"""
 
         with self._writeback_lock:
+            self._ensure_output_owner()
             return self._update_task_results_locked(batch_id, results)
 
     def _update_task_results_locked(
@@ -946,11 +1019,15 @@ class ExcelTaskPool(BaseTaskPool):
         """关闭任务池；每次 write_results 已经独立完成持久化。"""
 
         self.clear_tasks()
+        with self._owner_guard:
+            if self._output_owner is not None:
+                self._output_owner.__exit__(None, None, None)
+                self._output_owner = None
 
     def close_readonly(self) -> None:
         """Excel token estimation owns no external handle and must not save."""
 
-        self.clear_tasks()
+        self.close()
 
     # ==================== 内部方法 ====================
 

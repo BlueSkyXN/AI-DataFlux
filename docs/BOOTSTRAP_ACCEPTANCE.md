@@ -8,7 +8,7 @@
 | Bootstrap tree | `cc6c9fffb7f929bd111c0e2c4fe1783b0306df1c` |
 | 冻结分支 | `codex/4.0-bootstrap` |
 | 活动研发线 | `codex/4.0-integration` |
-| 当前 Ledger 状态 | H2/H3 工作区实现与本地回归通过，H4 真实本地联调通过但 binary smoke 阻断；尚无接受 SHA，外部证据及正式接受仍有 `UNREVIEWED` |
+| 当前 Ledger 状态 | c34f503 评审发现数据隔离与恢复反例；当前修复及 CI 证据见 V4_LOCAL_VALIDATION。SQLite/文件路径重新进入验收，整体仍有 `UNREVIEWED`，不能 Promotion |
 
 本 Ledger 追踪 Bootstrap 中每个主要模块如何进入 AI-DataFlux 4.0。Bootstrap 的本地测试通过只说明它可以作为 extraction/baseline 起点，不构成模块验收。
 
@@ -42,8 +42,8 @@
 | `src/data/contracts.py`、`src/data/base.py` | H1.2 | `REVISED_AND_ACCEPTED` | `WritebackReceipt` 逐记录、可校验、冲突 fail closed；只有 `COMMITTED` 增加 persisted | `eb9ebb5d32471c9b54503b57dec23b8418ce200c` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
 | `src/data/mysql.py` | H1.3 | `UNREVIEWED` | 在 disposable real MySQL 上验证事务、`FOUND_ROWS`、rowcount、rollback、commit unknown 和 readback 合同 | — | 本地 mock 合同通过；真实 MySQL integration 本轮 `SKIPPED` |
 | `src/data/postgresql.py` | H1.3 | `UNREVIEWED` | 在 disposable real PostgreSQL 上验证事务、rowcount、rollback、commit unknown 和 readback 合同 | — | 本地 mock 合同通过；真实 PostgreSQL integration 本轮 `SKIPPED` |
-| `src/data/sqlite.py` | H1.3 | `REVISED_AND_ACCEPTED` | 使用真实 temp database 验证事务、rowcount、rollback、相同值、missing ID、commit 与 readback 合同 | `f6cba67fd4c8cd20f53a84ca5c49965f59188b22` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
-| `src/data/excel.py` 及 CSV 路径 | H1.4 | `REVISED_AND_ACCEPTED` | 原子写回、保留未返回输出列、磁盘 readback、reconciliation、receipt 与失败语义通过真实文件合同测试 | `b890799a9485318085217c901223da563730f9ef` | [H1 local validation](./H1_LOCAL_VALIDATION.md) |
+| `src/data/sqlite.py` | H1.3 | `UNREVIEWED` | 原有事务/readback 合同加上多数据库任务隔离与关闭隔离 | — | 历史 [H1 local validation](./H1_LOCAL_VALIDATION.md) 未覆盖串库组合；当前补充回归见 [正确性修复轮](./V4_LOCAL_VALIDATION.md) |
+| `src/data/excel.py` 及 CSV 路径 | H1.4 / H2.3 | `UNREVIEWED` | 原有原子写回/readback 合同加上分离输入输出恢复、已提交结果保持、输入身份和同目标隔离 | — | 历史 [H1 local validation](./H1_LOCAL_VALIDATION.md) 未覆盖恢复覆盖反例；当前补充回归见 [正确性修复轮](./V4_LOCAL_VALIDATION.md) |
 | `src/data/feishu/bitable.py`、`src/data/feishu/sheet.py` | H1.4 | `UNREVIEWED` | 分页、分块、限流、逐记录 receipt、确认不明和真实授权环境 UAT 均有证据 | — | mock contract 通过；没有测试应用/测试表，真实 UAT 未执行 |
 | `src/jobs/models.py`、`src/jobs/io.py` | H2.1 / H2.3 | `UNREVIEWED` | Repository schema 独立版本化；原子文件语义、PreparedResult 引用/hash、终态优先级和损坏处理符合合同 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：state schema 2、revision、身份与恢复引用校验通过；缺接受 SHA |
 | `src/jobs/repository.py` | H2.1 / H2.2 | `UNREVIEWED` | ownership/mutation 锁分离；revision CAS 在 mutation lock 内；并发创建和状态变更无丢失更新 | — | [H2 本地验证](./H2_LOCAL_VALIDATION.md)：原子创建、锁分离、跨进程 CAS、claim/lease 通过；缺接受 SHA |

@@ -577,17 +577,19 @@ def _create_feishu_bitable_pool(
 
     from .feishu.bitable import FeishuBitableTaskPool
 
-    feishu_config = config.get("feishu", {})
+    feishu_config = config.get("feishu_bitable", {})
     # 验证全局凭据
     if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
-        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+        raise ValueError(
+            "缺少飞书全局配置: feishu_bitable.app_id 和 feishu_bitable.app_secret"
+        )
 
     app_token = _normalize_nonempty_str(feishu_config.get("app_token"))
     table_id = _normalize_nonempty_str(feishu_config.get("table_id"))
     if app_token is None:
-        raise ValueError("缺少飞书多维表格配置: feishu.app_token")
+        raise ValueError("缺少飞书多维表格配置: feishu_bitable.app_token")
     if table_id is None:
-        raise ValueError("缺少飞书多维表格配置: feishu.table_id")
+        raise ValueError("缺少飞书多维表格配置: feishu_bitable.table_id")
 
     return FeishuBitableTaskPool(
         app_id=feishu_config["app_id"],
@@ -629,18 +631,20 @@ def _create_feishu_sheet_pool(
 
     from .feishu.sheet import FeishuSheetTaskPool
 
-    feishu_config = config.get("feishu", {})
+    feishu_config = config.get("feishu_sheet", {})
 
     # 验证全局凭据
     if not feishu_config.get("app_id") or not feishu_config.get("app_secret"):
-        raise ValueError("缺少飞书全局配置: feishu.app_id 和 feishu.app_secret")
+        raise ValueError(
+            "缺少飞书全局配置: feishu_sheet.app_id 和 feishu_sheet.app_secret"
+        )
 
     spreadsheet_token = _normalize_nonempty_str(feishu_config.get("spreadsheet_token"))
     sheet_id = _normalize_nonempty_str(feishu_config.get("sheet_id"))
     if spreadsheet_token is None:
-        raise ValueError("缺少飞书电子表格配置: feishu.spreadsheet_token")
+        raise ValueError("缺少飞书电子表格配置: feishu_sheet.spreadsheet_token")
     if sheet_id is None:
-        raise ValueError("缺少飞书电子表格配置: feishu.sheet_id")
+        raise ValueError("缺少飞书电子表格配置: feishu_sheet.sheet_id")
 
     return FeishuSheetTaskPool(
         app_id=feishu_config["app_id"],
