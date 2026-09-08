@@ -257,7 +257,11 @@ def verify(base, workspace, command, *, submit=True):
         state = request(base + f"/api/v1/jobs/{job_id}")
         if state["status"] == "completed":
             break
-        assert state["status"] in {"queued", "running"}, state["status"]
+        assert state["status"] in {"queued", "running"}, {
+            "status": state["status"],
+            "last_error": state.get("last_error"),
+            "counts": state.get("counts"),
+        }
         if time.monotonic() >= deadline:
             raise AssertionError("job did not complete")
         time.sleep(0.1)
