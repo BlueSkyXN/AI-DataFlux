@@ -904,6 +904,7 @@ class FluxApiService:
         completed = False
         yielded = False
         failed = False
+        client_cancelled = False
         buffer = b""
         sequence = -1
         try:
@@ -953,6 +954,9 @@ class FluxApiService:
                 yield chunk
             if not completed:
                 raise ValueError("upstream stream ended before terminal event")
+        except (asyncio.CancelledError, GeneratorExit):
+            client_cancelled = True
+            raise
         except (
             aiohttp.ClientError,
             asyncio.TimeoutError,
@@ -985,12 +989,13 @@ class FluxApiService:
         finally:
             elapsed = time.time() - start_time
             success = completed and yielded and not failed
-            self.dispatcher.update_model_metrics(model.id, elapsed, success)
-            if success:
-                self.dispatcher.mark_model_success(model.id)
-            else:
-                # 客户端已经收到响应头，失败只能结束当前流，不能切换模型。
-                self.dispatcher.mark_model_failed(model.id)
+            if not client_cancelled or completed:
+                self.dispatcher.update_model_metrics(model.id, elapsed, success)
+                if success:
+                    self.dispatcher.mark_model_success(model.id)
+                else:
+                    # 上游故障只能结束当前流，不能切换模型；客户端取消不触发退避。
+                    self.dispatcher.mark_model_failed(model.id)
             if not response.closed:
                 response.close()
 

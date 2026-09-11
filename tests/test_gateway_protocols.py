@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -846,6 +847,72 @@ async def test_unconsumed_stream_can_close_upstream(tmp_path):
     )
     await stream.aclose()
     assert response.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat", "responses"])
+@pytest.mark.parametrize("cancel_during_read", [False, True])
+async def test_client_stream_cancel_does_not_disable_healthy_route(
+    tmp_path, endpoint, cancel_during_read
+):
+    waiting = asyncio.Event()
+
+    class Content:
+        async def iter_any(self):
+            yield b'data: {"delta":"hello"}\n\n'
+            waiting.set()
+            await asyncio.Event().wait()
+
+    response = _FakeResponse()
+    response.content = Content()
+    service, session = _service_with_session(
+        _config(tmp_path, [_model("first")]),
+        [response, _FakeResponse(payload={"id": "next-response"})],
+    )
+    if endpoint == "chat":
+        stream = await service.chat_completion(
+            ChatCompletionRequest(model="first", messages=[], stream=True)
+        )
+    else:
+        stream = await service.responses(
+            ResponsesRequest(model="first", input="hello", stream=True)
+        )
+    await anext(stream)
+    if cancel_during_read:
+        task = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await stream.aclose()
+    assert response.closed
+    assert service.dispatcher.is_model_available("first")
+    result = await service.chat_completion(
+        ChatCompletionRequest(model="first", messages=[])
+    )
+    assert result == {"id": "next-response"}
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_closing_stream_after_terminal_frame_keeps_upstream_outcome(
+    tmp_path, failed
+):
+    frame = (
+        b'data: {"error":{"message":"upstream failed"}}\n\n'
+        if failed
+        else b"data: [DONE]\n\n"
+    )
+    response = _FakeResponse(chunks=[frame])
+    service, _ = _service_with_session(_config(tmp_path, [_model("first")]), [response])
+    stream = await service.chat_completion(
+        ChatCompletionRequest(model="first", messages=[], stream=True)
+    )
+    await anext(stream)
+    await stream.aclose()
+    assert response.closed
+    assert service.dispatcher.is_model_available("first") is not failed
 
 
 def test_invalid_request_uses_openai_error_without_echoing_payload(tmp_path):
