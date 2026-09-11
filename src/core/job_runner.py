@@ -69,8 +69,13 @@ async def run_processing_job(
         processor = await asyncio.shield(initialization)
     except asyncio.CancelledError:
         # 线程不能被安全强杀：等待构造结束并释放 adapter，不遗留后台连接。
-        processor = await initialization
-        await processor.task_pool.aclose()
+        while not initialization.done():
+            try:
+                await asyncio.shield(initialization)
+            except asyncio.CancelledError:
+                continue
+        processor = initialization.result()
+        await processor.aclose()
         raise
     try:
         state = repository.get_state(job_id)
@@ -102,7 +107,7 @@ async def run_processing_job(
             await processor.reconcile_checkpoint_results(pending_commits)
         completed = await processor.process_shard_async_continuous()
     finally:
-        await processor.task_pool.aclose()
+        await processor.aclose()
     manager = processor.task_manager
     checkpoint_counts = tracker.counts()
     persisted = checkpoint_counts.persisted
@@ -137,6 +142,20 @@ async def run_processing_job(
         )
 
     repository.update_state(job_id, update_counts)
+    if (
+        completed
+        and not cancel_event.is_set()
+        and (pending or checkpoint_counts.in_flight)
+    ):
+        # 扫描结束不代表 checkpoint 已收敛；不覆盖外部结果，也不丢弃旧记录。
+        return JobRunResult(
+            JobStatus.BLOCKED,
+            {
+                "reason": "unfinished_checkpoints",
+                "pending": pending,
+                "in_flight": checkpoint_counts.in_flight,
+            },
+        )
     status = resolve_terminal_status(
         cancelled=cancel_event.is_set() or not completed,
         job_failed=False,

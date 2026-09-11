@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -289,6 +290,122 @@ async def test_processor_empty_datasource_finishes_without_http_session(tmp_path
     processor = UniversalAIProcessor(str(config_path))
 
     assert await processor.process_shard_async_continuous() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_sqlite_processor_closes_real_connections(
+    tmp_path, monkeypatch, background
+):
+    from src.core.job_runner import run_processing_job
+    from src.jobs import JobWorker, JobStatus
+
+    config_path, _ = _processor_config(tmp_path)
+    db_path = tmp_path / "input.db"
+    connect = sqlite3.connect
+    connection = connect(db_path)
+    connection.execute(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, input TEXT, result TEXT)"
+    )
+    connection.execute("INSERT INTO tasks VALUES (1, 'hello', NULL)")
+    connection.commit()
+    connection.close()
+    config = yaml.safe_load(config_path.read_text())
+    config["job"]["datasource"] = {
+        "type": "sqlite",
+        "db_path": str(db_path),
+        "table_name": "tasks",
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    opened = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        if args and str(args[0]) == str(db_path.resolve()):
+            opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    monkeypatch.setattr(
+        UniversalAIProcessor,
+        "_process_one_record",
+        AsyncMock(
+            return_value=TaskSuccess(PreparedResult.create(1, {"answer": "done"}))
+        ),
+    )
+    try:
+        if background:
+            repository = FileJobRepository(tmp_path / "jobs")
+            request = repository.new_request(
+                mode="background",
+                config_path=str(config_path),
+                config_sha256=execution_config_hash(
+                    load_config(config_path), config_path
+                ),
+            )
+            repository.create_job(request)
+            result = await JobWorker(repository, run_processing_job).run(request.job_id)
+            assert result.status == JobStatus.COMPLETED
+            assert repository.get_state(request.job_id).counts.persisted == 1
+        else:
+            processor = UniversalAIProcessor(str(config_path))
+            assert await processor.process_shard_async_continuous()
+        assert opened
+        for connection in opened:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+        verification = connect(db_path)
+        try:
+            assert (
+                verification.execute("SELECT result FROM tasks WHERE id=1").fetchone()[
+                    0
+                ]
+                == "done"
+            )
+        finally:
+            verification.close()
+    finally:
+        for connection in opened:
+            connection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count_fails", [False, True])
+async def test_processor_cleanup_uses_async_hook_once(
+    tmp_path, monkeypatch, count_fails
+):
+    from src.core.contracts import SourceOperationError
+
+    config_path, _ = _processor_config(tmp_path)
+    processor = UniversalAIProcessor(str(config_path))
+    processor.source_max_attempts = 1
+    pool = processor.task_pool
+    close = pool.close
+    async_close = AsyncMock()
+    sync_close = MagicMock(side_effect=AssertionError("sync close on event loop"))
+    monkeypatch.setattr(pool, "aclose", async_close)
+    monkeypatch.setattr(pool, "close", sync_close)
+    monkeypatch.setattr(
+        pool,
+        "get_total_task_count",
+        (
+            MagicMock(side_effect=RuntimeError("count failed"))
+            if count_fails
+            else lambda: 0
+        ),
+    )
+    try:
+        if count_fails:
+            with pytest.raises(SourceOperationError):
+                await processor.process_shard_async_continuous()
+        else:
+            assert await processor.process_shard_async_continuous()
+        sync_close.assert_not_called()
+        async_close.assert_awaited_once()
+        await processor.aclose()
+        async_close.assert_awaited_once()
+    finally:
+        close()
 
 
 def test_processor_reports_config_datasource_and_routing_initialization_errors(

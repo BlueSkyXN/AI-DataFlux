@@ -89,7 +89,6 @@ class JobWorker:
             def mark_running(state):
                 return replace(
                     state,
-                    status=JobStatus.RUNNING,
                     started_at=state.started_at or utc_timestamp(),
                     finished_at=None,
                     last_error=None,
@@ -100,7 +99,11 @@ class JobWorker:
                     ),
                 )
 
-            owned.update_state(job_id, mark_running)
+            running = owned.update_state(job_id, mark_running)
+            if running.status == JobStatus.CANCELLING:
+                # claim 后可能已有独立 Control 接受取消，不能覆盖状态或启动 runner。
+                persisted = owned.transition(job_id, JobStatus.CANCELLED)
+                return JobRunResult(persisted.status, {})
             owned.append_event(
                 job_id,
                 "worker_started",

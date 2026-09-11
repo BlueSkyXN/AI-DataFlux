@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -359,6 +360,45 @@ async def test_reload_source_failures_use_independent_attempt_budget(monkeypatch
     assert calls == [{"input": "original"}, {"input": "fresh"}]
     assert processor.task_manager.retried_tasks_count[ErrorType.SOURCE] == 2
     assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_reload_transient_failure_uses_source_retry(tmp_path, monkeypatch):
+    from src.data.sqlite import SQLiteTaskPool
+    from src.models.task import TaskMetadata
+
+    path = tmp_path / "tasks.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, input TEXT, result TEXT)"
+        )
+        connection.execute("INSERT INTO tasks VALUES (1, 'fresh', NULL)")
+    pool = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "result"})
+    processor = _processor_for_loop(pool)
+    original = pool._get_connection
+    calls = 0
+
+    def transient(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("temporary database lock")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "_get_connection", transient)
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.core.processor.asyncio.sleep", sleep)
+    try:
+        result = await processor._reload_record_for_retry(
+            1, {"input": "old"}, TaskMetadata(1)
+        )
+        assert result == {"input": "fresh"}
+        assert calls == 2
+        assert processor.task_manager.retried_tasks_count[ErrorType.SOURCE] == 1
+        sleep.assert_awaited_once_with(1.0)
+        assert await pool.reload([999]) == {}
+    finally:
+        await pool.aclose()
 
 
 @pytest.mark.asyncio
@@ -742,11 +782,15 @@ async def test_datasource_count_failure_is_not_treated_as_empty_success():
         def get_total_task_count(self):
             raise RuntimeError("database unavailable")
 
-    def finalize():
+        async def aclose(self):
+            pass
+
+    def finalize(*, close_pool=True):
         nonlocal finalized
         finalized = True
 
     processor.task_pool = BrokenPool()
+    processor._close_task = None
     processor.task_manager = SimpleNamespace(finalize=finalize)
     processor.batch_size = 1
     processor.source_max_attempts = 1

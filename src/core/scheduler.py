@@ -514,7 +514,7 @@ class ShardedTaskManager:
         except Exception as e:
             logging.warning(f"内存监控检查失败: {e}")
 
-    def finalize(self) -> None:
+    def finalize(self, *, close_pool: bool = True) -> None:
         """
         完成处理，输出统计信息并关闭资源
 
@@ -528,6 +528,7 @@ class ShardedTaskManager:
 
         资源清理:
             - 关闭任务池 (task_pool.close())
+            - 异步调用方传 close_pool=False，并自行 await 异步清理
         """
         end_time = time.time()
         total_duration = end_time - self.start_time
@@ -564,6 +565,8 @@ class ShardedTaskManager:
         logging.info("=" * 50)
 
         # 关闭任务池
+        if not close_pool:
+            return
         try:
             logging.info("正在关闭任务池资源...")
             self.task_pool.close()

@@ -2,11 +2,14 @@
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
 from src.jobs import (
     FileJobRepository,
+    JobCommand,
     JobRunResult,
     JobStatus,
     JobWorker,
@@ -142,6 +145,79 @@ async def test_worker_cooperative_cancel_overrides_completed_result(tmp_path: Pa
     assert repository.get_state(request.job_id).status == JobStatus.CANCELLED
     with pytest.raises(ValueError, match="terminal"):
         await JobWorker(repository, runner).run(request.job_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runner_status",
+    [
+        JobStatus.COMPLETED,
+        JobStatus.COMPLETED_WITH_ERRORS,
+        JobStatus.COMPLETED_WITH_UNRESOLVED_WRITES,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.BLOCKED,
+    ],
+)
+async def test_durable_cancel_wins_before_worker_exit(tmp_path, runner_status):
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = create_job(repository)
+    started, finish = asyncio.Event(), asyncio.Event()
+    local_cancel = asyncio.Event()
+
+    async def runner(*_args):
+        started.set()
+        await finish.wait()
+        return JobRunResult(runner_status, {"reason": "test_exit"})
+
+    task = asyncio.create_task(
+        JobWorker(repository, runner).run(request.job_id, cancel_event=local_cancel)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        command = JobCommand(str(uuid4()), request.job_id, "cancel")
+        state, receipt = repository.apply_command(
+            command,
+            target=JobStatus.CANCELLING,
+            expected_revision=repository.get_state(request.job_id).revision,
+            message="cancelling",
+        )
+        assert state.status == JobStatus.CANCELLING and receipt.accepted
+        assert not local_cancel.is_set()
+        finish.set()
+        outcome = await task
+        final = repository.get_state(request.job_id)
+        assert outcome.status == final.status == JobStatus.CANCELLED
+        assert final.finished_at is not None
+        assert repository.get_lease(request.job_id) is None
+    finally:
+        finish.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_durable_cancel_after_claim_prevents_runner_start(tmp_path, monkeypatch):
+    repository = FileJobRepository(tmp_path / "jobs")
+    request = create_job(repository)
+    claim = repository.claim_job
+
+    def claim_then_cancel(*args, **kwargs):
+        claimed = claim(*args, **kwargs)
+        repository.apply_command(
+            JobCommand(str(uuid4()), request.job_id, "cancel"),
+            target=JobStatus.CANCELLING,
+            expected_revision=claimed.revision,
+            message="cancelling",
+        )
+        return claimed
+
+    monkeypatch.setattr(repository, "claim_job", claim_then_cancel)
+    runner = AsyncMock(return_value=JobStatus.COMPLETED)
+    outcome = await JobWorker(repository, runner).run(request.job_id)
+    assert outcome.status == JobStatus.CANCELLED
+    runner.assert_not_awaited()
+    assert repository.get_state(request.job_id).finished_at is not None
+    assert repository.get_lease(request.job_id) is None
 
 
 @pytest.mark.asyncio

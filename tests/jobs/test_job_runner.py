@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from src.jobs import (
     FileJobRepository,
     JobCommand,
     JobStatus,
+    JobWorker,
 )
 
 
@@ -60,6 +62,59 @@ def _repository_with_job(tmp_path, suffix=".csv", in_place=False, datasource=Non
     )
     repository.create_job(request)
     return repository, request, config_path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_flight", [False, True])
+@pytest.mark.parametrize("mutation", ["deleted", "already_processed"])
+async def test_resume_blocks_unfinished_records_missing_from_scan(
+    tmp_path, monkeypatch, in_flight, mutation
+):
+    db_path = tmp_path / "input.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, input TEXT, result TEXT)"
+        )
+        connection.execute("INSERT INTO tasks VALUES (1, 'original', NULL)")
+    repository, request, _ = _repository_with_job(
+        tmp_path,
+        datasource={"type": "sqlite", "db_path": str(db_path), "table_name": "tasks"},
+    )
+    tracker = JobRecordTracker(repository, request.job_id)
+    tracker.register_scan_batch(
+        "scan-000001", [(1, {"input": "original"})], cursor=None
+    )
+    if in_flight:
+        tracker.mark_in_flight(1, {"input": "original"})
+    with sqlite3.connect(db_path) as connection:
+        if mutation == "deleted":
+            connection.execute("DELETE FROM tasks WHERE id=1")
+        else:
+            connection.execute("UPDATE tasks SET result='external result' WHERE id=1")
+
+    model = AsyncMock(
+        return_value=TaskSuccess(PreparedResult.create(1, {"answer": "done"}))
+    )
+    monkeypatch.setattr(job_runner.UniversalAIProcessor, "_process_one_record", model)
+    outcome = await JobWorker(repository, job_runner.run_processing_job).run(
+        request.job_id
+    )
+    state = repository.get_state(request.job_id)
+    assert outcome.status == state.status == JobStatus.BLOCKED
+    assert outcome.summary["reason"] == "unfinished_checkpoints"
+    assert state.counts.pending + state.counts.in_flight == 1
+    assert state.counts.persisted == state.counts.failed == 0
+    model.assert_not_awaited()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("INSERT OR REPLACE INTO tasks VALUES (1, 'restored', NULL)")
+    repository.transition(request.job_id, JobStatus.QUEUED)
+    outcome = await JobWorker(repository, job_runner.run_processing_job).run(
+        request.job_id
+    )
+    assert outcome.status == JobStatus.COMPLETED
+    assert repository.get_state(request.job_id).counts.persisted == 1
+    model.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -231,6 +286,9 @@ async def test_job_runner_reconciles_pending_commit_before_scanning(
     replayed = []
 
     class FakeProcessor:
+        async def aclose(self):
+            await self.task_pool.aclose()
+
         def __init__(self, _path):
             self.task_pool = SimpleNamespace(
                 aclose=AsyncMock(),
@@ -304,6 +362,9 @@ async def test_changed_config_requires_explicit_accepted_resume_hash(
     )
 
     class EmptyProcessor:
+        async def aclose(self):
+            await self.task_pool.aclose()
+
         def __init__(self, _path):
             self.task_pool = SimpleNamespace(
                 aclose=AsyncMock(),
@@ -369,18 +430,27 @@ def test_terminal_status_priority(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 3])
 async def test_processor_initialization_does_not_block_control_loop(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, cancel_count
 ):
     repository, request, _ = _repository_with_job(tmp_path)
-    entered, release = threading.Event(), threading.Event()
+    entered, release, constructed = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
     closed = AsyncMock()
 
     class SlowProcessor:
+        async def aclose(self):
+            await self.task_pool.aclose()
+
         def __init__(self, _path):
             entered.set()
             assert release.wait(timeout=2)
             self.task_pool = SimpleNamespace(aclose=closed)
+            constructed.set()
 
     monkeypatch.setattr(job_runner, "UniversalAIProcessor", SlowProcessor)
     task = asyncio.create_task(
@@ -394,14 +464,18 @@ async def test_processor_initialization_does_not_block_control_loop(
                 break
             await asyncio.sleep(0.01)
         assert entered.is_set()
-        task.cancel()
-        await asyncio.sleep(0)
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not task.done(), "cancellation must wait for initialization"
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         closed.assert_awaited_once()
     finally:
         release.set()
+        await asyncio.to_thread(constructed.wait, 2)
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

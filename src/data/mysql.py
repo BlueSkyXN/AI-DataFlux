@@ -144,8 +144,8 @@ SQL 查询示例:
     - mysql-connector-python: pip install mysql-connector-python
 
 注意事项:
-    1. 连接池是全局单例，多次创建 MySQLTaskPool 会共享同一池
-    2. 首次创建时的配置有效，后续配置会被忽略
+    1. 仅连接配置与池参数相同的任务共享连接池
+    2. 每个任务独立释放引用，最后一个使用者关闭连接池
     3. 表名和列名先通过标识符白名单校验，再使用反引号引用
     4. 大批量更新建议分批进行，避免长事务
 """
@@ -201,20 +201,18 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class MySQLConnectionPoolManager:
     """
-    MySQL 连接池管理器（单例模式）
+    MySQL 连接池管理器（按配置复用）
 
-    管理全局唯一的 MySQL 连接池实例，确保整个应用共享同一组数据库连接。
-    使用双检锁（Double-Checked Locking）保证线程安全的单例创建。
+    连接配置与池参数共同决定池身份，锁内维护使用者计数。
 
     设计原因:
         - 数据库连接创建开销大，需要复用
-        - 多个 MySQLTaskPool 实例应共享同一连接池
-        - 应用结束时需要统一释放所有连接
+        - 相同配置的 MySQLTaskPool 可以共享连接池
+        - 任务退出只释放自身引用，避免影响其他任务
 
     Attributes:
-        _instance: 单例实例引用
         _lock: 创建锁，保证线程安全
-        _pool: MySQLConnectionPool 实例
+        _pools: 连接配置对应的池与引用计数，不得输出含凭据的 key
 
     使用模式:
         # 首次获取（需要配置）
@@ -227,9 +225,8 @@ class MySQLConnectionPoolManager:
         MySQLConnectionPoolManager.close_pool()
     """
 
-    _instance: "MySQLConnectionPoolManager | None" = None
     _lock = threading.Lock()
-    _pool: Any = None
+    _pools: dict[tuple[Any, ...], tuple[Any, int]] = {}
 
     @classmethod
     def get_pool(
@@ -239,10 +236,9 @@ class MySQLConnectionPoolManager:
         pool_size: int = 5,
     ) -> Any:
         """
-        获取连接池实例（单例）
+        获取连接池并增加一个使用者引用。
 
-        首次调用必须提供配置，后续调用可省略。
-        使用双检锁保证线程安全的单例创建。
+        首次调用必须提供配置；仅有一个池时允许省略配置。
 
         Args:
             config: 数据库连接配置字典
@@ -278,17 +274,30 @@ class MySQLConnectionPoolManager:
             )
 
         with cls._lock:
-            if cls._instance is None:
-                if config is None:
+            if config is None:
+                if not cls._pools:
                     raise ValueError("首次获取连接池必须提供数据库配置")
-
-                cls._instance = cls()
-
+                if len(cls._pools) != 1:
+                    raise ValueError("存在多个连接池，必须提供数据库配置")
+                key = next(iter(cls._pools))
+            else:
+                key = (
+                    config["host"],
+                    config.get("port", 3306),
+                    config["user"],
+                    config["password"],
+                    config["database"],
+                    pool_name,
+                    pool_size,
+                )
+            entry = cls._pools.get(key)
+            if entry is None:
+                assert config is not None
                 try:
                     logging.info(
                         f"正在创建 MySQL 连接池 '{pool_name}' (大小: {pool_size})..."
                     )
-                    cls._pool = pooling.MySQLConnectionPool(
+                    connection_pool = pooling.MySQLConnectionPool(
                         pool_name=pool_name,
                         pool_size=pool_size,
                         pool_reset_session=True,
@@ -304,36 +313,28 @@ class MySQLConnectionPoolManager:
 
                 except mysql.connector.Error as err:
                     logging.error(f"创建 MySQL 连接池失败: {err}")
-                    cls._instance = None
                     raise RuntimeError(f"MySQL 连接池创建失败: {err}") from err
-
-            elif config is not None:
-                logging.warning("连接池已存在，将忽略新的配置")
-
-            if cls._pool is None:
-                raise RuntimeError("连接池实例已创建但内部池对象为 None")
-
-            return cls._pool
+                entry = (connection_pool, 0)
+            connection_pool, owners = entry
+            cls._pools[key] = (connection_pool, owners + 1)
+            return connection_pool
 
     @classmethod
-    def close_pool(cls) -> None:
-        """
-        关闭连接池并释放所有资源
-
-        关闭后连接池实例会被清空，下次 get_pool() 会创建新实例。
-        应用退出前应调用此方法确保连接正确释放。
-
-        注意:
-            - 关闭后所有持有连接的操作都会失败
-            - 多次调用是安全的（幂等操作）
-        """
+    def close_pool(cls, connection_pool: Any | None = None) -> None:
+        """释放指定池的一个引用；无参数仅用于整体关闭或测试清理。"""
         with cls._lock:
-            if cls._instance is not None:
-                pool_name = cls._pool.pool_name if cls._pool else "unknown"
-                logging.info(f"正在关闭 MySQL 连接池 '{pool_name}'...")
-                cls._pool = None
-                cls._instance = None
-                logging.info("MySQL 连接池已关闭")
+            for key, (instance, owners) in list(cls._pools.items()):
+                if connection_pool is not None and instance is not connection_pool:
+                    continue
+                if connection_pool is not None and owners > 1:
+                    cls._pools[key] = (instance, owners - 1)
+                    return
+                del cls._pools[key]
+                try:
+                    # Connector/Python 未提供公开 close；归还连接后清空空闲池。
+                    instance._remove_connections()
+                except Exception as error:
+                    logging.warning("关闭 MySQL 连接池失败: %s", error)
 
 
 class MySQLTaskPool(BaseTaskPool):
@@ -414,6 +415,7 @@ class MySQLTaskPool(BaseTaskPool):
             )
 
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
+        self._connection_lock = threading.RLock()
 
         self.table_name = self._validate_identifier(table_name, "table_name")
         self.columns_to_extract = self._validate_identifiers(
@@ -513,6 +515,10 @@ class MySQLTaskPool(BaseTaskPool):
 
             result = self.execute_with_connection(_query, is_write=False)
         """
+        with self._connection_lock:
+            return self._execute_with_connection(callback, is_write)
+
+    def _execute_with_connection(self, callback: Any, is_write: bool) -> Any:
         conn = None
         cursor = None
 
@@ -827,6 +833,12 @@ class MySQLTaskPool(BaseTaskPool):
     ) -> WritebackReceipt:
         """Write one transaction and distinguish rollback from unknown commit."""
 
+        with self._connection_lock:
+            return self._update_task_results_locked(batch_id, results)
+
+    def _update_task_results_locked(
+        self, batch_id: str, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
 
@@ -1016,6 +1028,12 @@ class MySQLTaskPool(BaseTaskPool):
     ) -> WritebackReceipt:
         """Read back every expected MySQL output value by primary key."""
 
+        with self._connection_lock:
+            return self._reconcile_task_results_locked(batch_id, results)
+
+    def _reconcile_task_results_locked(
+        self, batch_id: str, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
         try:
@@ -1139,19 +1157,15 @@ class MySQLTaskPool(BaseTaskPool):
             return self.execute_with_connection(_reload, is_write=False)
         except Exception as e:
             logging.error(f"执行重载记录 {record_id} 数据操作失败: {e}")
-            return None
+            raise
 
     def close(self) -> None:
-        """
-        关闭连接池
-
-        释放所有数据库连接。调用后不应再使用此任务池实例。
-
-        注意:
-            连接池是全局单例，关闭后其他 MySQLTaskPool 实例也会受影响。
-        """
-        logging.info("请求关闭 MySQL 连接池...")
-        MySQLConnectionPoolManager.close_pool()
+        """幂等释放本任务的连接池引用，不关闭其他任务仍使用的池。"""
+        # to_thread 的等待者取消后，查询仍可能执行；先等连接归还再释放引用。
+        with self._connection_lock:
+            if self.pool is not None:
+                connection_pool, self.pool = self.pool, None
+                MySQLConnectionPoolManager.close_pool(connection_pool)
 
     # ==================== 内部方法 ====================
 

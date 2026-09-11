@@ -216,6 +216,7 @@ class UniversalAIProcessor:
         """
         # 保存进度文件路径
         self.progress_file = progress_file
+        self._close_task: asyncio.Task[None] | None = None
 
         # 1. 加载配置
         try:
@@ -584,6 +585,20 @@ class UniversalAIProcessor:
         self._target_concurrency_provider = target_concurrency_provider
         self._job_tracker = job_tracker
 
+    async def aclose(self) -> None:
+        """仅执行一次异步清理；取消等待者也必须等清理结束后再退出。"""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self.task_pool.aclose())
+        cancelled = False
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        self._close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
     async def process_shard_async_continuous(self) -> bool:
         """
         连续任务流模式的异步处理
@@ -629,7 +644,10 @@ class UniversalAIProcessor:
             async with aiohttp.ClientSession(connector=connector) as session:
                 return await self._process_loop(session)
         finally:
-            self.task_manager.finalize()
+            try:
+                self.task_manager.finalize(close_pool=False)
+            finally:
+                await self.aclose()
 
     async def _run_source_operation(
         self,

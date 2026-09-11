@@ -136,8 +136,8 @@ PostgreSQL 数据源任务池实现模块
     - psycopg2: pip install psycopg2-binary
 
 注意事项:
-    1. 连接池是全局单例，多次创建会共享同一池
-    2. 首次创建时的配置有效，后续配置会被忽略
+    1. 仅连接配置与池参数相同的任务共享连接池
+    2. 每个任务独立释放引用，最后一个使用者关闭连接池
     3. 使用 RealDictCursor 返回字典格式结果
     4. 查询超时默认 30 秒
 """
@@ -196,9 +196,9 @@ except ImportError:
 
 class PostgreSQLConnectionPoolManager:
     """
-    PostgreSQL 连接池管理器（单例模式）
+    PostgreSQL 连接池管理器（按配置复用）
 
-    管理全局唯一的 PostgreSQL 连接池实例。
+    连接配置与池参数共同决定池身份，锁内维护使用者计数。
     使用 psycopg2 的 ThreadedConnectionPool 支持多线程环境。
 
     ThreadedConnectionPool 特点:
@@ -207,14 +207,12 @@ class PostgreSQLConnectionPoolManager:
         - 连接失效时自动重建
 
     Attributes:
-        _instance: 单例实例引用
         _lock: 创建锁，保证线程安全
-        _pool: ThreadedConnectionPool 实例
+        _pools: 连接配置对应的池与引用计数，不得输出含凭据的 key
     """
 
-    _instance: "PostgreSQLConnectionPoolManager | None" = None
     _lock = threading.Lock()
-    _pool: Any = None
+    _pools: dict[tuple[Any, ...], tuple[Any, int]] = {}
 
     @classmethod
     def get_pool(
@@ -225,10 +223,9 @@ class PostgreSQLConnectionPoolManager:
         max_connections: int = 10,
     ) -> Any:
         """
-        获取连接池实例（单例）
+        获取连接池并增加一个使用者引用。
 
-        首次调用必须提供配置，后续调用可省略。
-        使用双检锁保证线程安全的单例创建。
+        首次调用必须提供配置；仅有一个池时允许省略配置。
 
         Args:
             config: 数据库连接配置字典
@@ -257,19 +254,33 @@ class PostgreSQLConnectionPoolManager:
             raise ImportError("psycopg2 不可用，请安装: pip install psycopg2-binary")
 
         with cls._lock:
-            if cls._instance is None:
-                if config is None:
+            if config is None:
+                if not cls._pools:
                     raise ValueError("首次获取连接池必须提供数据库配置")
-
-                cls._instance = cls()
-
+                if len(cls._pools) != 1:
+                    raise ValueError("存在多个连接池，必须提供数据库配置")
+                key = next(iter(cls._pools))
+            else:
+                key = (
+                    config["host"],
+                    config.get("port", 5432),
+                    config["user"],
+                    config["password"],
+                    config["database"],
+                    pool_name,
+                    min_connections,
+                    max_connections,
+                )
+            entry = cls._pools.get(key)
+            if entry is None:
+                assert config is not None
                 try:
                     logging.info(
                         f"正在创建 PostgreSQL 连接池 '{pool_name}' "
                         f"(大小: {min_connections}-{max_connections})..."
                     )
 
-                    cls._pool = pool.ThreadedConnectionPool(
+                    connection_pool = pool.ThreadedConnectionPool(
                         minconn=min_connections,
                         maxconn=max_connections,
                         host=config["host"],
@@ -286,35 +297,27 @@ class PostgreSQLConnectionPoolManager:
 
                 except psycopg2.Error as err:
                     logging.error(f"创建 PostgreSQL 连接池失败: {err}")
-                    cls._instance = None
                     raise RuntimeError(f"PostgreSQL 连接池创建失败: {err}") from err
-
-            elif config is not None:
-                logging.warning("连接池已存在，将忽略新的配置")
-
-            if cls._pool is None:
-                raise RuntimeError("连接池实例已创建但内部池对象为 None")
-
-            return cls._pool
+                entry = (connection_pool, 0)
+            connection_pool, owners = entry
+            cls._pools[key] = (connection_pool, owners + 1)
+            return connection_pool
 
     @classmethod
-    def close_pool(cls) -> None:
-        """
-        关闭连接池并释放所有资源
-
-        使用 closeall() 关闭池中所有连接。
-        关闭后连接池实例会被清空，下次 get_pool() 会创建新实例。
-        """
+    def close_pool(cls, connection_pool: Any | None = None) -> None:
+        """释放指定池的一个引用；无参数仅用于整体关闭或测试清理。"""
         with cls._lock:
-            if cls._instance is not None and cls._pool:
-                logging.info("正在关闭 PostgreSQL 连接池...")
+            for key, (instance, owners) in list(cls._pools.items()):
+                if connection_pool is not None and instance is not connection_pool:
+                    continue
+                if connection_pool is not None and owners > 1:
+                    cls._pools[key] = (instance, owners - 1)
+                    return
+                del cls._pools[key]
                 try:
-                    cls._pool.closeall()
+                    instance.closeall()
                 except Exception as e:
                     logging.warning(f"关闭 PostgreSQL 连接池时出错: {e}")
-                cls._pool = None
-                cls._instance = None
-                logging.info("PostgreSQL 连接池已关闭")
 
 
 class PostgreSQLTaskPool(BaseTaskPool):
@@ -380,6 +383,7 @@ class PostgreSQLTaskPool(BaseTaskPool):
             raise ImportError("psycopg2 不可用，请安装: pip install psycopg2-binary")
 
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
+        self._connection_lock = threading.RLock()
 
         self.table_name = self._validate_identifier(table_name, "table_name")
         self.schema_name = self._validate_identifier(schema_name, "schema_name")
@@ -476,6 +480,10 @@ class PostgreSQLTaskPool(BaseTaskPool):
             使用 extras.RealDictCursor，查询结果为字典格式:
             {"column_name": value, ...}
         """
+        with self._connection_lock:
+            return self._execute_with_connection(callback, is_write)
+
+    def _execute_with_connection(self, callback: Any, is_write: bool) -> Any:
         conn = None
         cursor = None
 
@@ -787,6 +795,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
     ) -> WritebackReceipt:
         """Write one transaction and distinguish rollback from unknown commit."""
 
+        with self._connection_lock:
+            return self._update_task_results_locked(batch_id, results)
+
+    def _update_task_results_locked(
+        self, batch_id: str, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
 
@@ -979,6 +993,12 @@ class PostgreSQLTaskPool(BaseTaskPool):
     ) -> WritebackReceipt:
         """Read back every expected PostgreSQL output value by primary key."""
 
+        with self._connection_lock:
+            return self._reconcile_task_results_locked(batch_id, results)
+
+    def _reconcile_task_results_locked(
+        self, batch_id: str, results: dict[Any, dict[str, Any]]
+    ) -> WritebackReceipt:
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
         try:
@@ -1100,17 +1120,15 @@ class PostgreSQLTaskPool(BaseTaskPool):
             return self.execute_with_connection(_reload, is_write=False)
         except Exception as e:
             logging.error(f"执行重载记录 {record_id} 数据操作失败: {e}")
-            return None
+            raise
 
     def close(self) -> None:
-        """
-        关闭连接池
-
-        释放所有 PostgreSQL 数据库连接。
-        连接池是全局单例，关闭后其他实例也会受影响。
-        """
-        logging.info("请求关闭 PostgreSQL 连接池...")
-        PostgreSQLConnectionPoolManager.close_pool()
+        """幂等释放本任务的连接池引用，不关闭其他任务仍使用的池。"""
+        # to_thread 的等待者取消后，查询仍可能执行；先等连接归还再释放引用。
+        with self._connection_lock:
+            if self.pool is not None:
+                connection_pool, self.pool = self.pool, None
+                PostgreSQLConnectionPoolManager.close_pool(connection_pool)
 
     # ==================== 内部方法 ====================
 

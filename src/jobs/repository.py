@@ -377,7 +377,7 @@ class FileJobRepository:
         def apply(current: JobState) -> JobState:
             target = status
             if current.status == JobStatus.CANCELLING:
-                if status in TERMINAL_JOB_STATUSES:
+                if status in TERMINAL_JOB_STATUSES or status == JobStatus.BLOCKED:
                     target = JobStatus.CANCELLED
                 elif status == JobStatus.INTERRUPTED:
                     target = JobStatus.CANCELLING

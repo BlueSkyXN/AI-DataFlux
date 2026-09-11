@@ -37,7 +37,7 @@ SQLite 是 Python 标准库自带的嵌入式数据库，无需额外安装依�
             - reload_task_data(record_id) -> dict | None
                 SELECT 重新加载指定记录的输入数据
             - close() -> None
-                关闭当前线程的数据库连接
+                等待本任务数据库操作结束并关闭任务独占连接
 
         Token 估算方法:
             - sample_unprocessed_rows(sample_size) -> list[dict]
@@ -72,7 +72,7 @@ SQLite 是 Python 标准库自带的嵌入式数据库，无需额外安装依�
 
 核心特性:
     - 零配置: Python 标准库自带，即装即用
-    - 线程级连接: 每个线程独立连接，避免线程安全问题
+    - 任务级连接: 每个任务独占连接，通过锁串行化跨线程访问
     - WAL 模式: 提升并发读取性能
     - 轻量级: 单文件数据库，便于部署和备份
     - 事务支持: 手动事务管理，批量更新原子性
@@ -142,19 +142,20 @@ WAL 模式优化:
     ✗ 多用户并发
 
 注意事项:
-    1. SQLite 连接不能跨线程共享
-    2. 使用 threading.local() 管理线程级连接
+    1. 任务池的连接允许跨线程使用，但数据库操作必须持有任务级锁
+    2. 独立使用 SQLiteConnectionManager 时仍使用线程本地缓存
     3. 事务需要手动 BEGIN/COMMIT/ROLLBACK
     4. 数据库文件需要写权限
 """
 
 import asyncio
+from functools import wraps
 import logging
 import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Concatenate, ParamSpec, TypeVar
 
 from .base import BaseTaskPool
 from .contracts import (
@@ -253,22 +254,28 @@ class SQLiteConnectionManager:
         connections = cls._thread_local.connections
         if path_to_use not in connections:
             logging.debug(f"为线程 {threading.current_thread().name} 创建 SQLite 连接")
-            conn = sqlite3.connect(
-                path_to_use,
-                check_same_thread=False,  # 允许跨线程（需谨慎）
-                timeout=30.0,  # 锁等待超时
-                isolation_level=None,  # 自动提交模式，事务需手动管理
-            )
-            conn.row_factory = sqlite3.Row  # 字典式访问
+            connections[path_to_use] = cls._open_connection(path_to_use)
 
-            # 启用 WAL 模式提升并发性能
+        return connections[path_to_use]
+
+    @staticmethod
+    def _open_connection(path: str) -> sqlite3.Connection:
+        """创建连接；调用方负责串行访问和释放，初始化失败不遗留句柄。"""
+        conn = sqlite3.connect(
+            path,
+            check_same_thread=False,
+            timeout=30.0,
+            isolation_level=None,
+        )
+        try:
+            conn.row_factory = sqlite3.Row  # 字典式访问
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
-
-            connections[path_to_use] = conn
-
-        return connections[path_to_use]
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     @classmethod
     def close_connection(cls, db_path: str | None = None) -> None:
@@ -300,6 +307,25 @@ class SQLiteConnectionManager:
                 logging.warning(f"关闭 SQLite 连接时出错: {e}")
 
 
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def _sqlite_operation(
+    method: Callable[Concatenate["SQLiteTaskPool", _P], _T],
+) -> Callable[Concatenate["SQLiteTaskPool", _P], _T]:
+    """数据库操作与关闭共用任务级锁，避免关闭仍在执行的查询或事务。"""
+
+    @wraps(method)
+    def execute(self: "SQLiteTaskPool", /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        with self._connection_lock:
+            if self._closed:
+                raise RuntimeError("SQLite task pool is closed")
+            return method(self, *args, **kwargs)
+
+    return execute
+
+
 class SQLiteTaskPool(BaseTaskPool):
     """
     SQLite 数据源任务池
@@ -308,7 +334,7 @@ class SQLiteTaskPool(BaseTaskPool):
     轻量级实现，适合本地开发和中小规模数据处理。
 
     与 MySQL/PostgreSQL 版本的差异:
-        1. 无连接池: 使用线程级单例连接
+        1. 每个任务池独占连接，数据库操作与关闭串行执行
         2. 手动事务: 需要显式 BEGIN/COMMIT
         3. 标识符引用: 使用方括号 [column]
         4. 类型系统: 动态类型，无需严格匹配
@@ -358,6 +384,9 @@ class SQLiteTaskPool(BaseTaskPool):
             sqlite3.Error: 数据库连接失败
         """
         super().__init__(columns_to_extract, columns_to_write, require_all_input_fields)
+        self._connection_lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
+        self._closed = False
 
         self.db_path = Path(db_path).resolve()
         if not self.db_path.exists():
@@ -376,7 +405,11 @@ class SQLiteTaskPool(BaseTaskPool):
         self.select_columns = list(set(["id"] + self.columns_to_extract))
 
         # 验证数据库和表
-        self._validate_table()
+        try:
+            self._validate_table()
+        except BaseException:
+            self.close()
+            raise
 
         # 分片状态
         self.current_shard_id = -1
@@ -387,6 +420,15 @@ class SQLiteTaskPool(BaseTaskPool):
             f"SQLiteTaskPool 初始化完成，数据库: {self.db_path}, 表: {self.table_name}"
         )
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """在任务级锁内取得本实例的连接，不使用线程本地的公共缓存。"""
+        if self._connection is None:
+            self._connection = SQLiteConnectionManager._open_connection(
+                str(self.db_path)
+            )
+        return self._connection
+
+    @_sqlite_operation
     def _validate_table(self) -> None:
         """
         验证目标表是否存在
@@ -396,18 +438,17 @@ class SQLiteTaskPool(BaseTaskPool):
         Raises:
             ValueError: 表不存在
         """
-        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+        conn = self._get_connection()
         cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (self.table_name,),
-        )
-
-        if cursor.fetchone() is None:
-            raise ValueError(f"表 '{self.table_name}' 在数据库中不存在")
-
-        cursor.close()
+        try:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (self.table_name,),
+            )
+            if cursor.fetchone() is None:
+                raise ValueError(f"表 '{self.table_name}' 在数据库中不存在")
+        finally:
+            cursor.close()
 
     @staticmethod
     def _validate_identifier(identifier: str, field_name: str) -> str:
@@ -426,6 +467,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
     # ==================== 核心接口实现 ====================
 
+    @_sqlite_operation
     def get_total_task_count(self) -> int:
         """
         获取未处理任务总数
@@ -433,7 +475,7 @@ class SQLiteTaskPool(BaseTaskPool):
         Returns:
             int: 未处理任务数量；查询失败时抛出异常
         """
-        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+        conn = self._get_connection()
         cursor = conn.cursor()
         try:
             where_clause = self._build_unprocessed_condition()
@@ -448,6 +490,7 @@ class SQLiteTaskPool(BaseTaskPool):
         finally:
             cursor.close()
 
+    @_sqlite_operation
     def get_processed_task_count(self) -> int:
         """
         获取已处理任务总数
@@ -457,7 +500,7 @@ class SQLiteTaskPool(BaseTaskPool):
         Returns:
             int: 已处理任务数量；查询失败时抛出异常
         """
-        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+        conn = self._get_connection()
         cursor = conn.cursor()
         try:
             where_clause = self._build_processed_condition()
@@ -472,6 +515,7 @@ class SQLiteTaskPool(BaseTaskPool):
         finally:
             cursor.close()
 
+    @_sqlite_operation
     def get_id_boundaries(self) -> tuple[Any, Any]:
         """
         获取表中 ID 的边界值
@@ -481,7 +525,7 @@ class SQLiteTaskPool(BaseTaskPool):
             表为空或查询失败返回 (0, 0)
         """
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             sql = (
@@ -504,6 +548,7 @@ class SQLiteTaskPool(BaseTaskPool):
             logging.error(f"获取 ID 边界时出错: {e}")
             return (0, 0)
 
+    @_sqlite_operation
     def initialize_shard(self, shard_id: int, min_id: Any, max_id: Any) -> int:
         """
         初始化分片，从数据库加载指定 ID 范围的未处理任务
@@ -519,7 +564,7 @@ class SQLiteTaskPool(BaseTaskPool):
         shard_tasks: list[tuple[Any, dict[str, Any]]] = []
 
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             # 构建查询
@@ -598,40 +643,42 @@ class SQLiteTaskPool(BaseTaskPool):
         ):
             raise ValueError("invalid SQLite cursor")
 
-        def read_page() -> TaskBatch:
-            connection = SQLiteConnectionManager.get_connection(str(self.db_path))
-            db_cursor = connection.cursor()
-            try:
-                columns = ", ".join(f"[{col}]" for col in self.select_columns)
-                where = self._build_unprocessed_condition()
-                params: list[Any] = []
-                keyset = ""
-                if cursor is not None:
-                    keyset = "id > ? AND "
-                    params.append(cursor["last_id"])
-                params.append(limit)
-                db_cursor.execute(
-                    f"SELECT {columns} FROM [{self.table_name}] "
-                    f"WHERE {keyset}{where} ORDER BY id ASC LIMIT ?",
-                    tuple(params),
-                )
-                rows = db_cursor.fetchall()
-            finally:
-                db_cursor.close()
-            records = tuple(
-                TaskRecord(
-                    record_id=row["id"],
-                    data={col: row[col] for col in self.columns_to_extract},
-                )
-                for row in rows
-            )
-            next_cursor = (
-                {"last_id": records[-1].record_id} if len(records) == limit else None
-            )
-            return TaskBatch(records=records, next_cursor=next_cursor)
+        return await asyncio.to_thread(self._scan_page, cursor, limit)
 
-        return await asyncio.to_thread(read_page)
+    @_sqlite_operation
+    def _scan_page(self, cursor: Any | None, limit: int) -> TaskBatch:
+        connection = self._get_connection()
+        db_cursor = connection.cursor()
+        try:
+            columns = ", ".join(f"[{col}]" for col in self.select_columns)
+            where = self._build_unprocessed_condition()
+            params: list[Any] = []
+            keyset = ""
+            if cursor is not None:
+                keyset = "id > ? AND "
+                params.append(cursor["last_id"])
+            params.append(limit)
+            db_cursor.execute(
+                f"SELECT {columns} FROM [{self.table_name}] "
+                f"WHERE {keyset}{where} ORDER BY id ASC LIMIT ?",
+                tuple(params),
+            )
+            rows = db_cursor.fetchall()
+        finally:
+            db_cursor.close()
+        records = tuple(
+            TaskRecord(
+                record_id=row["id"],
+                data={col: row[col] for col in self.columns_to_extract},
+            )
+            for row in rows
+        )
+        next_cursor = (
+            {"last_id": records[-1].record_id} if len(records) == limit else None
+        )
+        return TaskBatch(records=records, next_cursor=next_cursor)
 
+    @_sqlite_operation
     def update_task_results(
         self,
         batch_id: str,
@@ -687,7 +734,7 @@ class SQLiteTaskPool(BaseTaskPool):
                 atomic=True,
             )
 
-        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+        conn = self._get_connection()
         cursor = conn.cursor()
         statement_failure: WritebackItem | None = None
         try:
@@ -771,6 +818,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
         return WritebackReceipt.committed(batch_id, results, atomic=True)
 
+    @_sqlite_operation
     def reconcile_task_results(
         self,
         batch_id: str,
@@ -780,7 +828,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
         if not results:
             return WritebackReceipt.committed(batch_id, (), atomic=True)
-        conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+        conn = self._get_connection()
         cursor = conn.cursor()
         items: list[WritebackItem] = []
         try:
@@ -846,6 +894,7 @@ class SQLiteTaskPool(BaseTaskPool):
             atomic=True,
         )
 
+    @_sqlite_operation
     def reload_task_data(self, record_id: Any) -> dict[str, Any] | None:
         """
         重新加载任务的原始输入数据
@@ -856,16 +905,14 @@ class SQLiteTaskPool(BaseTaskPool):
         Returns:
             dict[str, Any] | None: 输入数据字典，记录不存在返回 None
         """
+        conn = self._get_connection()
+        cursor = conn.cursor()
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
-            cursor = conn.cursor()
-
             cols_str = ", ".join(f"[{c}]" for c in self.columns_to_extract)
             sql = f"SELECT {cols_str} FROM [{self.table_name}] WHERE id = ?"
 
             cursor.execute(sql, (record_id,))
             row = cursor.fetchone()
-            cursor.close()
 
             if row:
                 return {col: row[col] for col in self.columns_to_extract}
@@ -875,16 +922,21 @@ class SQLiteTaskPool(BaseTaskPool):
 
         except Exception as e:
             logging.error(f"重载记录 {record_id} 数据失败: {e}")
-            return None
+            raise
+        finally:
+            cursor.close()
 
     def close(self) -> None:
-        """
-        关闭当前线程的数据库连接
-
-        释放数据库资源。其他线程的连接不受影响。
-        """
-        logging.info("关闭 SQLite 连接...")
-        SQLiteConnectionManager.close_connection(str(self.db_path))
+        """等待本任务的数据库操作结束后释放连接，不触及其他任务或线程缓存。"""
+        with self._connection_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._connection is not None:
+                try:
+                    self._connection.close()
+                finally:
+                    self._connection = None
 
     # ==================== 内部方法 ====================
 
@@ -937,6 +989,7 @@ class SQLiteTaskPool(BaseTaskPool):
 
     # ==================== Token 估算采样 ====================
 
+    @_sqlite_operation
     def sample_unprocessed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """
         采样未处理的行 (用于输入 token 估算)
@@ -948,7 +1001,7 @@ class SQLiteTaskPool(BaseTaskPool):
             采样数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             if not self.columns_to_extract:
@@ -980,6 +1033,7 @@ class SQLiteTaskPool(BaseTaskPool):
             logging.error(f"采样未处理行失败: {e}")
             return []
 
+    @_sqlite_operation
     def sample_processed_rows(self, sample_size: int) -> list[dict[str, Any]]:
         """
         采样已处理的行 (用于输出 token 估算)
@@ -991,7 +1045,7 @@ class SQLiteTaskPool(BaseTaskPool):
             采样数据列表 [{column: value, ...}, ...]，包含输出列
         """
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             if not self.write_colnames:
@@ -1023,6 +1077,7 @@ class SQLiteTaskPool(BaseTaskPool):
             logging.error(f"采样已处理行失败: {e}")
             return []
 
+    @_sqlite_operation
     def fetch_all_rows(self, columns: list[str]) -> list[dict[str, Any]]:
         """
         获取所有行 (忽略处理状态)
@@ -1034,7 +1089,7 @@ class SQLiteTaskPool(BaseTaskPool):
             所有行的数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             if not columns:
@@ -1061,6 +1116,7 @@ class SQLiteTaskPool(BaseTaskPool):
             logging.error(f"获取所有行失败: {e}")
             return []
 
+    @_sqlite_operation
     def fetch_all_processed_rows(self, columns: list[str]) -> list[dict[str, Any]]:
         """
         获取所有已处理行 (仅输出已完成的记录)
@@ -1072,7 +1128,7 @@ class SQLiteTaskPool(BaseTaskPool):
             已处理行的数据列表 [{column: value, ...}, ...]
         """
         try:
-            conn = SQLiteConnectionManager.get_connection(str(self.db_path))
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             if not columns:

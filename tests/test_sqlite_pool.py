@@ -36,12 +36,173 @@ SQLite 数据源任务池单元测试
         test_require_any_input_field               验证任一输入列非空即可
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 import sqlite3
 import time
 from unittest.mock import MagicMock
 from src.data.contracts import CommitDisposition
 from src.data.sqlite import SQLiteTaskPool, SQLiteConnectionManager
+
+
+@pytest.fixture
+def tracked_sqlite(tmp_path, monkeypatch):
+    path = tmp_path / "owned.db"
+    connect = sqlite3.connect
+    connection = connect(path)
+    connection.execute(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, input TEXT, output TEXT)"
+    )
+    connection.execute("INSERT INTO tasks VALUES (1, 'hello', NULL)")
+    connection.commit()
+    connection.close()
+    opened = []
+
+    def track(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        if args and str(args[0]) == str(path.resolve()):
+            opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", track)
+    yield path, opened
+    for connection in opened:
+        connection.close()
+    SQLiteConnectionManager.close_connection(str(path))
+
+
+def assert_connections_closed(connections):
+    assert connections
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_async_close_releases_connections_from_all_threads(tracked_sqlite):
+    path, opened = tracked_sqlite
+    pool = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"})
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        barrier = threading.Barrier(2)
+
+        def read():
+            barrier.wait(timeout=2)
+            return pool.reload_task_data(1)
+
+        futures = [executor.submit(read) for _ in range(2)]
+        assert [future.result(timeout=3) for future in futures] == [
+            {"input": "hello"}
+        ] * 2
+        await pool.aclose()
+        assert_connections_closed(opened)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_close_does_not_close_same_database_other_owner(tracked_sqlite):
+    path, opened = tracked_sqlite
+    first = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"})
+    first_connections = list(opened)
+    second = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"})
+    second_connections = opened[len(first_connections) :]
+    try:
+        assert (
+            second_connections
+        ), "different task pools must not share an unowned connection"
+        await first.aclose()
+        first.close()
+        assert_connections_closed(first_connections)
+        assert all(
+            connection.execute("SELECT 1").fetchone()[0] == 1
+            for connection in second_connections
+        )
+        assert (
+            await second.write_results("second", {1: {"answer": "done"}})
+        ).committed_ids == (1,)
+    finally:
+        first.close()
+        await second.aclose()
+    assert_connections_closed(opened)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_closed_pool_does_not_reopen_connections(tracked_sqlite):
+    path, opened = tracked_sqlite
+    pool = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"})
+    await pool.aclose()
+    with pytest.raises(RuntimeError, match="closed"):
+        await pool.reload([1])
+    assert_connections_closed(opened)
+
+
+def test_sqlite_failed_constructor_closes_allocated_connection(tracked_sqlite):
+    path, opened = tracked_sqlite
+    with pytest.raises(ValueError, match="不存在"):
+        SQLiteTaskPool(path, "missing", ["input"], {"answer": "output"})
+    assert_connections_closed(opened)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_write", [False, True])
+async def test_sqlite_async_close_drains_inflight_transaction(
+    tracked_sqlite, monkeypatch, cancel_write
+):
+    path, opened = tracked_sqlite
+    pool = SQLiteTaskPool(path, "tasks", ["input"], {"answer": "output"})
+    started, close_started = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def trace(statement):
+        if statement.startswith("UPDATE"):
+            loop.call_soon_threadsafe(started.set)
+            release.wait(timeout=3)
+
+    opened[0].set_trace_callback(trace)
+    close = pool.close
+
+    def observed_close():
+        loop.call_soon_threadsafe(close_started.set)
+        close()
+
+    monkeypatch.setattr(pool, "close", observed_close)
+    write = asyncio.create_task(pool.write_results("write", {1: {"answer": "done"}}))
+    closing = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if cancel_write:
+            write.cancel()
+        closing = asyncio.create_task(pool.aclose())
+        await asyncio.wait_for(close_started.wait(), timeout=2)
+        done, _ = await asyncio.wait({closing}, timeout=0.05)
+        assert not done, "close must wait for the active transaction"
+        release.set()
+        if cancel_write:
+            with pytest.raises(asyncio.CancelledError):
+                await write
+        else:
+            assert (await write).committed_ids == (1,)
+        await closing
+        assert_connections_closed(opened)
+        verification = sqlite3.connect(path)
+        try:
+            assert (
+                verification.execute("SELECT output FROM tasks WHERE id=1").fetchone()[
+                    0
+                ]
+                == "done"
+            )
+        finally:
+            verification.close()
+    finally:
+        release.set()
+        await asyncio.gather(
+            write, *([closing] if closing else []), return_exceptions=True
+        )
+        monkeypatch.setattr(pool, "close", close)
+        await pool.aclose()
 
 
 def test_two_database_pools_keep_reads_writes_and_close_isolated(tmp_path):
@@ -60,7 +221,7 @@ def test_two_database_pools_keep_reads_writes_and_close_isolated(tmp_path):
         assert pools[1].reload_task_data(1) == {"input": "B"}
         receipt = pools[0].update_task_results("a-write", {1: {"answer": "answer-A"}})
         assert receipt.committed_ids == (1,)
-        connection_b = SQLiteConnectionManager.get_connection(str(paths[1]))
+        connection_b = pools[1]._get_connection()
         pools[0].close()
         assert connection_b.execute("SELECT input FROM tasks").fetchone()[0] == "B"
         for path, expected in zip(paths, ("answer-A", None)):

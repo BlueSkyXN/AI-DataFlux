@@ -74,8 +74,7 @@ def test_mysql_connection_pool_manager_lifecycle(monkeypatch):
     constructor = MagicMock(return_value=fake_pool)
     monkeypatch.setattr(mysql_module, "MYSQL_AVAILABLE", True)
     monkeypatch.setattr(mysql_module.pooling, "MySQLConnectionPool", constructor)
-    MySQLConnectionPoolManager._instance = None
-    MySQLConnectionPoolManager._pool = None
+    MySQLConnectionPoolManager.close_pool()
     config = {
         "host": "localhost",
         "user": "user",
@@ -84,20 +83,22 @@ def test_mysql_connection_pool_manager_lifecycle(monkeypatch):
     }
     try:
         assert MySQLConnectionPoolManager.get_pool(config, pool_size=3) is fake_pool
-        assert MySQLConnectionPoolManager.get_pool(config) is fake_pool
+        assert MySQLConnectionPoolManager.get_pool(config, pool_size=3) is fake_pool
+        assert MySQLConnectionPoolManager.get_pool() is fake_pool
+        constructor.assert_called_once()
         assert constructor.call_args.kwargs["pool_size"] == 3
         assert constructor.call_args.kwargs["client_flags"]
     finally:
         MySQLConnectionPoolManager.close_pool()
-    assert MySQLConnectionPoolManager._pool is None
+    assert not MySQLConnectionPoolManager._pools
+    fake_pool._remove_connections.assert_called_once()
 
 
 def test_mysql_connection_pool_manager_requires_config(monkeypatch):
     from src.data import mysql as mysql_module
 
     monkeypatch.setattr(mysql_module, "MYSQL_AVAILABLE", True)
-    MySQLConnectionPoolManager._instance = None
-    MySQLConnectionPoolManager._pool = None
+    MySQLConnectionPoolManager.close_pool()
     with pytest.raises(ValueError, match="必须提供"):
         MySQLConnectionPoolManager.get_pool()
 
@@ -279,7 +280,6 @@ def test_mysql_sampling_and_full_scans(mysql_pool):
     [
         ("get_id_boundaries", (), (0, 0)),
         ("initialize_shard", (0, 1, 2), 0),
-        ("reload_task_data", (1,), None),
         ("sample_unprocessed_rows", (1,), []),
         ("sample_processed_rows", (1,), []),
         ("fetch_all_rows", (["input_text"],), []),

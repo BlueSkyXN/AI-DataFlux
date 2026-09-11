@@ -94,9 +94,7 @@ class TestPostgreSQLConnectionPoolManager:
         """测试首次调用时创建连接池"""
         from src.data.postgresql import PostgreSQLConnectionPoolManager
 
-        # 重置单例状态
-        PostgreSQLConnectionPoolManager._instance = None
-        PostgreSQLConnectionPoolManager._pool = None
+        PostgreSQLConnectionPoolManager.close_pool()
 
         mock_pool_instance = MagicMock()
         mock_pool_module.ThreadedConnectionPool.return_value = mock_pool_instance
@@ -109,21 +107,21 @@ class TestPostgreSQLConnectionPoolManager:
             "database": "testdb",
         }
 
-        result = PostgreSQLConnectionPoolManager.get_pool(
-            config=config, max_connections=5
-        )
-
-        assert result == mock_pool_instance
-        mock_pool_module.ThreadedConnectionPool.assert_called_once()
+        try:
+            result = PostgreSQLConnectionPoolManager.get_pool(
+                config=config, max_connections=5
+            )
+            assert result == mock_pool_instance
+            mock_pool_module.ThreadedConnectionPool.assert_called_once()
+        finally:
+            PostgreSQLConnectionPoolManager.close_pool()
 
     @patch("src.data.postgresql.POSTGRESQL_AVAILABLE", True)
     def test_get_pool_raises_without_config(self):
         """测试首次调用不提供配置时抛出异常"""
         from src.data.postgresql import PostgreSQLConnectionPoolManager
 
-        # 重置单例状态
-        PostgreSQLConnectionPoolManager._instance = None
-        PostgreSQLConnectionPoolManager._pool = None
+        PostgreSQLConnectionPoolManager.close_pool()
 
         with pytest.raises(ValueError, match="首次获取连接池必须提供数据库配置"):
             PostgreSQLConnectionPoolManager.get_pool()
@@ -133,9 +131,7 @@ class TestPostgreSQLConnectionPoolManager:
         """测试 psycopg2 不可用时抛出 ImportError"""
         from src.data.postgresql import PostgreSQLConnectionPoolManager
 
-        # 重置单例状态
-        PostgreSQLConnectionPoolManager._instance = None
-        PostgreSQLConnectionPoolManager._pool = None
+        PostgreSQLConnectionPoolManager.close_pool()
 
         with pytest.raises(ImportError, match="psycopg2 不可用"):
             PostgreSQLConnectionPoolManager.get_pool(config={"host": "localhost"})
