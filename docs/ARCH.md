@@ -347,7 +347,7 @@ flowchart TB
   end
 
   subgraph Core["核心处理层 (组件化)"]
-    Processor[core/processor.py<br/>(协调者)]
+    Processor["core/processor.py<br/>(协调者)"]
     Scheduler[core/scheduler.py]
     Validator[core/validator.py]
     TokenEst[core/token_estimator.py]

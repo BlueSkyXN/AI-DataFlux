@@ -1,5 +1,25 @@
 # AI-DataFlux 4.0 工作区验证与剩余交付项
 
+## 分支收尾检查（2026-09-11）
+
+本节是当前源码快照；后续各节保留历史验证过程，其中的“未提交”“尚无远端分支”和失败结果仅适用于各自记录的时间与提交，不代表本次状态。
+
+本轮将已有的未提交修复整理为三个提交，没有把未完成的 4.0 验收改写为通过：
+
+- `e31e4adb4c465da92ac3b9523aa0918b08e3eb57`：MySQL/PostgreSQL 按连接配置复用并按使用者释放；SQLite 使用任务独占连接；异步取消等待数据库操作和资源清理结束；恢复时未收敛 checkpoint 阻止假完成；持久化取消请求优先于 Worker 终态。
+- `1ff7c36ccdc43487f03b5e55a23c753f5485a687`：Chat/Responses 流的客户端取消不再被计为上游故障，也不会使健康路由进入退避。
+- `c876233fd87c2f9a9909c04b5f3722d428736718`：Job resume 后重新订阅事件，关闭旧订阅并忽略旧回调。
+
+当前本地验证：非 integration `716 passed, 1 skipped, 13 deselected`；integration `11 passed, 2 skipped`，两个 skip 是未启用 disposable MySQL/PostgreSQL；前端 Vitest `5 files / 10 tests`，Playwright mock API E2E `5 passed`，ESLint 与 production build 通过。Ruff、固定 Black 25.11.0、mypy（66 files）、canonical v4 example validate 与 diff whitespace 检查通过。系统 Black 26.3.1 的两处格式意见没有用于改写 CI 的固定格式基线。
+
+coverage 总体 line/branch 为 `81.44% / 68.37%`，jobs/core-runner/gateway line 为 `93.55% / 90.09% / 89.64%`，现有门槛全部通过。本地 integration 包含真实 Control/Supervisor/Gateway 进程与临时 CSV，但上游仍是本地假 provider，不是外部业务 UAT。
+
+远端已回读 `ceabe97d9442af02f6dd3317f41b20b19f436963` 的 [Test](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34186565099) 和 [PyInstaller](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34186049659) 均为 success。这些历史成功不能替代上述新提交的 exact-head CI。
+
+分支关系已确认：PR #23 的两个提交完整包含于 4.0 研发线；PR #21 分支与主线 squash 提交的 tree 完全一致，残留远端分支已删除。`v0`、`v1` 与合同冻结的 `codex/4.0-bootstrap` 保留为历史版本。没有删除未合并的有效 4.0 工作，也没有创建 tag、Release、执行部署或真实 Feishu/provider 写入。
+
+当前阻断边界不变：Acceptance Ledger 仍有 `UNREVIEWED`，真实 Feishu/provider UAT、接受 SHA 登记及最终 Promotion 门禁尚未整体完成；本轮本地回归和分支整理不构成 Promotion 声明。
+
 ## 当前正确性修复轮（2026-09-08）
 
 本轮以已推送的 `c34f503ba64379b4b8a901a6f282c273e355a981` 为基线，修复评审复现的问题；以下历史小节描述此前的本地快照，不代表当前仍未提交或所有单文件产物都不可运行。
