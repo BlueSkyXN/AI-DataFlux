@@ -176,18 +176,41 @@ test('cancel queued job reaches cancelled', async ({ page }) => {
   await expect(page.getByText('cancelled').first()).toBeVisible();
 });
 
-test('resume failed job returns it to queued', async ({ page }) => {
+test('resume failed job returns it to queued and restarts its event stream', async ({ page }) => {
+  let resumed = false;
+  let streamRequests = 0;
   await mockEventRoutes(page);
-  await page.route('**/api/v1/jobs/*/resume', (route) => json(route, job('queued', 2)));
+  await page.route('**/api/v1/jobs/*/events/stream?*', (route) => {
+    streamRequests += 1;
+    const event = {
+      seq: resumed ? 2 : 1,
+      ts: 1_700_000_001,
+      type: resumed ? 'worker_started' : 'worker_failed',
+      job_id: jobId,
+      payload: {},
+    };
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`,
+    });
+  });
+  await page.route('**/api/v1/jobs/*/resume', (route) => {
+    resumed = true;
+    return json(route, job('queued', 2));
+  });
   await page.route('**/api/v1/jobs', (route) =>
-    json(route, { jobs: [job('failed')], resource }),
+    json(route, { jobs: [resumed ? job('queued', 2) : job('failed')], resource }),
   );
 
   await openApp(page);
   await page.getByRole('button', { name: 'Jobs' }).click();
   await expect(page.getByText('writeback failed')).toBeVisible();
+  await expect(page.getByText('#1 worker_failed')).toBeVisible();
   await page.getByRole('button', { name: 'Resume' }).click();
   await expect(page.getByText('queued').first()).toBeVisible();
+  await expect(page.getByText('#2 worker_started')).toBeVisible();
+  expect(streamRequests).toBe(2);
 });
 
 test('config save sends If-Match and surfaces ETag conflict', async ({ page }) => {

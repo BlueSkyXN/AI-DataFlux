@@ -34,6 +34,7 @@ export default function Jobs({ selection, language }: JobsProps) {
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [eventError, setEventError] = useState<string | null>(null);
+  const [eventStreamVersion, setEventStreamVersion] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -72,11 +73,14 @@ export default function Jobs({ selection, language }: JobsProps) {
           closeStream = streamJobEvents(selectedJobId, {
             afterSeq: response.next_seq,
             onEvent: (event) => {
+              if (!active) return;
               setEvents((current) =>
                 current.some((item) => item.seq === event.seq) ? current : [...current, event],
               );
             },
-            onError: (reason) => setEventError(reason.message),
+            onError: (reason) => {
+              if (active) setEventError(reason.message);
+            },
           });
         })
         .catch((reason) => {
@@ -88,7 +92,7 @@ export default function Jobs({ selection, language }: JobsProps) {
       window.clearTimeout(initial);
       closeStream?.();
     };
-  }, [selectedJobId]);
+  }, [selectedJobId, eventStreamVersion]);
 
   const selected = useMemo(
     () => data?.jobs.find((job) => job.job_id === selectedJobId) ?? null,
@@ -127,6 +131,7 @@ export default function Jobs({ selection, language }: JobsProps) {
     setError(null);
     try {
       replaceJob(action === 'cancel' ? await cancelJob(job.job_id) : await resumeJob(job.job_id));
+      if (action === 'resume') setEventStreamVersion((current) => current + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {

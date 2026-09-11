@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import * as api from '../api';
-import type { JobState } from '../types';
+import type { JobEvent, JobState } from '../types';
 import Jobs from './Jobs';
 
 function job(overrides: Partial<JobState> = {}): JobState {
@@ -41,14 +41,15 @@ function job(overrides: Partial<JobState> = {}): JobState {
 }
 
 describe('Jobs page', () => {
-  it('renders persisted/failed/resource state and resumes a failed job', async () => {
-    const failed = job();
+  it.each(['failed', 'blocked'] as const)('resubscribes to events after resuming a %s job', async (status) => {
+    const failed = job({ status });
     vi.spyOn(api, 'fetchJobs').mockResolvedValue({
       jobs: [failed],
       resource: { status: 'normal', pressure: false, cpu_percent: 20, memory_percent: 30 },
     });
     vi.spyOn(api, 'fetchJobEvents').mockResolvedValue({ events: [], next_seq: 0 });
-    vi.spyOn(api, 'streamJobEvents').mockReturnValue(() => {});
+    const closeStream = vi.fn();
+    const stream = vi.spyOn(api, 'streamJobEvents').mockReturnValue(closeStream);
     const resume = vi.spyOn(api, 'resumeJob').mockResolvedValue(
       job({ status: 'queued', last_error: null, finished_at: null, revision: 2 }),
     );
@@ -64,8 +65,28 @@ describe('Jobs page', () => {
     expect(await screen.findByText('writeback failed')).toBeInTheDocument();
     expect(screen.getByText('Persisted')).toBeInTheDocument();
     expect(screen.getByText('max_in_flight')).toBeInTheDocument();
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
     await user.click(screen.getByRole('button', { name: 'Resume' }));
     await waitFor(() => expect(resume).toHaveBeenCalledWith(failed.job_id));
     expect((await screen.findAllByText('queued')).length).toBeGreaterThan(0);
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
+    expect(closeStream).toHaveBeenCalledTimes(1);
+    const event: JobEvent = {
+      seq: 2,
+      ts: 1_700_000_002,
+      type: 'worker_started',
+      job_id: failed.job_id,
+      record_id: null,
+      attempt: null,
+      payload: {},
+    };
+    act(() => {
+      stream.mock.calls[1][1].onEvent(event);
+      stream.mock.calls[1][1].onEvent(event);
+      stream.mock.calls[0][1].onEvent({ ...event, seq: 3, type: 'stale_event' });
+    });
+    expect(await screen.findByText('#2 worker_started')).toBeInTheDocument();
+    expect(screen.getAllByText('#2 worker_started')).toHaveLength(1);
+    expect(screen.queryByText('#3 stale_event')).not.toBeInTheDocument();
   });
 });
