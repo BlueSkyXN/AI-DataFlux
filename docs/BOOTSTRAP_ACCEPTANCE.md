@@ -7,8 +7,8 @@
 | Bootstrap commit | `406b72894d504a60bdc1ffec003c3ef60d6a6550` |
 | Bootstrap tree | `cc6c9fffb7f929bd111c0e2c4fe1783b0306df1c` |
 | 冻结分支 | `codex/4.0-bootstrap` |
-| 活动研发线 | `codex/4.0-integration` |
-| 当前 Ledger 状态 | c34f503 评审发现数据隔离与恢复反例；当前修复及 CI 证据见 V4_LOCAL_VALIDATION。SQLite/文件路径重新进入验收，整体仍有 `UNREVIEWED`，不能 Promotion |
+| 活动研发线 | `main`（`4.0.0-dev` 开发主线，不是 Promotion） |
+| 当前 Ledger 状态 | 当前修复及 CI 证据见 V4_LOCAL_VALIDATION；19 项仍为 `UNREVIEWED`。开发分支合入主线不改变接受状态，不能 Promotion |
 
 本 Ledger 追踪 Bootstrap 中每个主要模块如何进入 AI-DataFlux 4.0。Bootstrap 的本地测试通过只说明它可以作为 extraction/baseline 起点，不构成模块验收。
 

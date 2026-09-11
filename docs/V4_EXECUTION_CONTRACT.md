@@ -8,7 +8,7 @@
 | Bootstrap commit | `406b72894d504a60bdc1ffec003c3ef60d6a6550` |
 | Bootstrap tree | `cc6c9fffb7f929bd111c0e2c4fe1783b0306df1c` |
 | 冻结分支 | `codex/4.0-bootstrap` |
-| 活动研发线 | `codex/4.0-integration` |
+| 活动研发线 | `main`（`4.0.0-dev`；原 `codex/4.0-integration` 历史保留在主线） |
 | 原型源码版本 | `3.2.0-dev` |
 | 目标开发版本 | `4.0.0-dev` |
 
@@ -194,6 +194,8 @@ H4 Product and Release
 ~~~
 
 ## 9. Acceptance 与 Promotion
+
+2026-09-11 起，开发主线集成与正式 Promotion 分开：`main` 可以承载通过源码回归和 CI 的 `4.0.0-dev` 开发提交。合入 `main` 不表示模块已正式接受、UAT 已完成或版本可以发布；不得因此清除 Ledger 的 `UNREVIEWED`、补造接受 SHA 或跳过以下门禁。Bootstrap 冻结快照继续保留，3.x 配置不兼容边界不变。
 
 Promotion 前必须同时满足：
 

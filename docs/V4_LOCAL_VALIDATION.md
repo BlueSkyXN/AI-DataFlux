@@ -14,11 +14,11 @@
 
 coverage 总体 line/branch 为 `81.44% / 68.37%`，jobs/core-runner/gateway line 为 `93.55% / 90.09% / 89.64%`，现有门槛全部通过。本地 integration 包含真实 Control/Supervisor/Gateway 进程与临时 CSV，但上游仍是本地假 provider，不是外部业务 UAT。
 
-远端已回读 `ceabe97d9442af02f6dd3317f41b20b19f436963` 的 [Test](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34186565099) 和 [PyInstaller](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34186049659) 均为 success。这些历史成功不能替代上述新提交的 exact-head CI。
+远端已回读包含上述修复的 `01838e6802be767a07c2f9c58584df6543b373b9`：[Test](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34584747293) 全部 45 个任务 success；[PyInstaller](https://github.com/BlueSkyXN/AI-DataFlux/actions/runs/34584748172) 全部 8 个平台/变体构建 success，Create Release 按非 tag 规则 skipped。后续主线整合只更新这三份验收/验证文档，运行源码、测试和构建配置与该验证提交一致；主线推送后的 CI 仍需按实际 HEAD 独立回读。
 
 分支关系已确认：PR #23 的两个提交完整包含于 4.0 研发线；PR #21 分支与主线 squash 提交的 tree 完全一致，残留远端分支已删除。`v0`、`v1` 与合同冻结的 `codex/4.0-bootstrap` 保留为历史版本。没有删除未合并的有效 4.0 工作，也没有创建 tag、Release、执行部署或真实 Feishu/provider 写入。
 
-当前阻断边界不变：Acceptance Ledger 仍有 `UNREVIEWED`，真实 Feishu/provider UAT、接受 SHA 登记及最终 Promotion 门禁尚未整体完成；本轮本地回归和分支整理不构成 Promotion 声明。
+当前开发主线为 `main`，保留 `4.0.0-dev` 版本和完整提交历史；开发分支整合不等同于正式 Promotion。发布阻断边界不变：Acceptance Ledger 仍有 19 项 `UNREVIEWED`，真实 Feishu/provider UAT、接受 SHA 登记及最终 Promotion 门禁尚未整体完成；本轮回归和主线整合不构成正式验收或发布声明。
 
 ## 当前正确性修复轮（2026-09-08）
 
